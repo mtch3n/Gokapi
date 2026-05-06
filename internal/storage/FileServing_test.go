@@ -9,6 +9,7 @@ import (
 	"net/textproto"
 	"os"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/forceu/gokapi/internal/configuration"
@@ -573,7 +574,7 @@ func TestServeFile(t *testing.T) {
 	test.IsEqualBool(t, result, true)
 	r := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
-	ServeFile(file, w, r, true, true, false)
+	ServeFile(file, w, r, true, true, false, false)
 	_, result = GetFile(idNewFile)
 	test.IsEqualBool(t, result, false)
 
@@ -594,7 +595,7 @@ func TestServeFile(t *testing.T) {
 		w = httptest.NewRecorder()
 		file, result = GetFile("awsTest1234567890123")
 		test.IsEqualBool(t, result, true)
-		ServeFile(file, w, r, false, true, false)
+		ServeFile(file, w, r, false, true, false, false)
 		if aws.IsMockApi {
 			test.ResponseBodyContains(t, w, "https://redirect.url")
 		} else {
@@ -619,7 +620,7 @@ func TestServeFile(t *testing.T) {
 	file.Encryption.Nonce = nonce
 	r = httptest.NewRequest("GET", "/", nil)
 	w = httptest.NewRecorder()
-	ServeFile(file, w, r, true, true, false)
+	ServeFile(file, w, r, true, true, false, false)
 	test.ResponseBodyContains(t, w, "Error decrypting file")
 }
 
@@ -892,4 +893,60 @@ func TestReplaceFile(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	_, ok = GetFile(newFile.Id)
 	test.IsEqualBool(t, ok, false)
+}
+func TestParallelDownloads(t *testing.T) {
+	const allowedDownloads = 5
+
+	singleDownloadFile := models.File{
+		Id:                 "only5downloads",
+		Name:               "only5downloads.txt",
+		Size:               "1KB",
+		SHA1:               "replacetest1",
+		ContentType:        "text/plain",
+		DownloadsRemaining: allowedDownloads,
+		UnlimitedDownloads: false,
+		UnlimitedTime:      true,
+		AwsBucket:          "",
+		SizeBytes:          1024,
+		Encryption: models.EncryptionInfo{
+			IsEncrypted:         false,
+			IsEndToEndEncrypted: false,
+			DecryptionKey:       nil,
+			Nonce:               nil,
+		},
+	}
+	database.SaveMetaData(singleDownloadFile)
+
+	synctest.Test(t, func(t *testing.T) {
+		const workers = 50
+		results := make(chan bool, workers)
+
+		for i := 0; i < workers; i++ {
+			go func() {
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest("GET", "/"+singleDownloadFile.Id, nil)
+
+				// The mutex inside ServeFile should serialize the decrement logic.
+				success := ServeFile(singleDownloadFile, w, r, false, true, false, true)
+				results <- success
+			}()
+		}
+
+		synctest.Wait()
+		close(results)
+
+		var successCount int
+		var failureCount int
+
+		for res := range results {
+			if res {
+				successCount++
+			} else {
+				failureCount++
+			}
+		}
+
+		test.IsEqualInt(t, successCount, allowedDownloads)
+		test.IsEqualInt(t, failureCount, workers-allowedDownloads)
+	})
 }

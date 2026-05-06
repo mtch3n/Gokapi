@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -353,8 +354,11 @@ type paramFilesDownloadZip struct {
 	foundHeaders    map[string]bool
 }
 
-func (p *paramFilesDownloadZip) ProcessParameter(_ *http.Request) error {
-	p.Ids = strings.Split(p.FileIds, ",")
+func (p *paramFilesDownloadZip) ProcessParameter(r *http.Request) error {
+	ids := strings.Split(p.FileIds, ",")
+	slices.Sort(ids)
+	p.Ids = slices.Compact(ids)
+	p.WebRequest = r
 	return nil
 }
 

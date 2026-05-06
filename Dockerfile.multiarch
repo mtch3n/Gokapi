@@ -1,0 +1,21 @@
+## Used by Github workflow for publishing Docker image.
+
+FROM alpine:3.23
+
+ARG BINARY_NAME
+
+RUN addgroup -S gokapi && adduser -S gokapi -G gokapi
+RUN apk update && apk add --no-cache su-exec tini ca-certificates curl tzdata && \
+    mkdir /app && touch /app/.isdocker
+
+COPY dockerentry.sh /app/run.sh
+COPY bin/${BINARY_NAME} /app/gokapi
+
+RUN chmod +x /app/gokapi /app/run.sh
+
+WORKDIR /app
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/app/run.sh"]
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+  CMD curl --fail http://127.0.0.1:53842 || exit 1
