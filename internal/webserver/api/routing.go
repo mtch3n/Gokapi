@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
 	"github.com/forceu/gokapi/internal/storage/chunking"
@@ -431,6 +432,7 @@ func (p *paramFilesDuplicate) ProcessParameter(r *http.Request) error {
 	}
 	if p.foundHeaders["filename"] {
 		p.RequestedChanges |= storage.ParamName
+		p.FileName = helper.SanitiseFilename(p.FileName)
 	}
 	return nil
 }
@@ -735,9 +737,8 @@ func (p *paramChunkComplete) ProcessParameter(_ *http.Request) error {
 		}
 	}
 
-	if p.ContentType == "" {
-		p.ContentType = "application/octet-stream"
-	}
+	p.FileName = helper.SanitiseFilename(p.FileName)
+	p.ContentType = helper.SanitiseContentType(p.ContentType)
 	p.FileHeader = chunking.FileHeader{
 		Filename:    p.FileName,
 		ContentType: p.ContentType,
@@ -780,9 +781,8 @@ type paramChunkUploadRequestComplete struct {
 }
 
 func (p *paramChunkUploadRequestComplete) ProcessParameter(_ *http.Request) error {
-	if p.ContentType == "" {
-		p.ContentType = "application/octet-stream"
-	}
+	p.ContentType = helper.SanitiseContentType(p.ContentType)
+	p.FileName = helper.SanitiseFilename(p.FileName)
 	p.FileHeader = chunking.FileHeader{
 		Filename:    p.FileName,
 		ContentType: p.ContentType,
