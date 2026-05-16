@@ -697,6 +697,7 @@ func apiPasteAdd(w http.ResponseWriter, r requestParser, user models.User) {
 		UserId:              user.Id,
 		AllowedDownloads:    request.AllowedDownloads,
 		ExpiryDays:          request.ExpiryDays,
+		ExpiryTimestamp:     time.Now().Add(time.Duration(request.ExpiryDays) * time.Hour * 24).Unix(),
 		MaxMemory:           configuration.Get().MaxMemory,
 		UnlimitedDownload:   request.UnlimitedDownloads,
 		UnlimitedTime:       request.UnlimitedExpiry,

@@ -161,7 +161,7 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	}
 	expiryDaysInt, err := strconv.Atoi(expiryDays)
 	if err != nil {
-		expiryDaysInt = 14
+		expiryDaysInt = 0
 	}
 
 	unlimitedDownload := values.Get("isUnlimitedDownload") == "true"

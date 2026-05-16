@@ -47,40 +47,70 @@ function pasteInsertRow(info) {
     const tbody = document.getElementById("paste-tbody");
     const row = document.createElement("tr");
     row.id = "pasterow-" + info.Id;
-
     const viewsRemaining = info.UnlimitedDownloads ? "Unlimited" : info.DownloadsRemaining;
 
-    row.innerHTML = `
-        <td>${escapeHtml(info.Name)}</td>
-        <td><span id="paste-created-${info.Id}"></span></td>
-        <td>${escapeHtml(String(info.DownloadCount))}</td>
-        <td><span id="paste-expiry-${info.Id}"></span></td>
-        <td>${escapeHtml(String(viewsRemaining))}</td>`;
+    const cells = [
+        { text: info.Name },
+        { id: `paste-created-${info.Id}` },
+        { text: String(info.DownloadCount) },
+        { id: `paste-expiry-${info.Id}` },
+        { text: String(viewsRemaining) },
+    ];
+
     if (canViewOtherUploads) {
-        row.innerHTML = row.innerHTML + `
-        <td>${userNameSelf}</td>`;
+        cells.push({ text: userNameSelf });
     }
-    row.innerHTML = row.innerHTML + `
-        <td>
-          <div class="btn-group" role="group">
-            <button type="button" class="btn btn-outline-light btn-sm" title="Copy URL"
-              onclick="pasteCopyUrl('${escapeHtml(info.UrlDownload)}', '${escapeHtml(info.Id)}')">
-              <i class="bi bi-copy"></i>
-            </button>
-            <button type="button" class="btn btn-outline-danger btn-sm" title="Delete"
-              onclick="pasteDelete('${escapeHtml(info.Id)}')">
-              <i class="bi bi-trash3"></i>
-            </button>
-          </div>
-        </td>`;
+
+    for (const cell of cells) {
+        const td = document.createElement("td");
+        td.className = "newItem";
+        if (cell.id) {
+            const span = document.createElement("span");
+            span.id = cell.id;
+            td.appendChild(span);
+        } else {
+            td.textContent = cell.text;
+        }
+        row.appendChild(td);
+    }
+
+    const actionsTd = document.createElement("td");
+    actionsTd.className = "newItem";
+
+    const btnGroup = document.createElement("div");
+    btnGroup.className = "btn-group";
+    btnGroup.role = "group";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "btn btn-outline-light btn-sm";
+    copyBtn.title = "Copy URL";
+    copyBtn.addEventListener("click", () => pasteCopyUrl(info.UrlDownload, info.Id));
+    const copyIcon = document.createElement("i");
+    copyIcon.className = "bi bi-copy";
+    copyBtn.appendChild(copyIcon);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "btn btn-outline-danger btn-sm";
+    deleteBtn.title = "Delete";
+    deleteBtn.addEventListener("click", () => pasteDelete(info.Id));
+    const deleteIcon = document.createElement("i");
+    deleteIcon.className = "bi bi-trash3";
+    deleteBtn.appendChild(deleteIcon);
+
+    btnGroup.appendChild(copyBtn);
+    btnGroup.appendChild(deleteBtn);
+    actionsTd.appendChild(btnGroup);
+    row.appendChild(actionsTd);
 
     tbody.prepend(row);
-    insertDateWithNegative(info.UploadDate, "paste-created-" + info.Id, "Unknown");
 
+    insertDateWithNegative(info.UploadDate, `paste-created-${info.Id}`, "Unknown");
     if (info.UnlimitedTime) {
-        document.getElementById("paste-expiry-" + info.Id).innerText = "Never";
+        document.getElementById(`paste-expiry-${info.Id}`).innerText = "Never";
     } else {
-        insertFileRequestExpiry(info.ExpireAt, "paste-expiry-" + info.Id);
+        insertFileRequestExpiry(info.ExpireAt, `paste-expiry-${info.Id}`);
     }
 }
 

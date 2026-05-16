@@ -2666,7 +2666,7 @@
           },
           "expiryDays": {
             "type": "integer",
-            "description": "How many days the paste will be stored. Default of 14 will be used if omitted. Unlimited if 0 is passed"
+            "description": "How many days the paste will be stored. Unlimited if 0 or omitted"
           },
           "password": {
             "type": "string",
