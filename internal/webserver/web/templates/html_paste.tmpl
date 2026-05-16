@@ -18,13 +18,13 @@
 
         {{/* ── Paste input area ── */}}
         <div class="mb-3">
-          <textarea id="paste-content" class="form-control bg-dark text-light border-secondary"
-            rows="10" placeholder="Paste your text here…" style="font-family: monospace; resize: vertical;"></textarea>
+          <textarea id="paste-content" class="form-control bg-dark text-light border-secondary placeholder-white"
+            rows="10" placeholder="Paste your text here..." style="font-family: monospace; resize: vertical;"></textarea>
         </div>
 
         {{/* ── Optional title ── */}}
         <div class="mb-3">
-          <input id="paste-title" type="text" class="form-control bg-dark text-light border-secondary"
+          <input id="paste-title" type="text" class="form-control bg-dark text-light border-secondary placeholder-white"
             placeholder="Title (optional)">
         </div>
 
@@ -75,15 +75,8 @@
 
         </div>
 
-        {{/* ── Toast ── */}}
-        <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
-          <div id="paste-toast" class="toast align-items-center text-white border-0" role="alert" aria-live="assertive">
-            <div class="d-flex">
-              <div class="toast-body" id="paste-toast-body">URL copied to clipboard!</div>
-              <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-            </div>
-          </div>
-        </div>
+        
+	<div id="toastnotification" class="toastnotification" data-default="URL copied to clipboard">Toast Text</div>
 
         <hr class="border-secondary">
 

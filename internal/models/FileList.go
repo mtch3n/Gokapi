@@ -110,6 +110,9 @@ func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool) (FileApi
 }
 
 func getDownloadUrl(input FileApiOutput, serverUrl string, useFilename bool) string {
+	if input.IsPaste {
+		return serverUrl + "view?id=" + input.Id
+	}
 	if useFilename {
 		return serverUrl + "d/" + input.Id + "/" + escapeFilename(input.Name)
 	}

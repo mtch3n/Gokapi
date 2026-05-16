@@ -116,11 +116,8 @@ function pasteInsertRow(info) {
 
 function pasteCopyUrl(url, id) {
     navigator.clipboard.writeText(url).then(() => {
-        const toastEl = document.getElementById("paste-toast");
-        document.getElementById("paste-toast-body").innerText = "URL copied to clipboard!";
-        bootstrap.Toast.getOrCreateInstance(toastEl).show();
+        showToast(1000);
     }).catch(() => {
-        prompt("Copy this URL:", url);
     });
 }
 

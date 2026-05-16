@@ -102,33 +102,34 @@ func Start() {
 	loadExpiryImage()
 
 	mux.Handle("/", filesystemHandler(webserverDir))
-	mux.HandleFunc("/auth/token", requireLogin(handleGenerateAuthToken, false, false))
 	mux.HandleFunc("/admin", requireLogin(showAdminMenu, true, false))
 	mux.HandleFunc("/api/", processApi)
 	mux.HandleFunc("/apiKeys", requireLogin(showApiAdmin, true, false))
+	mux.HandleFunc("/auth/token", requireLogin(handleGenerateAuthToken, false, false))
 	mux.HandleFunc("/changePassword", requireLogin(changePassword, true, true))
 	mux.HandleFunc("/d", showDownload)
+	mux.HandleFunc("/d/{id}/{filename}", redirectFromFilename)
+	mux.HandleFunc("/dh/{id}/{filename}", downloadFileWithNameInUrl)
 	mux.HandleFunc("/downloadFile", downloadFile)
 	mux.HandleFunc("/downloadPresigned", requireLogin(downloadPresigned, false, false))
 	mux.HandleFunc("/e2eSetup", requireLogin(showE2ESetup, true, false))
 	mux.HandleFunc("/error", showError)
 	mux.HandleFunc("/filerequests", requireLogin(showUploadRequest, true, false))
-	mux.HandleFunc("/paste", requireLogin(showPaste, true, false))
 	mux.HandleFunc("/forgotpw", forgotPassword)
 	mux.HandleFunc("/h/", showHotlink)
 	mux.HandleFunc("/hotlink/", showHotlink) // backward compatibility
 	mux.HandleFunc("/index", showIndex)
 	mux.HandleFunc("/login", showLogin)
-	mux.HandleFunc("/logs", requireLogin(showLogs, true, false))
 	mux.HandleFunc("/logout", doLogout)
+	mux.HandleFunc("/logs", requireLogin(showLogs, true, false))
+	mux.HandleFunc("/paste", requireLogin(showPaste, true, false))
 	mux.HandleFunc("/publicUpload", showPublicUpload)
 	mux.HandleFunc("/uploadChunk", requireLogin(uploadChunk, false, false))
 	mux.HandleFunc("/uploadStatus", requireLogin(sse.GetStatusSSE, false, false))
 	mux.HandleFunc("/users", requireLogin(showUserAdmin, true, false))
+	mux.HandleFunc("/view", showPasteContent)
 	mux.Handle("/main.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveDownloadWasm)))
 	mux.Handle("/e2e.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveE2EWasm)))
-	mux.HandleFunc("/d/{id}/{filename}", redirectFromFilename)
-	mux.HandleFunc("/dh/{id}/{filename}", downloadFileWithNameInUrl)
 
 	addMuxForCustomContent(mux)
 
@@ -657,6 +658,41 @@ func showHotlink(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(imageExpiredPicture)
 		return
 	}
+}
+
+// Handling of /view
+// Hotlinks an image or returns a static error image if image has expired
+func showPasteContent(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	keyId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	file, ok := storage.GetFile(keyId)
+	if !ok || !file.IsPaste {
+		redirectOnIncorrectId(w, r, "error")
+		return
+	}
+	content, err := storage.ServePaste(file, r, true, true)
+	if err != nil {
+		if !errors.Is(err, storage.ErrFileExpired) {
+			fmt.Println("Error serving paste content: " + err.Error())
+			redirectOnIncorrectId(w, r, "error")
+			return
+		}
+	}
+	config := configuration.Get()
+	err = templateFolder.ExecuteTemplate(w, "paste_view", pasteDisplayView{
+		IsAdminView:    false,
+		IsDownloadView: true,
+		BaseUrl:        config.ServerUrl,
+		PublicName:     config.PublicName,
+		PasteContent:   content,
+		Name:           file.Name,
+		Size:           file.Size,
+		Id:             file.Id,
+		Cipher:         file.Encryption.DecryptionKey,
+		IsPasswordView: false,
+		CustomContent:  customStatic{},
+	})
+	helper.CheckIgnoreTimeout(err)
 }
 
 // Checks if a file is associated with the GET parameter from the current URL
@@ -1225,18 +1261,6 @@ type genericView struct {
 	CustomContent     customStatic
 }
 
-// A view containing parameters for an oauth error
-type oauthErrorView struct {
-	IsAdminView          bool
-	IsDownloadView       bool
-	PublicName           string
-	IsAuthDenied         bool
-	ErrorGenericMessage  string
-	ErrorProvidedName    string
-	ErrorProvidedMessage string
-	CustomContent        customStatic
-}
-
 // A view containing parameters for the public upload page
 type publicUploadView struct {
 	IsAdminView    bool
@@ -1246,4 +1270,20 @@ type publicUploadView struct {
 	MaxServerSize  int
 	CustomContent  customStatic
 	FileRequest    *models.FileRequest
+}
+
+// A view containing parameters for the public upload page
+type pasteDisplayView struct {
+	IsAdminView        bool
+	IsDownloadView     bool
+	EndToEndEncryption bool
+	BaseUrl            string
+	PublicName         string
+	PasteContent       string
+	Name               string
+	Size               string
+	Id                 string
+	Cipher             []byte
+	IsPasswordView     bool
+	CustomContent      customStatic
 }

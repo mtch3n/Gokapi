@@ -667,9 +667,9 @@ func GetFileByHotlink(id string) (models.File, bool) {
 	return GetFile(fileId)
 }
 
-// ServeFile subtracts a download allowance and serves the file to the browser
-// Returns false if the file expired during the request (most likely race condition due to parallel downloads, requires recheckExpiry)
-func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDownload, increaseCounter, forceDecryption, recheckExpiry bool) bool {
+// tryAcquireDownload locks the file and subtracts a download allowance.
+// Returns (file, true) if the file is valid and the download is allowed, (file, false) if the file is expired or the download is not allowed
+func tryAcquireDownload(file models.File, recheckExpiry, increaseCounter bool) (models.File, bool) {
 	apimutex.Lock(apimutex.TypeMetaData, file.Id)
 	if recheckExpiry {
 		if !file.UnlimitedDownloads {
@@ -677,7 +677,7 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		}
 		if IsExpiredFile(file, time.Now().Unix()) {
 			apimutex.Unlock(apimutex.TypeMetaData, file.Id)
-			return false
+			return file, false
 		}
 	}
 	if increaseCounter {
@@ -687,9 +687,24 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		go sse.PublishDownloadCount(file)
 	}
 	apimutex.Unlock(apimutex.TypeMetaData, file.Id)
+	return file, true
+}
 
+func publishDownloadStatistics(file models.File, r *http.Request) {
 	logging.LogDownload(file, r, configuration.Get().SaveIp)
 	go serverstats.AddTraffic(uint64(file.SizeBytes))
+}
+
+// ServeFile subtracts a download allowance and serves the file to the browser
+// Returns false if the file expired during the request (most likely race condition due to parallel downloads, requires recheckExpiry)
+func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDownload, increaseCounter, forceDecryption, recheckExpiry bool) bool {
+	var isAllowed bool
+	file, isAllowed = tryAcquireDownload(file, recheckExpiry, increaseCounter)
+	if !isAllowed {
+		return false
+	}
+
+	publishDownloadStatistics(file, r)
 
 	if !file.IsLocalStorage() {
 		// If non-blocking, we are not setting a download complete status as there is no reliable way to
@@ -732,6 +747,31 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	return true
 }
 
+var ErrFileExpired = errors.New("file has expired")
+
+// ServePaste subtracts a download allowance and returns the Paste content
+// Returns false if the file expired during the request (most likely race condition due to parallel downloads, requires recheckExpiry)
+func ServePaste(file models.File, r *http.Request, increaseCounter, recheckExpiry bool) (string, error) {
+	var isAllowed bool
+	file, isAllowed = tryAcquireDownload(file, recheckExpiry, increaseCounter)
+	if !isAllowed {
+		return "", ErrFileExpired
+	}
+
+	publishDownloadStatistics(file, r)
+
+	fileHandler, _, err := getFileHandler(file, configuration.Get().DataDir)
+	defer fileHandler.Close()
+	if err != nil {
+		return "", err
+	}
+	content, err := io.ReadAll(fileHandler)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
 // Returns the filename if unique or a new filename in the format "Name (x).ext"
 func makeFilenameUnique(filename string, nameMap *map[string]bool) string {
 	ext := filepath.Ext(filename)
@@ -762,7 +802,6 @@ func ServeFilesAsZip(files []models.File, filename string, w http.ResponseWriter
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", filename))
 	w.WriteHeader(http.StatusOK)
 
-	saveIp := configuration.Get().SaveIp
 	zipWriter := zip.NewWriter(w)
 	defer zipWriter.Close()
 	filenames := make(map[string]bool)
@@ -775,8 +814,7 @@ func ServeFilesAsZip(files []models.File, filename string, w http.ResponseWriter
 		}
 		entryWriter, err := zipWriter.CreateHeader(header)
 		helper.Check(err)
-		logging.LogDownload(file, r, saveIp)
-		go serverstats.AddTraffic(uint64(file.SizeBytes))
+		publishDownloadStatistics(file, r)
 		if !file.IsLocalStorage() {
 			statusId := downloadstatus.SetDownload(file)
 			err = aws.Stream(entryWriter, file)
