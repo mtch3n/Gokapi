@@ -21,20 +21,20 @@ function submitPaste() {
         return;
     }
 
-    const title        = document.getElementById("paste-title").value.trim();
-    const limitViews   = document.getElementById("paste-enable-downloads").checked;
-    const limitExpiry  = document.getElementById("paste-enable-expiry").checked;
-    const usePassword  = document.getElementById("paste-enable-password").checked;
+    const title = document.getElementById("paste-title").value.trim();
+    const limitViews = document.getElementById("paste-enable-downloads").checked;
+    const limitExpiry = document.getElementById("paste-enable-expiry").checked;
+    const usePassword = document.getElementById("paste-enable-password").checked;
 
-    const allowedDownloads = limitViews  ? parseInt(document.getElementById("paste-downloads").value, 10) : 0;
-    const expiryDays       = limitExpiry ? parseInt(document.getElementById("paste-expiry").value,    10) : 0;
-    const password         = usePassword ? document.getElementById("paste-password").value : "";
+    const allowedDownloads = limitViews ? parseInt(document.getElementById("paste-downloads").value, 10) : 0;
+    const expiryDays = limitExpiry ? parseInt(document.getElementById("paste-expiry").value, 10) : 0;
+    const password = usePassword ? document.getElementById("paste-password").value : "";
 
     apiAddPaste(content, title, allowedDownloads, expiryDays, password)
         .then(data => {
             pasteInsertRow(data);
             document.getElementById("paste-content").value = "";
-            document.getElementById("paste-title").value   = "";
+            document.getElementById("paste-title").value = "";
             pasteCopyUrl(data.UrlDownload, data.Id);
         })
         .catch(error => {
@@ -45,8 +45,8 @@ function submitPaste() {
 
 function pasteInsertRow(info) {
     const tbody = document.getElementById("paste-tbody");
-    const row   = document.createElement("tr");
-    row.id      = "pasterow-" + info.Id;
+    const row = document.createElement("tr");
+    row.id = "pasterow-" + info.Id;
 
     const viewsRemaining = info.UnlimitedDownloads ? "Unlimited" : info.DownloadsRemaining;
 
@@ -57,10 +57,10 @@ function pasteInsertRow(info) {
         <td><span id="paste-expiry-${info.Id}"></span></td>
         <td>${escapeHtml(String(viewsRemaining))}</td>`;
     if (canViewOtherUploads) {
-    	row.innerHTML = row.innerHTML + `
+        row.innerHTML = row.innerHTML + `
         <td>${userNameSelf}</td>`;
     }
-    	row.innerHTML = row.innerHTML + `
+    row.innerHTML = row.innerHTML + `
         <td>
           <div class="btn-group" role="group">
             <button type="button" class="btn btn-outline-light btn-sm" title="Copy URL"
