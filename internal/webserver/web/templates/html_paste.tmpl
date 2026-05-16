@@ -94,6 +94,7 @@
               <tr>
                 <th scope="col">Title</th>
                 <th scope="col">Created</th>
+                <th scope="col">Views</th>
                 <th scope="col">Expires</th>
                 <th scope="col">Views remaining</th>
                 {{ if .ActiveUser.HasPermissionListOtherUploads }}
@@ -108,6 +109,9 @@
                 <td>{{ .Name }}</td>
                 <td><span id="paste-created-{{ .Id }}"></span>
                   <script>insertDateWithNegative({{ .UploadDate }}, "paste-created-{{ .Id }}", "Unknown");</script>
+                </td>
+                <td>
+                  {{ .DownloadCount }}
                 </td>
                 <td><span id="paste-expiry-{{ .Id }}"></span>
                   <script>
@@ -149,6 +153,12 @@
     </div>
   </div>
 </div>
+
+<script>
+	const canViewOtherUploads = {{ $.ActiveUser.HasPermissionListOtherUploads }};
+	const userNameSelf = '{{ $.ActiveUser.Name }}';
+
+</script>
 
 {{ template "pagename" "Paste"}}
 {{ template "customjs" .}}

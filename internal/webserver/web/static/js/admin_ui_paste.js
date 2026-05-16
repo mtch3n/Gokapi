@@ -32,11 +32,10 @@ function submitPaste() {
 
     apiAddPaste(content, title, allowedDownloads, expiryDays, password)
         .then(data => {
-            const info = data.FileInfo;
-            pasteInsertRow(info);
+            pasteInsertRow(data);
             document.getElementById("paste-content").value = "";
             document.getElementById("paste-title").value   = "";
-            pasteCopyUrl(info.UrlDownload, info.Id);
+            pasteCopyUrl(data.UrlDownload, data.Id);
         })
         .catch(error => {
             alert("Failed to create paste: " + error);
@@ -49,13 +48,19 @@ function pasteInsertRow(info) {
     const row   = document.createElement("tr");
     row.id      = "pasterow-" + info.Id;
 
-    const views = info.UnlimitedDownloads ? "Unlimited" : info.DownloadsRemaining;
+    const viewsRemaining = info.UnlimitedDownloads ? "Unlimited" : info.DownloadsRemaining;
 
     row.innerHTML = `
         <td>${escapeHtml(info.Name)}</td>
         <td><span id="paste-created-${info.Id}"></span></td>
+        <td>${escapeHtml(String(info.DownloadCount))}</td>
         <td><span id="paste-expiry-${info.Id}"></span></td>
-        <td>${escapeHtml(String(views))}</td>
+        <td>${escapeHtml(String(viewsRemaining))}</td>`;
+    if (canViewOtherUploads) {
+    	row.innerHTML = row.innerHTML + `
+        <td>${userNameSelf}</td>`;
+    }
+    	row.innerHTML = row.innerHTML + `
         <td>
           <div class="btn-group" role="group">
             <button type="button" class="btn btn-outline-light btn-sm" title="Copy URL"
