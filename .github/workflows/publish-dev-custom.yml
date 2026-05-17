@@ -95,7 +95,7 @@ jobs:
             --tag f0rc3/gokapi:${{ github.event.inputs.tagname }} \
             $(for platform in "${!PLATFORMS[@]}"; do
                 binary="${PLATFORMS[$platform]}"
-                echo "f0rc3/gokapi:tmp-${binary}"
+                echo "f0rc3/gokapi:tmp-${{ github.event.inputs.tagname }}-${binary}"
               done)
 
           # Delete intermediate tags
