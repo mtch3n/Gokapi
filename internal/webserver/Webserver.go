@@ -566,6 +566,57 @@ type LoginView struct {
 	CustomContent  customStatic
 }
 
+// requirePasswordView checks if it is required to display the password view for this file.
+// If a password needs to be entered, isRequired will be true and showPasswordView() must be called
+// redirectRequired is true if a correct password was entered, but a redirect is required to prevent
+// a confirmation dialog when refreshing the page
+func requirePasswordView(file models.File, w http.ResponseWriter, r *http.Request) (isRequired, isIncorrectAttempt bool) {
+	if file.PasswordHash == "" {
+		return false, false
+	}
+	if isValidPwCookie(r, file) {
+		return false, false
+	}
+	_ = r.ParseForm()
+	enteredPassword := r.PostForm.Get("password")
+	if enteredPassword == "" {
+		return true, false
+	}
+
+	ip := logging.GetIpAddress(r)
+	ratelimiter.WaitOnDownloadPassword(ip)
+
+	isValid, isLegacy := configuration.VerifyPassword(enteredPassword, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
+	if isValid {
+		// Migrate legacy passwords to the new format
+		// Will be removed in the future
+		if isLegacy {
+			file.PasswordHash = configuration.HashPassword(enteredPassword, false, "")
+			database.SaveMetaData(file)
+		}
+		writeFilePwCookie(w, file)
+		return false, false
+	}
+	return true, true
+}
+
+func showPasswordView(file models.File, w http.ResponseWriter, wasIncorrectAttempt bool) {
+	config := configuration.Get()
+	view := DownloadView{
+		Id:             file.Id,
+		IsDownloadView: true,
+		IsPasswordView: true,
+		IsPaste:        file.IsPaste,
+		PublicName:     config.PublicName,
+		BaseUrl:        config.ServerUrl,
+		IsFailedLogin:  wasIncorrectAttempt,
+		UsesHttps:      configuration.UsesHttps(),
+		CustomContent:  customStaticInfo,
+	}
+	err := templateFolder.ExecuteTemplate(w, "download_password", view)
+	helper.CheckIgnoreTimeout(err)
+}
+
 // Handling of /d
 // Checks if a file exists for the submitted ID
 // If it exists, a download form is shown, or a password needs to be entered.
@@ -602,40 +653,56 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if file.PasswordHash != "" && !isValidPwCookie(r, file) {
-		_ = r.ParseForm()
-		enteredPassword := r.PostForm.Get("password")
-		if enteredPassword == "" {
-			view.IsPasswordView = true
-			err := templateFolder.ExecuteTemplate(w, "download_password", view)
-			helper.CheckIgnoreTimeout(err)
-			return
-		}
-
-		ip := logging.GetIpAddress(r)
-		ratelimiter.WaitOnDownloadPassword(ip)
-
-		isValid, isLegacy := configuration.VerifyPassword(enteredPassword, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
-		if isValid {
-			// Migrate legacy passwords to the new format
-			// Will be removed in the future
-			if isLegacy {
-				file.PasswordHash = configuration.HashPassword(enteredPassword, false, "")
-				database.SaveMetaData(file)
-			}
-			writeFilePwCookie(w, file)
-			// redirect so that there is no post data to be resent if user refreshes page
-			redirect(w, r, "d?id="+file.Id)
-			return
-		}
-		view.IsFailedLogin = true
-		view.IsPasswordView = true
-		err := templateFolder.ExecuteTemplate(w, "download_password", view)
-		helper.CheckIgnoreTimeout(err)
+	isPwRequired, isIncorrectAttempt := requirePasswordView(file, w, r)
+	if isPwRequired {
+		showPasswordView(file, w, isIncorrectAttempt)
 		return
 	}
 
 	err := templateFolder.ExecuteTemplate(w, "download", view)
+	helper.CheckIgnoreTimeout(err)
+}
+
+// Handling of /view
+// Hotlinks an image or returns a static error image if image has expired
+func showPasteContent(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	keyId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	file, ok := storage.GetFile(keyId)
+	if !ok || !file.IsPaste {
+		redirectOnIncorrectId(w, r, "error")
+		return
+	}
+
+	isPwRequired, isIncorrectAttempt := requirePasswordView(file, w, r)
+	if isPwRequired {
+		showPasswordView(file, w, isIncorrectAttempt)
+		return
+	}
+
+	content, err := storage.ServePaste(file, r, true, true)
+	if err != nil {
+		if !errors.Is(err, storage.ErrFileExpired) {
+			fmt.Println("Error serving paste content: " + err.Error())
+			redirectOnIncorrectId(w, r, "error")
+			return
+		}
+	}
+
+	config := configuration.Get()
+	err = templateFolder.ExecuteTemplate(w, "paste_view", pasteDisplayView{
+		IsAdminView:    false,
+		IsDownloadView: true,
+		BaseUrl:        config.ServerUrl,
+		PublicName:     config.PublicName,
+		PasteContent:   content,
+		Name:           file.Name,
+		Size:           file.Size,
+		Id:             file.Id,
+		Cipher:         file.Encryption.DecryptionKey,
+		IsPasswordView: false,
+		CustomContent:  customStatic{},
+	})
 	helper.CheckIgnoreTimeout(err)
 }
 
@@ -658,41 +725,6 @@ func showHotlink(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(imageExpiredPicture)
 		return
 	}
-}
-
-// Handling of /view
-// Hotlinks an image or returns a static error image if image has expired
-func showPasteContent(w http.ResponseWriter, r *http.Request) {
-	addNoCacheHeader(w)
-	keyId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
-	file, ok := storage.GetFile(keyId)
-	if !ok || !file.IsPaste {
-		redirectOnIncorrectId(w, r, "error")
-		return
-	}
-	content, err := storage.ServePaste(file, r, true, true)
-	if err != nil {
-		if !errors.Is(err, storage.ErrFileExpired) {
-			fmt.Println("Error serving paste content: " + err.Error())
-			redirectOnIncorrectId(w, r, "error")
-			return
-		}
-	}
-	config := configuration.Get()
-	err = templateFolder.ExecuteTemplate(w, "paste_view", pasteDisplayView{
-		IsAdminView:    false,
-		IsDownloadView: true,
-		BaseUrl:        config.ServerUrl,
-		PublicName:     config.PublicName,
-		PasteContent:   content,
-		Name:           file.Name,
-		Size:           file.Size,
-		Id:             file.Id,
-		Cipher:         file.Encryption.DecryptionKey,
-		IsPasswordView: false,
-		CustomContent:  customStatic{},
-	})
-	helper.CheckIgnoreTimeout(err)
 }
 
 // Checks if a file is associated with the GET parameter from the current URL
@@ -782,6 +814,7 @@ type DownloadView struct {
 	ClientSideDecryption bool
 	EndToEndEncryption   bool
 	UsesHttps            bool
+	IsPaste              bool
 	CustomContent        customStatic
 }
 
