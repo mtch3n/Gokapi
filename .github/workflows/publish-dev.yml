@@ -1,4 +1,4 @@
-name: Docker Publish Dev Multiarch
+name: Build Core Docker - Custom Dev 
 
 on:
   workflow_dispatch:

@@ -1,4 +1,4 @@
-name: Docker Publish CLI Custom Release Multiarch
+name: Build CLI Docker - Custom Release 
 
 on:
   workflow_dispatch:

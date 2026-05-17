@@ -1,4 +1,4 @@
-name: Docker Publish Release Multiarch
+name: Build Core Docker - Release
 
 on:
   workflow_dispatch:
