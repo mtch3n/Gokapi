@@ -264,7 +264,7 @@ func TestHandlerCallback_StateMismatch(t *testing.T) {
 }
 
 func TestHandlerCallback_LoginRequired(t *testing.T) {
-	for _, errCode := range []string{"login_required", "consent_required", "interaction_required"} {
+	for _, errCode := range []string{"login_required", "interaction_required"} {
 		t.Run(errCode, func(t *testing.T) {
 			config.Endpoint.AuthURL = "https://example.com/auth"
 			rr := httptest.NewRecorder()
@@ -273,9 +273,19 @@ func TestHandlerCallback_LoginRequired(t *testing.T) {
 
 			// Should re-initiate login with consent
 			test.IsEqualInt(t, rr.Code, http.StatusFound)
-			test.IsEqualBool(t, containsString(rr.Header().Get("Location"), "prompt=consent"), true)
+			test.IsEqualBool(t, containsString(rr.Header().Get("Location"), "prompt=select_account"), true)
 		})
 	}
+}
+func TestHandlerCallback_ConsentRequired(t *testing.T) {
+	config.Endpoint.AuthURL = "https://example.com/auth"
+	rr := httptest.NewRecorder()
+	url := "/oauth-callback?state=mystate&error=consent_required"
+	HandlerCallback(rr, newRequest(url, "mystate"))
+
+	// Should re-initiate login with consent
+	test.IsEqualInt(t, rr.Code, http.StatusFound)
+	test.IsEqualBool(t, containsString(rr.Header().Get("Location"), "prompt=consent"), true)
 }
 
 func TestHandlerCallback_TokenExchangeFailure(t *testing.T) {
@@ -319,21 +329,23 @@ func TestHandlerCallback_Success(t *testing.T) {
 
 func TestIsLoginRequired(t *testing.T) {
 	cases := []struct {
-		query    string
-		expected bool
+		query           string
+		expectedLogin   bool
+		expectedConsent bool
 	}{
-		{"?error=login_required", true},
-		{"?error=consent_required", true},
-		{"?error=interaction_required", true},
-		{"?error=access_denied", false},
-		{"?error=unknown_error", false},
-		{"?code=123", false},
-		{"", false},
+		{"?error=login_required", true, false},
+		{"?error=consent_required", false, true},
+		{"?error=interaction_required", true, false},
+		{"?error=access_denied", false, false},
+		{"?error=unknown_error", false, false},
+		{"?code=123", false, false},
+		{"", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.query, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/"+tc.query, nil)
-			test.IsEqualBool(t, isLoginRequired(req), tc.expected)
+			test.IsEqualBool(t, isLoginRequired(req), tc.expectedLogin)
+			test.IsEqualBool(t, isConsentRequired(req), tc.expectedConsent)
 		})
 	}
 }

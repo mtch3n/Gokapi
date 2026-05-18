@@ -43,30 +43,46 @@ func Init(baseUrl string, credentials models.AuthenticationConfig) {
 	}
 }
 
+const (
+	promptSilent = iota
+	promptSelectAccount
+	promptConsent
+)
+
 // HandlerLogin is a handler for showing the login screen
-func HandlerLogin(w http.ResponseWriter, r *http.Request) { // If user clicked logout, force consent
-	initLogin(w, r, r.URL.Query().Has("consent"))
+func HandlerLogin(w http.ResponseWriter, r *http.Request) {
+	// If user clicked logout, force account selection
+	if r.URL.Query().Has("consent") {
+		initLogin(w, r, promptConsent)
+		return
+	}
+	initLogin(w, r, promptSilent)
 }
 
-func initLogin(w http.ResponseWriter, r *http.Request, showConsentScreen bool) {
+func initLogin(w http.ResponseWriter, r *http.Request, screenType int) {
 	state := helper.GenerateRandomString(32)
 	setCallbackCookie(w, state)
-	prompt := "none"
-	if showConsentScreen {
+	var prompt string
+	switch screenType {
+	case promptSilent:
+		prompt = "none"
+	case promptSelectAccount:
+		prompt = "select_account"
+	case promptConsent:
 		prompt = "consent"
+	default:
+		panic("invalid screen type")
 	}
 	http.Redirect(w, r, config.AuthCodeURL(state)+"&prompt="+prompt, http.StatusFound)
 }
 
+func isConsentRequired(r *http.Request) bool {
+	return r.URL.Query().Get("error") == "consent_required"
+}
+
 func isLoginRequired(r *http.Request) bool {
-	errorsRequiringLogin := []string{"login_required", "consent_required", "interaction_required"}
 	errorCode := r.URL.Query().Get("error")
-	for _, possibleError := range errorsRequiringLogin {
-		if errorCode == possibleError {
-			return true
-		}
-	}
-	return false
+	return errorCode == "login_required" || errorCode == "interaction_required"
 }
 
 // HandlerCallback is a handler for processing the oauth callback
@@ -81,8 +97,12 @@ func HandlerCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if isConsentRequired(r) {
+		initLogin(w, r, promptConsent)
+		return
+	}
 	if isLoginRequired(r) {
-		initLogin(w, r, true)
+		initLogin(w, r, promptSelectAccount)
 		return
 	}
 
