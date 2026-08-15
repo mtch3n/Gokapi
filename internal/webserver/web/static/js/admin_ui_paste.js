@@ -49,16 +49,28 @@ function pasteInsertRow(info) {
     row.id = "pasterow-" + info.Id;
     const viewsRemaining = info.UnlimitedDownloads ? "Unlimited" : info.DownloadsRemaining;
 
-    const cells = [
-        { text: info.Name },
-        { id: `paste-created-${info.Id}` },
-        { text: String(info.DownloadCount) },
-        { id: `paste-expiry-${info.Id}` },
-        { text: String(viewsRemaining) },
+    const cells = [{
+            id: `cell-name-${info.Id}`,
+            text: info.Name
+        },
+        {
+            id: `paste-created-${info.Id}`
+        },
+        {
+            text: String(info.DownloadCount)
+        },
+        {
+            id: `paste-expiry-${info.Id}`
+        },
+        {
+            text: String(viewsRemaining)
+        },
     ];
 
     if (canViewOtherUploads) {
-        cells.push({ text: userNameSelf });
+        cells.push({
+            text: userNameSelf
+        });
     }
 
     for (const cell of cells) {
@@ -67,6 +79,9 @@ function pasteInsertRow(info) {
         if (cell.id) {
             const span = document.createElement("span");
             span.id = cell.id;
+            if (cell.text) {
+                span.textContent = cell.text;
+            }
             td.appendChild(span);
         } else {
             td.textContent = cell.text;
@@ -93,6 +108,7 @@ function pasteInsertRow(info) {
     const deleteBtn = document.createElement("button");
     deleteBtn.type = "button";
     deleteBtn.className = "btn btn-outline-danger btn-sm";
+    deleteBtn.id = "button-delete-" + info.Id;
     deleteBtn.title = "Delete";
     deleteBtn.addEventListener("click", () => pasteDelete(info.Id));
     const deleteIcon = document.createElement("i");
@@ -117,25 +133,77 @@ function pasteInsertRow(info) {
 function pasteCopyUrl(url, id) {
     navigator.clipboard.writeText(url).then(() => {
         showToast(1000);
-    }).catch(() => {
-    });
+    }).catch(() => {});
 }
 
 function pasteDelete(id) {
-    if (!confirm("Delete this paste?")) {
-        return;
-    }
-    apiFilesDelete(id, 0)
-        .then(() => {
+
+    document.getElementById("button-delete-" + id).disabled = true;
+    apiFilesDelete(id, 10)
+        .then(data => {
             const row = document.getElementById("pasterow-" + id);
             if (row) {
                 row.classList.add("rowDeleting");
                 setTimeout(() => row.remove(), 290);
             }
+            showToastPasteDeletion(id);
+            //notifyWorker({ type: "fileDeleted", id: id });
         })
         .catch(error => {
-            alert("Failed to delete paste: " + error);
-            console.error("Error:", error);
+            alert("Unable to delete paste: " + error);
+            console.error('Error:', error);
+        });
+}
+
+
+function showToastPasteDeletion(id) {
+    hidePasteToast();
+    let notification = document.getElementById("toastnotificationUndo");
+    let filename = document.getElementById("cell-name-" + id).innerText;
+    let filenameToast = document.getElementById("toastPastename");
+    let button = document.getElementById("toastUndoButton");
+
+    filenameToast.innerText = filename;
+
+    button.dataset.fileid = id;
+    hideToast();
+    notification.classList.add("show");
+
+    clearTimeout(toastId);
+    toastId = setTimeout(() => {
+        hideFileToast();
+    }, 5000);
+}
+
+
+
+function hidePasteToast() {
+    document.getElementById("toastnotificationUndo").classList.remove("show");
+}
+
+function addCtrlEnterSubmit() {
+const inputField = document.getElementById('paste-content');
+
+  inputField.addEventListener('keydown', function(event) {
+    if (event.ctrlKey && event.key === 'Enter') {
+      event.preventDefault();
+      submitPaste();
+    }
+  });
+
+}
+
+
+function handleUndoPaste(button) {
+    hidePasteToast();
+    apiFilesRestore(button.dataset.fileid)
+        .then(data => {
+            //notifyWorker({ type: "fileAdded", item: data.FileInfo });
+            pasteInsertRow(data.FileInfo);
+        })
+        .catch(error => {
+            alert("Unable to restore paste: " + error);
+            console.error('Error:', error);
         });
 }
 

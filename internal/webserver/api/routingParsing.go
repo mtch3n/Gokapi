@@ -968,6 +968,16 @@ func (p *paramChunkUploadRequestAdd) ParseRequest(r *http.Request) error {
 		p.FileRequestId = r.Header.Get("fileRequestId")
 	}
 
+	// RequestParser header value "apikey", required: false
+	exists, err = checkHeaderExists(r, "apikey", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["apikey"] = exists
+	if exists {
+		p.ApiKey = r.Header.Get("apikey")
+	}
+
 	return p.ProcessParameter(r)
 }
 
