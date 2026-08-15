@@ -26,11 +26,11 @@ type apiRoute struct {
 	execution        apiFunc              // Execution function for the endpoint
 }
 
-func (r apiRoute) Continue(w http.ResponseWriter, request requestParser, user models.User) {
-	r.execution(w, request, user)
+func (r apiRoute) Continue(w http.ResponseWriter, request requestParser, user models.User, apiKey models.ApiKey) {
+	r.execution(w, request, user, apiKey)
 }
 
-type apiFunc func(w http.ResponseWriter, request requestParser, user models.User)
+type apiFunc func(w http.ResponseWriter, request requestParser, user models.User, apiKey models.ApiKey)
 
 var routes = []apiRoute{
 	{
@@ -749,7 +749,6 @@ func (p *paramChunkComplete) ProcessParameter(_ *http.Request) error {
 
 type paramChunkReserve struct {
 	Id           string `header:"id" required:"true"`
-	ApiKey       string `header:"apikey" unpublished:"true"` // not published in API documentation
 	foundHeaders map[string]bool
 }
 
@@ -760,7 +759,6 @@ func (p *paramChunkReserve) ProcessParameter(_ *http.Request) error {
 type paramChunkUnreserve struct {
 	Id           string `header:"id" required:"true"`
 	Uuid         string `header:"uuid" required:"true"`
-	ApiKey       string `header:"apikey" unpublished:"true"` // not published in API documentation
 	foundHeaders map[string]bool
 }
 

@@ -88,7 +88,7 @@ func writeSessionCookie(w http.ResponseWriter, sessionString string, expiry time
 		Value:    sessionString,
 		Expires:  expiry,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 	}
 	http.SetCookie(w, c)
 }

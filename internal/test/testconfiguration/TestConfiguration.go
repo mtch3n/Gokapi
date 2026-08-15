@@ -75,6 +75,7 @@ func Create(initFiles bool) {
 		_ = os.WriteFile(dataDir+"/replacetest1", []byte("abc"), 0777)
 		_ = os.WriteFile(dataDir+"/replacetest2", []byte("abc"), 0777)
 		_ = os.WriteFile(dataDir+"/replacetest3", []byte("abc"), 0777)
+		_ = os.WriteFile(dataDir+"/replacetest4", []byte("abc"), 0777)
 		_ = os.WriteFile(dataDir+"/pendingdeletion", []byte("ghi"), 0777)
 		_ = os.WriteFile(dataDir+"/unlimitedtest", []byte("def"), 0777)
 		_ = os.WriteFile(baseDir+"/fileupload.jpg", []byte("abc"), 0777)

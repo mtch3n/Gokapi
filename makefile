@@ -45,12 +45,14 @@ build-debug :
 coverage:
 	@echo Generating coverage
 	@echo
+	go generate ./...
 	GOKAPI_AWS_BUCKET="gokapi" GOKAPI_AWS_REGION="eu-central-1" GOKAPI_AWS_KEY="keyid" GOKAPI_AWS_KEY_SECRET="secret" go test ./... -parallel 8 --tags=test,awstest -coverprofile=/tmp/coverage1.out && go tool cover -html=/tmp/coverage1.out
 
 .PHONY: coverage-specific
 coverage-specific:
 	@echo Generating coverage for "$(TEST_PACKAGE)"
 	@echo
+	go generate ./...
 	go test  $(GOPACKAGE)/$(TEST_PACKAGE)/... -parallel 8 --tags=test,awsmock -coverprofile=/tmp/coverage2.out && go tool cover -html=/tmp/coverage2.out	
 
 
@@ -58,6 +60,7 @@ coverage-specific:
 coverage-all:
 	@echo Generating coverage
 	@echo
+	go generate ./...
 	GOKAPI_AWS_BUCKET="gokapi" GOKAPI_AWS_REGION="eu-central-1" GOKAPI_AWS_KEY="keyid" GOKAPI_AWS_KEY_SECRET="secret" go test ./... -parallel 8 --tags=test,awstest -coverprofile=/tmp/coverage1.out && go tool cover -html=/tmp/coverage1.out
 
 
@@ -65,6 +68,7 @@ coverage-all:
 test:
 	@echo Testing with AWS mock 
 	@echo
+	go generate ./...
 	go test ./... -parallel 8 --tags=test,awsmock
 
 
@@ -72,6 +76,7 @@ test:
 test-specific:
 	@echo Testing package "$(TEST_PACKAGE)"
 	@echo
+	go generate ./...
 	go test $(GOPACKAGE)/$(TEST_PACKAGE)/... -parallel 8 -count=1 --tags=test,awsmock
 
 
@@ -79,6 +84,7 @@ test-specific:
 test-all:
 	@echo Testing all tags 
 	@echo
+	go generate ./...
 	go test ./... -parallel 8 --tags=test,noaws
 	go test ./... -parallel 8 --tags=test,awsmock
 	GOKAPI_AWS_BUCKET="gokapi" GOKAPI_AWS_REGION="eu-central-1" GOKAPI_AWS_KEY="keyid" GOKAPI_AWS_KEY_SECRET="secret" go test ./... -parallel 8 --tags=test,awstest

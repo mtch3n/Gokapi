@@ -968,16 +968,6 @@ func (p *paramChunkUploadRequestAdd) ParseRequest(r *http.Request) error {
 		p.FileRequestId = r.Header.Get("fileRequestId")
 	}
 
-	// RequestParser header value "apikey", required: false
-	exists, err = checkHeaderExists(r, "apikey", false, true)
-	if err != nil {
-		return err
-	}
-	p.foundHeaders["apikey"] = exists
-	if exists {
-		p.ApiKey = r.Header.Get("apikey")
-	}
-
 	return p.ProcessParameter(r)
 }
 
@@ -1143,16 +1133,6 @@ func (p *paramChunkReserve) ParseRequest(r *http.Request) error {
 		p.Id = r.Header.Get("id")
 	}
 
-	// RequestParser header value "apikey", required: false
-	exists, err = checkHeaderExists(r, "apikey", false, true)
-	if err != nil {
-		return err
-	}
-	p.foundHeaders["apikey"] = exists
-	if exists {
-		p.ApiKey = r.Header.Get("apikey")
-	}
-
 	return p.ProcessParameter(r)
 }
 
@@ -1186,16 +1166,6 @@ func (p *paramChunkUnreserve) ParseRequest(r *http.Request) error {
 	p.foundHeaders["uuid"] = exists
 	if exists {
 		p.Uuid = r.Header.Get("uuid")
-	}
-
-	// RequestParser header value "apikey", required: false
-	exists, err = checkHeaderExists(r, "apikey", false, true)
-	if err != nil {
-		return err
-	}
-	p.foundHeaders["apikey"] = exists
-	if exists {
-		p.ApiKey = r.Header.Get("apikey")
 	}
 
 	return p.ProcessParameter(r)

@@ -345,7 +345,7 @@ func TestUserCreate(t *testing.T) {
 	testInvalidParameters(t, apiUrl, apiKey.Id, []test.Header{{}}, headerUsername, invalidParameter)
 
 	defer test.ExpectPanic(t)
-	apiCreateUser(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiCreateUser(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestUserChangeRank(t *testing.T) {
@@ -425,7 +425,7 @@ func TestUserChangeRank(t *testing.T) {
 	database.SaveUser(user, false)
 
 	defer test.ExpectPanic(t)
-	apiChangeUserRank(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiChangeUserRank(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestUserDelete(t *testing.T) {
@@ -437,7 +437,7 @@ func TestUserDelete(t *testing.T) {
 	testDeleteUserCall(t, apiKey.Id, deleteUserCallModeInvalidOperator)
 
 	defer test.ExpectPanic(t)
-	apiDeleteUser(nil, &paramAuthCreate{}, models.User{Id: 7})
+	apiDeleteUser(nil, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 const (
@@ -630,7 +630,7 @@ func TestUserPasswordReset(t *testing.T) {
 	test.IsNotEmpty(t, resp.Password)
 
 	defer test.ExpectPanic(t)
-	apiResetPassword(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiResetPassword(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func testUserModifyCall(t *testing.T, apiKey string, userId int, permission string, grant bool) {
@@ -711,7 +711,7 @@ func TestNewApiKey(t *testing.T) {
 	}
 
 	defer test.ExpectPanic(t)
-	apiCreateApiKey(nil, &paramUserCreate{}, models.User{Id: 7})
+	apiCreateApiKey(nil, &paramUserCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestIsValidApiKey(t *testing.T) {
@@ -893,7 +893,7 @@ func TestDeleteApiKey(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 
 	defer test.ExpectPanic(t)
-	apiDeleteKey(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiDeleteKey(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func countApiKeys() int {
@@ -931,7 +931,7 @@ func TestChangeFriendlyName(t *testing.T) {
 	test.IsEqualInt(t, w.Code, 400)
 
 	defer test.ExpectPanic(t)
-	apiChangeFriendlyName(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiChangeFriendlyName(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestApikeyModify(t *testing.T) {
@@ -1005,11 +1005,11 @@ func TestApikeyModify(t *testing.T) {
 
 	for permissionUint, permissionString := range getApiPermMap(t) {
 		test.IsEqualBool(t, retrievedApiKey.HasPermission(permissionUint), false)
-		testApiModifyCall(t, apiKey.Id, retrievedApiKey.Id, permissionString, true)
+		testApiModifyCall(t, apiKey, retrievedApiKey.Id, permissionString, true)
 		retrievedApiKey, ok = database.GetApiKey("modifyTest")
 		test.IsEqualBool(t, ok, true)
 		test.IsEqualBool(t, retrievedApiKey.HasPermission(permissionUint), true)
-		testApiModifyCall(t, apiKey.Id, retrievedApiKey.Id, permissionString, false)
+		testApiModifyCall(t, apiKey, retrievedApiKey.Id, permissionString, false)
 		retrievedApiKey, ok = database.GetApiKey("modifyTest")
 		test.IsEqualBool(t, ok, true)
 		test.IsEqualBool(t, retrievedApiKey.HasPermission(permissionUint), false)
@@ -1020,7 +1020,7 @@ func TestApikeyModify(t *testing.T) {
 	removeUserPermission(t, idUser, models.UserPermGuestUploads)
 }
 
-func testApiModifyCall(t *testing.T, apiKey, targetKey string, permission string, grant bool) {
+func testApiModifyCall(t *testing.T, apiKey models.ApiKey, targetKey string, permission string, grant bool) {
 	const apiUrl = "/auth/modify"
 	const headerApiKeyModify = "targetKey"
 	const headerPermission = "permission"
@@ -1030,7 +1030,7 @@ func testApiModifyCall(t *testing.T, apiKey, targetKey string, permission string
 	if grant {
 		modifier = "GRANT"
 	}
-	w, r := getRecorder(apiUrl, apiKey, []test.Header{{
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
 		Name:  headerApiKeyModify,
 		Value: targetKey,
 	}, {
@@ -1044,7 +1044,7 @@ func testApiModifyCall(t *testing.T, apiKey, targetKey string, permission string
 	test.IsEqualInt(t, w.Code, 200)
 
 	defer test.ExpectPanic(t)
-	apiModifyApiKey(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiModifyApiKey(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 // ## /files ##
@@ -1082,16 +1082,16 @@ func TestDeleteFile(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 
 	apiKey := testAuthorisation(t, "/files/delete", models.ApiPermDelete)
-	testDeleteFileCall(t, apiKey.Id, "", "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
-	testDeleteFileCall(t, apiKey.Id, "invalid", "", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided.","ErrorCode":5}`)
-	testDeleteFileCall(t, apiKey.Id, "smalltestfile1", "invalid", 400, `{"Result":"error","ErrorMessage":"invalid value in header delay supplied","ErrorCode":4}`)
-	testDeleteFileCall(t, apiKey.Id, "smalltestfile1", "", 200, "")
-	testDeleteFileCall(t, apiKey.Id, "smalltestfileDelay", "1", 200, "")
-	testDeleteFileCall(t, apiKey.Id, "smalltestfile2", "", 401, `{"Result":"error","ErrorMessage":"No permission to delete this file","ErrorCode":6}`)
+	testDeleteFileCall(t, apiKey, "", "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
+	testDeleteFileCall(t, apiKey, "invalid", "", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided.","ErrorCode":5}`)
+	testDeleteFileCall(t, apiKey, "smalltestfile1", "invalid", 400, `{"Result":"error","ErrorMessage":"invalid value in header delay supplied","ErrorCode":4}`)
+	testDeleteFileCall(t, apiKey, "smalltestfile1", "", 200, "")
+	testDeleteFileCall(t, apiKey, "smalltestfileDelay", "1", 200, "")
+	testDeleteFileCall(t, apiKey, "smalltestfile2", "", 401, `{"Result":"error","ErrorMessage":"No permission to delete this file","ErrorCode":6}`)
 	_, ok = database.GetMetaDataById("smalltestfile2")
 	test.IsEqualBool(t, ok, true)
 	grantUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
-	testDeleteFileCall(t, apiKey.Id, "smalltestfile2", "", 200, "")
+	testDeleteFileCall(t, apiKey, "smalltestfile2", "", 200, "")
 	removeUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
 
 	time.Sleep(200 * time.Millisecond)
@@ -1108,7 +1108,7 @@ func TestDeleteFile(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 }
 
-func testDeleteFileCall(t *testing.T, apiKey, fileId, delay string, resultCode int, expectedResponse string) {
+func testDeleteFileCall(t *testing.T, apiKey models.ApiKey, fileId, delay string, resultCode int, expectedResponse string) {
 	t.Helper()
 	const apiUrl = "/files/delete"
 	const headerFileId = "id"
@@ -1120,7 +1120,7 @@ func testDeleteFileCall(t *testing.T, apiKey, fileId, delay string, resultCode i
 	if delay != "" {
 		headers = append(headers, test.Header{Name: headerDelay, Value: delay})
 	}
-	w, r := getRecorder(apiUrl, apiKey, headers)
+	w, r := getRecorder(apiUrl, apiKey.Id, headers)
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, resultCode)
 	if expectedResponse != "" {
@@ -1128,7 +1128,7 @@ func testDeleteFileCall(t *testing.T, apiKey, fileId, delay string, resultCode i
 	}
 
 	defer test.ExpectPanic(t)
-	apiDeleteFile(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiDeleteFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestRestoreFile(t *testing.T) {
@@ -1157,10 +1157,10 @@ func TestRestoreFile(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 
 	apiKey := testAuthorisation(t, "/files/restore", models.ApiPermDelete)
-	testRestoreFileCall(t, apiKey.Id, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
-	testRestoreFileCall(t, apiKey.Id, "invalid", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided or file has already been deleted.","ErrorCode":5}`)
-	testRestoreFileCall(t, apiKey.Id, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename))
-	testRestoreFileCall(t, apiKey.Id, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
+	testRestoreFileCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
+	testRestoreFileCall(t, apiKey, "invalid", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided or file has already been deleted.","ErrorCode":5}`)
+	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename))
+	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
 
 	storage.DeleteFileSchedule(fileUser.Id, 500, true)
 	storage.DeleteFileSchedule(fileAdmin.Id, 500, true)
@@ -1172,8 +1172,8 @@ func TestRestoreFile(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, file.PendingDeletion != 0, true)
 
-	testRestoreFileCall(t, apiKey.Id, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename))
-	testRestoreFileCall(t, apiKey.Id, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
+	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename))
+	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
 
 	file, ok = database.GetMetaDataById(fileUser.Id)
 	test.IsEqualBool(t, ok, true)
@@ -1217,7 +1217,7 @@ func TestRestoreFile(t *testing.T) {
 	storage.DeleteFile(fileUser.Id, true)
 }
 
-func testRestoreFileCall(t *testing.T, apiKey, fileId string, resultCode int, expectedResponse string) {
+func testRestoreFileCall(t *testing.T, apiKey models.ApiKey, fileId string, resultCode int, expectedResponse string) {
 	t.Helper()
 	const apiUrl = "/files/restore"
 	const headerFileId = "id"
@@ -1225,7 +1225,7 @@ func testRestoreFileCall(t *testing.T, apiKey, fileId string, resultCode int, ex
 	if fileId != "" {
 		headers = append(headers, test.Header{Name: headerFileId, Value: fileId})
 	}
-	w, r := getRecorder(apiUrl, apiKey, headers)
+	w, r := getRecorder(apiUrl, apiKey.Id, headers)
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, resultCode)
 	if expectedResponse != "" {
@@ -1233,7 +1233,7 @@ func testRestoreFileCall(t *testing.T, apiKey, fileId string, resultCode int, ex
 	}
 
 	defer test.ExpectPanic(t)
-	apiRestoreFile(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiRestoreFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestList(t *testing.T) {
@@ -1298,7 +1298,7 @@ func TestListSingle(t *testing.T) {
 	removeUserPermission(t, idUser, models.UserPermListOtherUploads)
 
 	defer test.ExpectPanic(t)
-	apiListSingle(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiListSingle(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestUpload(t *testing.T) {
@@ -1321,7 +1321,7 @@ func TestUpload(t *testing.T) {
 	test.IsEqualInt(t, w.Code, 400)
 
 	defer test.ExpectPanic(t)
-	apiUploadFile(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiUploadFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func uploadNewFile(t *testing.T) (models.Result, *bytes.Buffer) {
@@ -1454,7 +1454,7 @@ func TestDuplicate(t *testing.T) {
 	}
 
 	defer test.ExpectPanic(t)
-	apiDuplicateFile(nil, &paramAuthCreate{}, models.User{Id: 7})
+	apiDuplicateFile(nil, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestChunkUpload(t *testing.T) {
@@ -1510,7 +1510,7 @@ func TestChunkUpload(t *testing.T) {
 	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"strconv.ParseInt: parsing \"\": invalid syntax","ErrorCode":10}`)
 
 	defer test.ExpectPanic(t)
-	apiChunkAdd(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiChunkAdd(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestChunkComplete(t *testing.T) {
@@ -1550,7 +1550,7 @@ func TestChunkComplete(t *testing.T) {
 	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"chunk file does not exist","ErrorCode":0}`)
 
 	defer test.ExpectPanic(t)
-	apiChunkComplete(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiChunkComplete(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestMinorFunctions(t *testing.T) {
@@ -1558,7 +1558,7 @@ func TestMinorFunctions(t *testing.T) {
 	sendError(nil, 0, 0, "none")
 }
 
-func testReplaceFileCall(t *testing.T, apiKey string, fileTarget, fileOrigin string, deleteFile bool, resultCode int, expectedResponse string) {
+func testReplaceFileCall(t *testing.T, apiKey models.ApiKey, fileTarget, fileOrigin string, deleteFile bool, resultCode int, expectedResponse string) {
 	t.Helper()
 	const apiUrl = "/files/replace"
 	const headerFileIdTarget = "id"
@@ -1574,7 +1574,7 @@ func testReplaceFileCall(t *testing.T, apiKey string, fileTarget, fileOrigin str
 	if deleteFile {
 		headers = append(headers, test.Header{Name: headerDeleteFile, Value: "true"})
 	}
-	w, r := getRecorder(apiUrl, apiKey, headers)
+	w, r := getRecorder(apiUrl, apiKey.Id, headers)
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, resultCode)
 	if expectedResponse != "" {
@@ -1582,7 +1582,7 @@ func testReplaceFileCall(t *testing.T, apiKey string, fileTarget, fileOrigin str
 	}
 
 	defer test.ExpectPanic(t)
-	apiRestoreFile(w, &paramAuthCreate{}, models.User{Id: 7})
+	apiReplaceFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestFileReplace(t *testing.T) {
@@ -1670,14 +1670,14 @@ func TestFileReplace(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 
 	apiKey := testAuthorisation(t, "/files/replace", models.ApiPermReplace)
-	testReplaceFileCall(t, apiKey.Id, "", "invalid", false, 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
-	testReplaceFileCall(t, apiKey.Id, "invalid", "", false, 400, `{"Result":"error","ErrorMessage":"header idNewContent is required","ErrorCode":4}`)
-	testReplaceFileCall(t, apiKey.Id, "invalid", originalFile.Id, false, 404, `{"Result":"error","ErrorMessage":"Invalid id provided.","ErrorCode":5}`)
-	testReplaceFileCall(t, apiKey.Id, originalFile.Id, "invalid", false, 404, `{"Result":"error","ErrorMessage":"Invalid id provided.","ErrorCode":5}`)
-	testReplaceFileCall(t, apiKey.Id, originalFile.Id, adminFile.Id, false, 401, `{"Result":"error","ErrorMessage":"No permission to duplicate this file","ErrorCode":6}`)
-	testReplaceFileCall(t, apiKey.Id, adminFile.Id, originalFile.Id, false, 401, `{"Result":"error","ErrorMessage":"No permission to replace this file","ErrorCode":6}`)
-	testReplaceFileCall(t, apiKey.Id, e2eFile.Id, originalFile.Id, false, 400, `{"Result":"error","ErrorMessage":"End-to-End encrypted files cannot be replaced","ErrorCode":17}`)
-	testReplaceFileCall(t, apiKey.Id, originalFile.Id, newFile.Id, false, 200, "")
+	testReplaceFileCall(t, apiKey, "", "invalid", false, 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
+	testReplaceFileCall(t, apiKey, "invalid", "", false, 400, `{"Result":"error","ErrorMessage":"header idNewContent is required","ErrorCode":4}`)
+	testReplaceFileCall(t, apiKey, "invalid", originalFile.Id, false, 404, `{"Result":"error","ErrorMessage":"Invalid id provided.","ErrorCode":5}`)
+	testReplaceFileCall(t, apiKey, originalFile.Id, "invalid", false, 404, `{"Result":"error","ErrorMessage":"Invalid id provided.","ErrorCode":5}`)
+	testReplaceFileCall(t, apiKey, originalFile.Id, adminFile.Id, false, 401, `{"Result":"error","ErrorMessage":"No permission to duplicate this file","ErrorCode":6}`)
+	testReplaceFileCall(t, apiKey, adminFile.Id, originalFile.Id, false, 401, `{"Result":"error","ErrorMessage":"No permission to replace this file","ErrorCode":6}`)
+	testReplaceFileCall(t, apiKey, e2eFile.Id, originalFile.Id, false, 400, `{"Result":"error","ErrorMessage":"End-to-End encrypted files cannot be replaced","ErrorCode":17}`)
+	testReplaceFileCall(t, apiKey, originalFile.Id, newFile.Id, false, 200, "")
 
 	file, ok := database.GetMetaDataById(originalFile.Id)
 	test.IsEqualBool(t, ok, true)
@@ -1690,8 +1690,31 @@ func TestFileReplace(t *testing.T) {
 	test.IsEqual(t, file.Encryption, newFile.Encryption)
 	_, ok = storage.GetFile(newFile.Id)
 	test.IsEqualBool(t, ok, true)
-	testReplaceFileCall(t, apiKey.Id, originalFile.Id, newFile.Id, true, 200, "")
 
+	apiKey.RemovePermission(models.ApiPermDelete)
+	database.SaveApiKey(apiKey)
+	testReplaceFileCall(t, apiKey, originalFile.Id, newFile.Id, true, 401, `{"Result":"error","ErrorMessage":"No permission to delete original file","ErrorCode":6}`)
+	testReplaceFileCall(t, apiKey, originalFile.Id, adminFile.Id, true, 401, `{"Result":"error","ErrorMessage":"No permission to duplicate this file","ErrorCode":6}`)
+
+	apiKey.GrantPermission(models.ApiPermDelete)
+	database.SaveApiKey(apiKey)
+	user, _ := database.GetUser(idUser)
+	user.GrantPermission(models.UserPermListOtherUploads)
+	user.RemovePermission(models.UserPermDeleteOtherUploads)
+	database.SaveUser(user, false)
+	testReplaceFileCall(t, apiKey, originalFile.Id, adminFile.Id, true, 401, `{"Result":"error","ErrorMessage":"No permission to delete original file","ErrorCode":6}`)
+
+	user.GrantPermission(models.UserPermDeleteOtherUploads)
+	database.SaveUser(user, false)
+	testReplaceFileCall(t, apiKey, originalFile.Id, adminFile.Id, true, 200, "")
+	_, ok = storage.GetFile(originalFile.Id)
+	test.IsEqualBool(t, ok, true)
+	_, ok = storage.GetFile(adminFile.Id)
+	test.IsEqualBool(t, ok, false)
+
+	user.RemovePermission(models.UserPermDeleteOtherUploads)
+	database.SaveUser(user, false)
+	testReplaceFileCall(t, apiKey, originalFile.Id, newFile.Id, true, 200, "")
 	_, ok = storage.GetFile(originalFile.Id)
 	test.IsEqualBool(t, ok, true)
 	_, ok = storage.GetFile(newFile.Id)

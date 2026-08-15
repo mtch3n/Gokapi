@@ -441,7 +441,7 @@ func ReplaceFile(fileId, newFileContentId string, delete bool) (models.File, err
 	file.Encryption = newFileContent.Encryption
 	database.SaveMetaData(file)
 	if delete {
-		DeleteFile(newFileContent.Id, false)
+		DeleteFile(newFileContent.Id, true)
 	}
 	return file, nil
 }
