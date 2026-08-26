@@ -421,6 +421,21 @@ func TestParseUrl(t *testing.T) {
 	test.IsNil(t, err)
 	test.IsEqual(t, output, expectedOutput)
 
+	// Postgres keeps the full DSN, since pgx consumes credentials and query parameters
+	expectedOutput = models.DbConnection{
+		HostUrl:  "postgres://user:pw@127.0.0.1:5432/gokapi?sslmode=require",
+		Username: "user",
+		Password: "pw",
+		Type:     dbabstraction.TypePostgres,
+	}
+	output, err = ParseUrl("postgres://user:pw@127.0.0.1:5432/gokapi?sslmode=require", false)
+	test.IsNil(t, err)
+	test.IsEqual(t, output, expectedOutput)
+
+	output, err = ParseUrl("postgresql://user@db.example.com:5432/gokapi", false)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, output.Type, dbabstraction.TypePostgres)
+
 	_, err = ParseUrl("sqlite:///invalid", true)
 	test.IsNotNil(t, err)
 	output, err = ParseUrl("sqlite:///invalid", false)

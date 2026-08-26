@@ -51,6 +51,10 @@ func ParseUrl(dbUrl string, mustExist bool) (models.DbConnection, error) {
 	case "redis":
 		result.Type = dbabstraction.TypeRedis
 		result.HostUrl = u.Host
+	case "postgres", "postgresql":
+		result.Type = dbabstraction.TypePostgres
+		// pgx consumes the full DSN, including credentials and query parameters such as sslmode
+		result.HostUrl = dbUrl
 	default:
 		return models.DbConnection{}, fmt.Errorf("unsupported database type: %s\n", dbUrl)
 	}

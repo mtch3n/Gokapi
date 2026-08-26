@@ -364,6 +364,19 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		dbUrl.RawQuery = query.Encode()
 		result.DatabaseUrl = dbUrl.String()
 		return nil
+	case dbabstraction.TypePostgres:
+		// Postgres is configured with a full DSN, as managed providers supply
+		// connection strings that carry parameters such as sslmode
+		dbUrl, err := getFormValueString(formObjects, "postgres_url")
+		if err != nil {
+			return err
+		}
+		dbUrl = strings.TrimSpace(dbUrl)
+		if !strings.HasPrefix(dbUrl, "postgres://") && !strings.HasPrefix(dbUrl, "postgresql://") {
+			return errors.New("postgres connection string must start with postgres:// or postgresql://")
+		}
+		result.DatabaseUrl = dbUrl
+		return nil
 	default:
 		return errors.New("unsupported database selected")
 	}
@@ -372,7 +385,7 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 // checkForAllDbValues tests if all values were passed, even if they were not required for this particular database
 // This is done to ensure that no invalid form was passed and makes testing easier
 func checkForAllDbValues(formObjects *[]jsonFormObject) error {
-	expectedValues := []string{"dbtype_sel", "sqlite_location", "redis_location", "redis_prefix", "redis_user", "redis_password"}
+	expectedValues := []string{"dbtype_sel", "sqlite_location", "redis_location", "redis_prefix", "redis_user", "redis_password", "postgres_url"}
 	for _, value := range expectedValues {
 		_, err := getFormValueString(formObjects, value)
 		if err != nil {

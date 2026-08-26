@@ -241,6 +241,7 @@ type dbFormTest struct {
 	RedisUser      string `form:"redis_user"`
 	RedisPw        string `form:"redis_password"`
 	RedisUseSsl    string `form:"redis_ssl_sel"`
+	PostgresUrl    string `form:"postgres_url"`
 }
 
 func generateDbFormValues(input dbFormTest) []jsonFormObject {
@@ -290,6 +291,44 @@ func TestParseDatabaseSettings(t *testing.T) {
 	err = parseDatabaseSettings(&output, &input)
 	test.IsNil(t, err)
 	test.IsEqualString(t, output.DatabaseUrl, expected)
+
+	input = generateDbFormValues(dbFormTest{
+		DatabaseType: "2",
+		RedisUseSsl:  "0",
+		PostgresUrl:  "postgres://user:pw@127.0.0.1:5432/gokapi?sslmode=require",
+	})
+	expected = "postgres://user:pw@127.0.0.1:5432/gokapi?sslmode=require"
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNil(t, err)
+	test.IsEqualString(t, output.DatabaseUrl, expected)
+
+	// The postgresql:// alias is accepted, and surrounding whitespace is trimmed
+	input = generateDbFormValues(dbFormTest{
+		DatabaseType: "2",
+		RedisUseSsl:  "0",
+		PostgresUrl:  "  postgresql://user@db.example.com:5432/gokapi  ",
+	})
+	expected = "postgresql://user@db.example.com:5432/gokapi"
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNil(t, err)
+	test.IsEqualString(t, output.DatabaseUrl, expected)
+
+	// A connection string with the wrong scheme must be rejected rather than stored
+	input = generateDbFormValues(dbFormTest{
+		DatabaseType: "2",
+		RedisUseSsl:  "0",
+		PostgresUrl:  "mysql://user@127.0.0.1:3306/gokapi",
+	})
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
+
+	// An unsupported database type must be rejected
+	input = generateDbFormValues(dbFormTest{
+		DatabaseType: "99",
+		RedisUseSsl:  "0",
+	})
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
 }
 
 func TestRunConfigModification(t *testing.T) {
@@ -555,6 +594,7 @@ type setupValues struct {
 	RedisUser                     setupEntry `form:"redis_user"`
 	RedisPw                       setupEntry `form:"redis_password"`
 	RedisUseSsl                   setupEntry `form:"redis_ssl_sel" isBool:"true"`
+	PostgresUrl                   setupEntry `form:"postgres_url"`
 }
 
 func (s *setupValues) init() {

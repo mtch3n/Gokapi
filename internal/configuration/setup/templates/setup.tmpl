@@ -121,6 +121,7 @@
 						<select name="dbtype_sel" id="dbtype_sel"  style="width:350px;" class="select form-control"  onChange="dbChanged()">	
 								<option value="0" selected>SQLite</option>
 								<option value="1">Redis</option>
+								<option value="2">PostgreSQL</option>
 
 						</select><br>
 						<div id="divsqlite">
@@ -141,6 +142,10 @@
 								<option value="0" selected>No</option>
 								<option value="1">Yes</option>
 							</select>
+						</div>
+						<div id="divpostgres" style="display: none;">
+							<label for="postgres_url">Connection string (stored in plain text):</label>
+							<input type="text" class="form-control" id="postgres_url" name="postgres_url" value="" placeholder="postgres://user:password@host:5432/gokapi?sslmode=require"><br>
 						</div>
 					</div>
 				</div>
@@ -1059,15 +1064,18 @@ function TestAWS(button, isManual) {
 			function dbChanged() {
 				let divSqlite = document.getElementById("divsqlite");
 				let divRedis = document.getElementById("divredis");
+				let divPostgres = document.getElementById("divpostgres");
 				let dbType = document.getElementById("dbtype_sel").value;
-				
-				if (dbType == "0") {
-					divSqlite.style.display = "block";
-					divRedis.style.display = "none";
-				} else {
-					divSqlite.style.display = "none";
-					divRedis.style.display = "block";
-				}
+
+				divSqlite.style.display = (dbType == "0") ? "block" : "none";
+				divRedis.style.display = (dbType == "1") ? "block" : "none";
+				divPostgres.style.display = (dbType == "2") ? "block" : "none";
+
+				// Only the selected backend's fields are required, so the others
+				// do not block form submission while hidden
+				document.getElementById("sqlite_location").required = (dbType == "0");
+				document.getElementById("redis_location").required = (dbType == "1");
+				document.getElementById("postgres_url").required = (dbType == "2");
 			}
 				
 				

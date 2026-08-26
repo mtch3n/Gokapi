@@ -3,6 +3,7 @@ package dbabstraction
 import (
 	"fmt"
 
+	"github.com/forceu/gokapi/internal/configuration/database/provider/postgres"
 	"github.com/forceu/gokapi/internal/configuration/database/provider/redis"
 	"github.com/forceu/gokapi/internal/configuration/database/provider/sqlite"
 	"github.com/forceu/gokapi/internal/models"
@@ -13,6 +14,8 @@ const (
 	TypeSqlite = iota
 	// TypeRedis specifies to use a Redis database
 	TypeRedis
+	// TypePostgres specifies to use a PostgreSQL database
+	TypePostgres
 )
 
 // Database declares the required functions for a database connection
@@ -126,6 +129,8 @@ func GetNew(config models.DbConnection) (Database, error) {
 		return sqlite.New(config)
 	case TypeRedis:
 		return redis.New(config)
+	case TypePostgres:
+		return postgres.New(config)
 	default:
 		return nil, fmt.Errorf("unsupported database: type %v", config.Type)
 	}
