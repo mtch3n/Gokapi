@@ -19,7 +19,7 @@ type schemaSessions struct {
 // GetSession returns the session with the given ID or false if not a valid ID
 func (p DatabaseProvider) GetSession(id string) (models.Session, bool) {
 	var rowResult schemaSessions
-	row := p.postgresDb.QueryRow("SELECT Id, RenewAt, ValidUntil, UserId FROM Sessions WHERE Id = $1", id)
+	row := p.queryRow("SELECT Id, RenewAt, ValidUntil, UserId FROM Sessions WHERE Id = $1", id)
 	err := row.Scan(&rowResult.Id, &rowResult.RenewAt, &rowResult.ValidUntil, &rowResult.UserId)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -45,7 +45,7 @@ func (p DatabaseProvider) SaveSession(id string, session models.Session) {
 		UserId:     session.UserId,
 	}
 
-	_, err := p.postgresDb.Exec(`INSERT INTO Sessions (Id, RenewAt, ValidUntil, UserId) VALUES ($1, $2, $3, $4)
+	_, err := p.exec(`INSERT INTO Sessions (Id, RenewAt, ValidUntil, UserId) VALUES ($1, $2, $3, $4)
 					ON CONFLICT (Id) DO UPDATE SET RenewAt = EXCLUDED.RenewAt,
 						ValidUntil = EXCLUDED.ValidUntil, UserId = EXCLUDED.UserId`,
 		newData.Id, newData.RenewAt, newData.ValidUntil, newData.UserId)
@@ -54,24 +54,24 @@ func (p DatabaseProvider) SaveSession(id string, session models.Session) {
 
 // DeleteSession deletes a session with the given ID
 func (p DatabaseProvider) DeleteSession(id string) {
-	_, err := p.postgresDb.Exec("DELETE FROM Sessions WHERE Id = $1", id)
+	_, err := p.exec("DELETE FROM Sessions WHERE Id = $1", id)
 	helper.Check(err)
 }
 
 // DeleteAllSessions logs all users out
 func (p DatabaseProvider) DeleteAllSessions() {
 	//goland:noinspection SqlWithoutWhere
-	_, err := p.postgresDb.Exec("DELETE FROM Sessions")
+	_, err := p.exec("DELETE FROM Sessions")
 	helper.Check(err)
 }
 
 // DeleteAllSessionsByUser logs the specific users out
 func (p DatabaseProvider) DeleteAllSessionsByUser(userId int) {
-	_, err := p.postgresDb.Exec("DELETE FROM Sessions WHERE UserId = $1", userId)
+	_, err := p.exec("DELETE FROM Sessions WHERE UserId = $1", userId)
 	helper.Check(err)
 }
 
 func (p DatabaseProvider) cleanExpiredSessions() {
-	_, err := p.postgresDb.Exec("DELETE FROM Sessions WHERE ValidUntil < $1", time.Now().Unix())
+	_, err := p.exec("DELETE FROM Sessions WHERE ValidUntil < $1", time.Now().Unix())
 	helper.Check(err)
 }

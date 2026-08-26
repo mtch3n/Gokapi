@@ -22,7 +22,9 @@ func Do(flags flagparser.MigrateFlags) {
 		osExit(2)
 		return
 	}
-	fmt.Printf("Migrating %s database %s to %s database %s\n", getType(oldDb.Type), oldDb.HostUrl, getType(newDb.Type), newDb.HostUrl)
+	// HostUrl is a full DSN for Postgres and therefore carries the password
+	fmt.Printf("Migrating %s database %s to %s database %s\n", getType(oldDb.Type), database.RedactUrl(oldDb.HostUrl),
+		getType(newDb.Type), database.RedactUrl(newDb.HostUrl))
 	database.Migrate(oldDb, newDb)
 }
 

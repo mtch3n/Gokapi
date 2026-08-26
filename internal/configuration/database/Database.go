@@ -53,10 +53,11 @@ func ParseUrl(dbUrl string, mustExist bool) (models.DbConnection, error) {
 		result.HostUrl = u.Host
 	case "postgres", "postgresql":
 		result.Type = dbabstraction.TypePostgres
-		// pgx consumes the full DSN, including credentials and query parameters such as sslmode
+		// pgx consumes the full DSN, including credentials and query parameters such as sslmode.
+		// Because HostUrl therefore contains the password, never print it unredacted - use RedactUrl.
 		result.HostUrl = dbUrl
 	default:
-		return models.DbConnection{}, fmt.Errorf("unsupported database type: %s\n", dbUrl)
+		return models.DbConnection{}, fmt.Errorf("unsupported database type: %s\n", RedactUrl(dbUrl))
 	}
 
 	query := u.Query()
@@ -382,4 +383,17 @@ func SaveTrafficSince(since int64) {
 // GetTrafficSince gets the beginning of traffic counting
 func GetTrafficSince() (int64, bool) {
 	return db.GetTrafficSince()
+}
+
+// RedactUrl removes any password from a database URL so it can be safely logged.
+// A Postgres DbConnection.HostUrl is the full DSN and therefore contains credentials.
+func RedactUrl(dbUrl string) string {
+	parsed, err := url.Parse(dbUrl)
+	if err != nil || parsed.User == nil {
+		return dbUrl
+	}
+	if _, hasPassword := parsed.User.Password(); !hasPassword {
+		return dbUrl
+	}
+	return parsed.Redacted()
 }

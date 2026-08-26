@@ -40,7 +40,7 @@ func (s schemaUser) ToUser() models.User {
 // GetAllUsers returns a map with all users
 func (p DatabaseProvider) GetAllUsers() []models.User {
 	var result []models.User
-	rows, err := p.postgresDb.Query("SELECT " + userColumns + " FROM Users ORDER BY Userlevel, LastOnline DESC, Name")
+	rows, err := p.query("SELECT " + userColumns + " FROM Users ORDER BY Userlevel, LastOnline DESC, Name")
 	helper.Check(err)
 	defer rows.Close()
 	for rows.Next() {
@@ -59,7 +59,7 @@ func (p DatabaseProvider) getUserWithConstraint(isName bool, searchValue any) (m
 	if isName {
 		query = "SELECT " + userColumns + " FROM Users WHERE Name = $1"
 	}
-	row := p.postgresDb.QueryRow(query, searchValue)
+	row := p.queryRow(query, searchValue)
 	err := row.Scan(&rowResult.Id, &rowResult.Name, &rowResult.Password, &rowResult.Permissions,
 		&rowResult.UserLevel, &rowResult.LastOnline, &rowResult.ResetPassword)
 	if err != nil {
@@ -90,13 +90,13 @@ func (p DatabaseProvider) SaveUser(user models.User, isNewUser bool) {
 		resetpw = 1
 	}
 	if isNewUser {
-		_, err := p.postgresDb.Exec(`INSERT INTO Users (Name, Password, Permissions, Userlevel, LastOnline, ResetPassword)
+		_, err := p.exec(`INSERT INTO Users (Name, Password, Permissions, Userlevel, LastOnline, ResetPassword)
 						VALUES ($1, $2, $3, $4, $5, $6)`,
 			user.Name, user.Password, user.Permissions, user.UserLevel, user.LastOnline, resetpw)
 		helper.Check(err)
 		return
 	}
-	_, err := p.postgresDb.Exec(`INSERT INTO Users (Id, Name, Password, Permissions, Userlevel, LastOnline, ResetPassword)
+	_, err := p.exec(`INSERT INTO Users (Id, Name, Password, Permissions, Userlevel, LastOnline, ResetPassword)
 					VALUES ($1, $2, $3, $4, $5, $6, $7)
 					ON CONFLICT (Id) DO UPDATE SET Name = EXCLUDED.Name, Password = EXCLUDED.Password,
 						Permissions = EXCLUDED.Permissions, Userlevel = EXCLUDED.Userlevel,
@@ -110,7 +110,7 @@ func (p DatabaseProvider) SaveUser(user models.User, isNewUser bool) {
 // Rows written with an explicit Id (an update, or a migration from another provider)
 // do not advance the sequence, so without this a later generated Id would collide.
 func (p DatabaseProvider) syncUserIdSequence() {
-	_, err := p.postgresDb.Exec(`SELECT setval(pg_get_serial_sequence('users', 'id'),
+	_, err := p.exec(`SELECT setval(pg_get_serial_sequence('users', 'id'),
 					GREATEST(COALESCE((SELECT MAX(Id) FROM Users), 1), 1))`)
 	helper.Check(err)
 }
@@ -118,12 +118,12 @@ func (p DatabaseProvider) syncUserIdSequence() {
 // UpdateUserLastOnline writes the last online time to the database
 func (p DatabaseProvider) UpdateUserLastOnline(id int) {
 	timeNow := time.Now().Unix()
-	_, err := p.postgresDb.Exec("UPDATE Users SET LastOnline = $1 WHERE Id = $2", timeNow, id)
+	_, err := p.exec("UPDATE Users SET LastOnline = $1 WHERE Id = $2", timeNow, id)
 	helper.Check(err)
 }
 
 // DeleteUser deletes a user with the given ID
 func (p DatabaseProvider) DeleteUser(id int) {
-	_, err := p.postgresDb.Exec("DELETE FROM Users WHERE Id = $1", id)
+	_, err := p.exec("DELETE FROM Users WHERE Id = $1", id)
 	helper.Check(err)
 }

@@ -76,7 +76,7 @@ func scanMetaData(scan func(dest ...any) error, rowData *schemaMetaData) error {
 // GetAllMetadata returns a map of all available files
 func (p DatabaseProvider) GetAllMetadata() map[string]models.File {
 	result := make(map[string]models.File)
-	rows, err := p.postgresDb.Query("SELECT " + metaDataColumns + " FROM FileMetaData")
+	rows, err := p.query("SELECT " + metaDataColumns + " FROM FileMetaData")
 	helper.Check(err)
 	defer rows.Close()
 	for rows.Next() {
@@ -97,7 +97,7 @@ func (p DatabaseProvider) GetMetaDataById(id string) (models.File, bool) {
 	result := models.File{}
 	rowData := schemaMetaData{}
 
-	row := p.postgresDb.QueryRow("SELECT "+metaDataColumns+" FROM FileMetaData WHERE Id = $1", id)
+	row := p.queryRow("SELECT "+metaDataColumns+" FROM FileMetaData WHERE Id = $1", id)
 	err := scanMetaData(row.Scan, &rowData)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -145,7 +145,7 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 	helper.Check(err)
 	newData.Encryption = buf.Bytes()
 
-	_, err = p.postgresDb.Exec(`INSERT INTO FileMetaData (Id, Name, Size, SHA1, ExpireAt, SizeBytes,
+	_, err = p.exec(`INSERT INTO FileMetaData (Id, Name, Size, SHA1, ExpireAt, SizeBytes,
 					DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
 					UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId)
 					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
@@ -168,19 +168,19 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 // IncreaseDownloadCount increases the download count of a file atomically
 func (p DatabaseProvider) IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) {
 	if decreaseRemainingDownloads {
-		_, err := p.postgresDb.Exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1,
+		_, err := p.exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1,
 						DownloadsRemaining = DownloadsRemaining - 1 WHERE Id = $1`, id)
 		helper.Check(err)
 		return
 	}
-	_, err := p.postgresDb.Exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1 WHERE Id = $1`, id)
+	_, err := p.exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1 WHERE Id = $1`, id)
 	helper.Check(err)
 }
 
 // GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads
 func (p DatabaseProvider) GetDownloadsRemaining(id string) int {
 	var downloadsRemaining int
-	row := p.postgresDb.QueryRow("SELECT DownloadsRemaining FROM FileMetaData WHERE Id = $1", id)
+	row := p.queryRow("SELECT DownloadsRemaining FROM FileMetaData WHERE Id = $1", id)
 	err := row.Scan(&downloadsRemaining)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -194,6 +194,6 @@ func (p DatabaseProvider) GetDownloadsRemaining(id string) int {
 
 // DeleteMetaData deletes information about a file
 func (p DatabaseProvider) DeleteMetaData(id string) {
-	_, err := p.postgresDb.Exec("DELETE FROM FileMetaData WHERE Id = $1", id)
+	_, err := p.exec("DELETE FROM FileMetaData WHERE Id = $1", id)
 	helper.Check(err)
 }

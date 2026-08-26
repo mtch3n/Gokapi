@@ -5,12 +5,96 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	// Required for the postgres driver
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+// retryAttempts is how often a statement is retried when it fails with a
+// transient error. Unlike SQLite, this provider talks over a network to a
+// managed server that drops idle connections, fails over and restarts, so a
+// single failed call is not necessarily a fatal condition.
+const retryAttempts = 3
+
+// retryDelay is the pause between attempts
+const retryDelay = 150 * time.Millisecond
+
+// isTransient reports whether an error is worth retrying. It matches on the
+// driver's connection-level failures rather than on SQL errors, so a genuine
+// constraint violation still surfaces immediately.
+func isTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"bad connection",
+		"server closed the connection",
+		"the database system is starting up",
+		"the database system is shutting down",
+		"terminating connection due to administrator command",
+		"connection timed out",
+		"i/o timeout",
+		"eof",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// exec runs a statement, retrying transient network failures
+func (p DatabaseProvider) exec(query string, args ...any) (sql.Result, error) {
+	var result sql.Result
+	var err error
+	for attempt := 0; attempt < retryAttempts; attempt++ {
+		result, err = p.postgresDb.Exec(query, args...)
+		if !isTransient(err) {
+			return result, err
+		}
+		time.Sleep(retryDelay)
+	}
+	return result, err
+}
+
+// query runs a query, retrying transient network failures
+func (p DatabaseProvider) query(q string, args ...any) (*sql.Rows, error) {
+	var rows *sql.Rows
+	var err error
+	for attempt := 0; attempt < retryAttempts; attempt++ {
+		rows, err = p.postgresDb.Query(q, args...)
+		if !isTransient(err) {
+			return rows, err
+		}
+		time.Sleep(retryDelay)
+	}
+	return rows, err
+}
+
+// queryRow runs a single-row query. Errors surface on Scan, so a transient
+// failure is detected by probing the row error before returning it.
+func (p DatabaseProvider) queryRow(q string, args ...any) *sql.Row {
+	var row *sql.Row
+	for attempt := 0; attempt < retryAttempts; attempt++ {
+		row = p.postgresDb.QueryRow(q, args...)
+		if !isTransient(row.Err()) {
+			return row
+		}
+		time.Sleep(retryDelay)
+	}
+	return row
+}
 
 // DatabaseProvider contains the database instance
 type DatabaseProvider struct {
@@ -48,7 +132,7 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 // Postgres has no PRAGMA user_version, so the value is kept in a dedicated table.
 func (p DatabaseProvider) GetDbVersion() int {
 	var version int
-	row := p.postgresDb.QueryRow("SELECT Version FROM SchemaVersion WHERE Id = 1")
+	row := p.queryRow("SELECT Version FROM SchemaVersion WHERE Id = 1")
 	err := row.Scan(&version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -62,7 +146,7 @@ func (p DatabaseProvider) GetDbVersion() int {
 
 // SetDbVersion sets the version number of the database
 func (p DatabaseProvider) SetDbVersion(newVersion int) {
-	_, err := p.postgresDb.Exec(`INSERT INTO SchemaVersion (Id, Version) VALUES (1, $1)
+	_, err := p.exec(`INSERT INTO SchemaVersion (Id, Version) VALUES (1, $1)
 					ON CONFLICT (Id) DO UPDATE SET Version = EXCLUDED.Version`, newVersion)
 	helper.Check(err)
 }
@@ -85,6 +169,10 @@ func (p DatabaseProvider) init(dbConfig models.DbConnection) (DatabaseProvider, 
 		}
 		p.postgresDb.SetMaxOpenConns(10)
 		p.postgresDb.SetMaxIdleConns(5)
+		// A managed Postgres will silently drop idle connections and fail over.
+		// Recycling connections keeps the pool from handing out dead ones.
+		p.postgresDb.SetConnMaxLifetime(5 * time.Minute)
+		p.postgresDb.SetConnMaxIdleTime(1 * time.Minute)
 
 		err = p.postgresDb.Ping()
 		if err != nil {

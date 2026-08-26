@@ -16,7 +16,7 @@ type schemaHotlinks struct {
 // GetHotlink returns the id of the file associated or false if not found
 func (p DatabaseProvider) GetHotlink(id string) (string, bool) {
 	var rowResult schemaHotlinks
-	row := p.postgresDb.QueryRow("SELECT FileId FROM Hotlinks WHERE Id = $1", id)
+	row := p.queryRow("SELECT FileId FROM Hotlinks WHERE Id = $1", id)
 	err := row.Scan(&rowResult.FileId)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -31,7 +31,7 @@ func (p DatabaseProvider) GetHotlink(id string) (string, bool) {
 // GetAllHotlinks returns an array with all hotlink ids
 func (p DatabaseProvider) GetAllHotlinks() []string {
 	ids := make([]string, 0)
-	rows, err := p.postgresDb.Query("SELECT Id FROM Hotlinks")
+	rows, err := p.query("SELECT Id FROM Hotlinks")
 	helper.Check(err)
 	defer rows.Close()
 	for rows.Next() {
@@ -51,7 +51,13 @@ func (p DatabaseProvider) SaveHotlink(file models.File) {
 		FileId: file.Id,
 	}
 
-	_, err := p.postgresDb.Exec(`INSERT INTO Hotlinks (Id, FileId) VALUES ($1, $2)
+	// FileId carries its own UNIQUE constraint. SQLite's INSERT OR REPLACE drops
+	// any row colliding on *any* unique constraint, so clear a stale row for this
+	// file first; otherwise ON CONFLICT (Id) would raise a unique violation on
+	// FileId instead of replacing, which is a behavioural break from SQLite.
+	_, err := p.exec("DELETE FROM Hotlinks WHERE FileId = $1 AND Id <> $2", newData.FileId, newData.Id)
+	helper.Check(err)
+	_, err = p.exec(`INSERT INTO Hotlinks (Id, FileId) VALUES ($1, $2)
 					ON CONFLICT (Id) DO UPDATE SET FileId = EXCLUDED.FileId`,
 		newData.Id, newData.FileId)
 	helper.Check(err)
@@ -62,6 +68,6 @@ func (p DatabaseProvider) DeleteHotlink(id string) {
 	if id == "" {
 		return
 	}
-	_, err := p.postgresDb.Exec("DELETE FROM Hotlinks WHERE Id = $1", id)
+	_, err := p.exec("DELETE FROM Hotlinks WHERE Id = $1", id)
 	helper.Check(err)
 }

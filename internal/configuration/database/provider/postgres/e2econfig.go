@@ -23,7 +23,7 @@ func (p DatabaseProvider) SaveEnd2EndInfo(info models.E2EInfoEncrypted, userId i
 	err := enc.Encode(info)
 	helper.Check(err)
 
-	_, err = p.postgresDb.Exec(`INSERT INTO E2EConfig (Config, UserId) VALUES ($1, $2)
+	_, err = p.exec(`INSERT INTO E2EConfig (Config, UserId) VALUES ($1, $2)
 					ON CONFLICT (UserId) DO UPDATE SET Config = EXCLUDED.Config`,
 		buf.Bytes(), userId)
 	helper.Check(err)
@@ -34,7 +34,7 @@ func (p DatabaseProvider) GetEnd2EndInfo(userId int) models.E2EInfoEncrypted {
 	result := models.E2EInfoEncrypted{}
 	rowResult := schemaE2EConfig{}
 
-	row := p.postgresDb.QueryRow("SELECT Config FROM E2EConfig WHERE UserId = $1", userId)
+	row := p.queryRow("SELECT Config FROM E2EConfig WHERE UserId = $1", userId)
 	err := row.Scan(&rowResult.Config)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -53,6 +53,6 @@ func (p DatabaseProvider) GetEnd2EndInfo(userId int) models.E2EInfoEncrypted {
 
 // DeleteEnd2EndInfo resets the encrypted e2e info
 func (p DatabaseProvider) DeleteEnd2EndInfo(userId int) {
-	_, err := p.postgresDb.Exec("DELETE FROM E2EConfig WHERE UserId = $1", userId)
+	_, err := p.exec("DELETE FROM E2EConfig WHERE UserId = $1", userId)
 	helper.Check(err)
 }

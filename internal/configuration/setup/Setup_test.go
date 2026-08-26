@@ -786,3 +786,18 @@ func TestIsErrorAddressAlreadyInUse(t *testing.T) {
 	test.IsEqualBool(t, isErrorAddressAlreadyInUse(err), false)
 	l.Close()
 }
+
+func TestCheckPostgresTls(t *testing.T) {
+	// Loopback never leaves the host, so an unencrypted link is acceptable
+	test.IsNil(t, checkPostgresTls("postgres://u:p@127.0.0.1:5432/db?sslmode=disable"))
+	test.IsNil(t, checkPostgresTls("postgres://u:p@localhost:5432/db?sslmode=disable"))
+
+	// A remote database must not carry bearer secrets over an unencrypted link
+	test.IsNotNil(t, checkPostgresTls("postgres://u:p@db.example.com:5432/db?sslmode=disable"))
+	test.IsNotNil(t, checkPostgresTls("postgres://u:p@db.example.com:5432/db?sslmode=prefer"))
+	test.IsNotNil(t, checkPostgresTls("postgres://u:p@db.example.com:5432/db?sslmode=allow"))
+
+	// Encrypted modes are accepted
+	test.IsNil(t, checkPostgresTls("postgres://u:p@db.example.com:5432/db?sslmode=require"))
+	test.IsNil(t, checkPostgresTls("postgres://u:p@db.example.com:5432/db?sslmode=verify-full"))
+}

@@ -3,6 +3,7 @@ package database
 import (
 	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -492,4 +493,16 @@ func TestMigration(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	_, ok = dbNew.GetMetaDataById("file1234")
 	test.IsEqualBool(t, ok, true)
+}
+
+func TestRedactUrl(t *testing.T) {
+	// A Postgres DSN carries the password, so it must never be logged verbatim
+	redacted := RedactUrl("postgres://user:hunter2@db.example.com:5432/gokapi?sslmode=require")
+	test.IsEqualBool(t, strings.Contains(redacted, "hunter2"), false)
+	test.IsEqualBool(t, strings.Contains(redacted, "db.example.com"), true)
+
+	// URLs without credentials are returned unchanged
+	test.IsEqualString(t, RedactUrl("sqlite://./data/gokapi.sqlite"), "sqlite://./data/gokapi.sqlite")
+	test.IsEqualString(t, RedactUrl("redis://127.0.0.1:6379"), "redis://127.0.0.1:6379")
+	test.IsEqualString(t, RedactUrl("not a url at all"), "not a url at all")
 }

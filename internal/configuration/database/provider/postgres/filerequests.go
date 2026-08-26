@@ -42,7 +42,7 @@ func (p DatabaseProvider) GetFileRequest(id string) (models.FileRequest, bool) {
 		return models.FileRequest{}, false
 	}
 	var rowResult schemaFileRequests
-	row := p.postgresDb.QueryRow("SELECT "+fileRequestColumns+" FROM UploadRequests WHERE Id = $1", id)
+	row := p.queryRow("SELECT "+fileRequestColumns+" FROM UploadRequests WHERE Id = $1", id)
 	err := row.Scan(&rowResult.Id, &rowResult.Name, &rowResult.UserId, &rowResult.Expiry,
 		&rowResult.MaxFiles, &rowResult.MaxSize, &rowResult.Creation, &rowResult.ApiKey, &rowResult.Note)
 	if err != nil {
@@ -58,7 +58,7 @@ func (p DatabaseProvider) GetFileRequest(id string) (models.FileRequest, bool) {
 // GetAllFileRequests returns an array with all file requests, ordered by creation date
 func (p DatabaseProvider) GetAllFileRequests() []models.FileRequest {
 	result := make([]models.FileRequest, 0)
-	rows, err := p.postgresDb.Query("SELECT " + fileRequestColumns + " FROM UploadRequests ORDER BY Creation DESC, Name")
+	rows, err := p.query("SELECT " + fileRequestColumns + " FROM UploadRequests ORDER BY Creation DESC, Name")
 	helper.Check(err)
 	defer rows.Close()
 	for rows.Next() {
@@ -86,7 +86,7 @@ func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
 		Note:     request.Notes,
 	}
 
-	_, err := p.postgresDb.Exec(`INSERT INTO UploadRequests
+	_, err := p.exec(`INSERT INTO UploadRequests
 					(Id, Name, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, Note)
 					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 					ON CONFLICT (Id) DO UPDATE SET Name = EXCLUDED.Name, UserId = EXCLUDED.UserId,
@@ -102,6 +102,6 @@ func (p DatabaseProvider) DeleteFileRequest(request models.FileRequest) {
 	if request.Id == "" {
 		return
 	}
-	_, err := p.postgresDb.Exec("DELETE FROM UploadRequests WHERE Id = $1", request.Id)
+	_, err := p.exec("DELETE FROM UploadRequests WHERE Id = $1", request.Id)
 	helper.Check(err)
 }

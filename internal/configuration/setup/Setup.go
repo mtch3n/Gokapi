@@ -375,6 +375,10 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		if !strings.HasPrefix(dbUrl, "postgres://") && !strings.HasPrefix(dbUrl, "postgresql://") {
 			return errors.New("postgres connection string must start with postgres:// or postgresql://")
 		}
+		err = checkPostgresTls(dbUrl)
+		if err != nil {
+			return err
+		}
 		result.DatabaseUrl = dbUrl
 		return nil
 	default:
@@ -939,4 +943,24 @@ func handleAwsError(w http.ResponseWriter, err error, operation int) {
 	} else {
 		_, _ = w.Write([]byte(prefix + "Error: " + err.Error()))
 	}
+}
+
+// checkPostgresTls rejects a Postgres DSN that would send credentials and session
+// tokens over an unencrypted connection. Session IDs and API key IDs are stored as
+// plaintext bearer secrets, so an unencrypted link to a managed database exposes
+// them on the wire. Loopback is exempt, as it never leaves the host.
+func checkPostgresTls(dbUrl string) error {
+	parsed, err := url.Parse(dbUrl)
+	if err != nil {
+		return errors.New("could not parse postgres connection string")
+	}
+	host := parsed.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return nil
+	}
+	sslMode := strings.ToLower(parsed.Query().Get("sslmode"))
+	if sslMode == "disable" || sslMode == "allow" || sslMode == "prefer" {
+		return errors.New("postgres connection must use TLS: set sslmode=require (or verify-ca / verify-full) for a remote database")
+	}
+	return nil
 }
