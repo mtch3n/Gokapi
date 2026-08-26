@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/models"
@@ -197,4 +198,54 @@ func (t testData) Get(key string) string {
 		return field.String()
 	}
 	return ""
+}
+
+func TestApplyMaxExpiry(t *testing.T) {
+	// Unset: upstream behaviour, permanent files still allowed
+	os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	days, unlimited := applyMaxExpiry(30, false)
+	test.IsEqualInt(t, days, 30)
+	test.IsEqualBool(t, unlimited, false)
+	days, unlimited = applyMaxExpiry(0, true)
+	test.IsEqualInt(t, days, 0)
+	test.IsEqualBool(t, unlimited, true)
+
+	os.Setenv("GOKAPI_MAX_EXPIRY_DAYS", "7")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+
+	// A permanent upload is forced to the cap. This is the file-request case,
+	// which is created with unlimitedTime set.
+	days, unlimited = applyMaxExpiry(0, true)
+	test.IsEqualInt(t, days, 7)
+	test.IsEqualBool(t, unlimited, false)
+
+	// A longer expiry is clamped
+	days, unlimited = applyMaxExpiry(30, false)
+	test.IsEqualInt(t, days, 7)
+	test.IsEqualBool(t, unlimited, false)
+
+	// A shorter expiry is left alone
+	days, unlimited = applyMaxExpiry(3, false)
+	test.IsEqualInt(t, days, 3)
+	test.IsEqualBool(t, unlimited, false)
+
+	// Exactly the cap is allowed
+	days, _ = applyMaxExpiry(7, false)
+	test.IsEqualInt(t, days, 7)
+
+	// A zero or negative expiry without the unlimited flag also gets the cap
+	days, unlimited = applyMaxExpiry(0, false)
+	test.IsEqualInt(t, days, 7)
+	test.IsEqualBool(t, unlimited, false)
+}
+
+func TestCreateUploadConfigEnforcesExpiry(t *testing.T) {
+	os.Setenv("GOKAPI_MAX_EXPIRY_DAYS", "7")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+
+	// The file-request path asks for an unlimited lifetime; it must not get one
+	config := CreateUploadConfig(0, 0, "", true, true, false, 0, "somerequest")
+	test.IsEqualBool(t, config.UnlimitedTime, false)
+	test.IsEqualInt(t, config.Expiry, 7)
+	test.IsEqualBool(t, config.ExpiryTimestamp > time.Now().Unix(), true)
 }

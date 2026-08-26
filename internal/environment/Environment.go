@@ -50,6 +50,12 @@ type Environment struct {
 	// Sets the amount of RAM in MB that can be allocated for an upload chunk or file
 	// Any chunk or file with a size greater than that will be written to a temporary file
 	MaxMemory int `env:"MAX_MEMORY_UPLOAD" envDefault:"50" onlyPositive:"true" persistent:"true"`
+	// Sets the maximum number of days after which an upload expires. Any upload that
+	// requests a longer expiry, or no expiry at all, is clamped to this value. This
+	// applies to every upload path, including file requests, so that no file can be
+	// stored permanently.
+	// Set to 0 to allow permanent files
+	MaxExpiryDays int `env:"MAX_EXPIRY_DAYS" envDefault:"0" onlyPositive:"true" persistent:"true"`
 	// Sets the maximum number of files that can be uploaded per file requests created by
 	// non-admin users
 	// Set to 0 to allow unlimited file count for all users

@@ -9,6 +9,7 @@ import (
 
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
@@ -131,6 +132,7 @@ func CompleteChunk(chunkId string, header chunking.FileHeader, userId int, confi
 // CreateUploadConfig populates a new models.UploadParameters struct
 func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string) models.UploadParameters {
 	settings := configuration.Get()
+	expiryDays, unlimitedTime = applyMaxExpiry(expiryDays, unlimitedTime)
 	return models.UploadParameters{
 		AllowedDownloads:    allowedDownloads,
 		Expiry:              expiryDays,
@@ -189,4 +191,23 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 
 type formOrHeader interface {
 	Get(key string) string
+}
+
+// applyMaxExpiry clamps an upload's lifetime to GOKAPI_MAX_EXPIRY_DAYS.
+//
+// Every upload path funnels through CreateUploadConfig, so enforcing here covers
+// the web form, the API and file requests alike. File requests matter most: they
+// are created with unlimitedTime set, so without this a file uploaded by an
+// external party would never expire.
+//
+// A value of 0 keeps the upstream behaviour of allowing permanent files.
+func applyMaxExpiry(expiryDays int, unlimitedTime bool) (int, bool) {
+	maxExpiryDays := environment.New().MaxExpiryDays
+	if maxExpiryDays < 1 {
+		return expiryDays, unlimitedTime
+	}
+	if unlimitedTime || expiryDays < 1 || expiryDays > maxExpiryDays {
+		return maxExpiryDays, false
+	}
+	return expiryDays, false
 }
