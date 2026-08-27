@@ -533,6 +533,10 @@ func AddHotlink(file *models.File) {
 
 // IsAbleHotlink returns true, if the file may use hotlinks (e.g. an image file that is not encrypted or password-protected).
 func IsAbleHotlink(file models.File) bool {
+	env := environment.New()
+	if env.DisableHotlinks {
+		return false
+	}
 	if file.RequiresClientDecryption() {
 		return false
 	}
@@ -545,7 +549,6 @@ func IsAbleHotlink(file models.File) bool {
 	if isPictureFile(file.Name, file.ContentType) {
 		return true
 	}
-	env := environment.New()
 	if !env.HotlinkVideos {
 		return false
 	}
@@ -839,6 +842,7 @@ func CleanUp(periodic bool) {
 	}
 	cleanOldTempFiles()
 	cleanHotlinks()
+	purgeHotlinksIfDisabled()
 	cleanInvalidApiKeys()
 	cleanInvalidFileRequests()
 	database.RunGarbageCollection()
@@ -907,6 +911,28 @@ func cleanHotlinks() {
 		_, ok := GetFileByHotlink(hotlink)
 		if !ok {
 			database.DeleteHotlink(hotlink)
+		}
+	}
+}
+
+// purgeHotlinksIfDisabled removes all hotlinks from the database and clears HotlinkId on the
+// corresponding file metadata, if hotlinks have been disabled with GOKAPI_DISABLE_HOTLINKS.
+// Unlike cleanHotlinks, which only removes hotlinks whose file has already become unavailable,
+// this also purges hotlinks that are still valid, so that switching the setting on retroactively
+// kills every link that was minted before it was set. As this runs as part of CleanUp, it is
+// executed once on startup and every hour after that, which makes it idempotent: once the
+// database no longer contains any hotlinks, there is nothing left to purge or clear.
+func purgeHotlinksIfDisabled() {
+	if !environment.New().DisableHotlinks {
+		return
+	}
+	for _, hotlink := range database.GetAllHotlinks() {
+		database.DeleteHotlink(hotlink)
+	}
+	for _, file := range database.GetAllMetadata() {
+		if file.HotlinkId != "" {
+			file.HotlinkId = ""
+			database.SaveMetaData(file)
 		}
 	}
 }
