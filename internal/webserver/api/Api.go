@@ -304,6 +304,64 @@ func apiGetUserList(w http.ResponseWriter, _ requestParser, _ models.User, _ mod
 	_, _ = w.Write(resultJson)
 }
 
+func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
+	type apiKeyListItem struct {
+		Id                string `json:"id,omitempty"`
+		PublicId          string `json:"publicId"`
+		FriendlyName      string `json:"friendlyName"`
+		Permissions       int    `json:"permissions"`
+		LastUsed          int64  `json:"lastUsed"`
+		Expiry            int64  `json:"expiry"`
+		IsOwnedByCaller   bool   `json:"isOwnedByCaller"`
+		UserId            int    `json:"userId"`
+	}
+
+	// Build user map for existence check
+	userMap := make(map[int]bool)
+	for _, u := range database.GetAllUsers() {
+		userMap[u.Id] = true
+	}
+
+	var result []apiKeyListItem
+	for _, apiKey := range database.GetAllApiKeys() {
+		// Skip if user doesn't exist
+		if !userMap[apiKey.UserId] {
+			continue
+		}
+		// Skip system keys
+		if apiKey.IsSystemKey {
+			continue
+		}
+		// Skip file request keys
+		if apiKey.IsUploadRequestKey() {
+			continue
+		}
+		// Include only if owned by caller or caller can manage API keys
+		if apiKey.UserId != user.Id && !user.HasPermission(models.UserPermManageApiKeys) {
+			continue
+		}
+
+		isOwned := apiKey.UserId == user.Id
+		item := apiKeyListItem{
+			PublicId:        apiKey.PublicId,
+			FriendlyName:    apiKey.FriendlyName,
+			Permissions:     int(apiKey.Permissions),
+			LastUsed:        apiKey.LastUsed,
+			Expiry:          apiKey.Expiry,
+			IsOwnedByCaller: isOwned,
+			UserId:          apiKey.UserId,
+		}
+		// Only expose full Id for keys owned by caller
+		if isOwned {
+			item.Id = apiKey.Id
+		}
+		result = append(result, item)
+	}
+	resultJson, err := json.Marshal(result)
+	helper.Check(err)
+	_, _ = w.Write(resultJson)
+}
+
 func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramUserCreate)
 	if !ok {

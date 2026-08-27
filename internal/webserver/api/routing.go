@@ -153,6 +153,12 @@ var routes = []apiRoute{
 		RequestParser: &paramAuthDelete{},
 	},
 	{
+		Url:           "/auth/list",
+		ApiPerm:       models.ApiPermApiMod,
+		execution:     apiGetAuthList,
+		RequestParser: nil,
+	},
+	{
 		Url:           "/user/me",
 		ApiPerm:       models.ApiPermNone,
 		execution:     apiGetCurrentUser,

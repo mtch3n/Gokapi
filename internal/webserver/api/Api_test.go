@@ -939,6 +939,36 @@ func countApiKeys() int {
 	return len(database.GetAllApiKeys())
 }
 
+func TestAuthList(t *testing.T) {
+	const apiUrl = "/auth/list"
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermApiMod)
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	type apiKeyListItem struct {
+		Id              string `json:"id,omitempty"`
+		PublicId        string `json:"publicId"`
+		FriendlyName    string `json:"friendlyName"`
+		Permissions     int    `json:"permissions"`
+		LastUsed        int64  `json:"lastUsed"`
+		Expiry          int64  `json:"expiry"`
+		IsOwnedByCaller bool   `json:"isOwnedByCaller"`
+		UserId          int    `json:"userId"`
+	}
+	var result []apiKeyListItem
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	// Should have at least one key (the one we're using)
+	test.IsEqualBool(t, len(result) >= 1, true)
+	// Verify structure
+	test.IsEqualBool(t, result[0].PublicId != "", true)
+	test.IsEqualBool(t, result[0].IsOwnedByCaller, true)
+	// For owned keys, Id should be present
+	test.IsEqualBool(t, result[0].Id != "", true)
+}
+
 func TestChangeFriendlyName(t *testing.T) {
 	const apiUrl = "/auth/friendlyname"
 	const headerApiKeyModify = "targetKey"

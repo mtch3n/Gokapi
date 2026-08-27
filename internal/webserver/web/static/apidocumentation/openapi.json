@@ -1607,6 +1607,41 @@
         }
       }
     },
+    "/auth/list": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Lists API keys",
+        "description": "This API call lists the API keys accessible by the calling user. Shows only keys owned by the user, or all keys if the user has the API_MOD permission. Requires API permission API_MOD",
+        "operationId": "authlist",
+        "security": [
+          {
+            "apikey": [
+              "API_MANAGE"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiKeyListItem"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          }
+        }
+      }
+    },
     "/uploadrequest/list": {
       "get": {
         "tags": [
@@ -2645,6 +2680,49 @@
           }
         },
         "description": "UserListItem is used for listing all users with their upload counts",
+        "x-go-package": "Gokapi/internal/webserver/api"
+      },
+      "ApiKeyListItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Full API key ID, only included for keys owned by the caller",
+            "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+          },
+          "publicId": {
+            "type": "string",
+            "example": "OGeidahfiep1Akeevahkoh1quechieP6ael"
+          },
+          "friendlyName": {
+            "type": "string",
+            "example": "My API Key"
+          },
+          "permissions": {
+            "type": "integer",
+            "description": "Bitmask of API permissions",
+            "example": 31
+          },
+          "lastUsed": {
+            "type": "integer",
+            "description": "Unix timestamp of last usage",
+            "example": 1693497600
+          },
+          "expiry": {
+            "type": "integer",
+            "description": "Unix timestamp when key expires, 0 means no expiry",
+            "example": 0
+          },
+          "isOwnedByCaller": {
+            "type": "boolean",
+            "example": true
+          },
+          "userId": {
+            "type": "integer",
+            "example": 14
+          }
+        },
+        "description": "ApiKeyListItem is used for listing API keys",
         "x-go-package": "Gokapi/internal/webserver/api"
       },
       "VersionInfo": {
