@@ -16,6 +16,7 @@ import (
 
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
@@ -1551,6 +1552,56 @@ func TestChunkComplete(t *testing.T) {
 
 	defer test.ExpectPanic(t)
 	apiChunkComplete(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
+}
+
+// TestChunkCompleteRejectsE2EWhenNotConfigured covers the API chunk-complete
+// entry point for F2: a client asserting the isE2E header must not be able to
+// mislabel an upload as end-to-end encrypted while the server is configured
+// for a different encryption level. No metadata row must be written for the
+// rejected upload, and the flag must keep working once the level is
+// EndToEndEncryption.
+func TestChunkCompleteRejectsE2EWhenNotConfigured(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermUpload)
+	database.SaveApiKey(apiKey)
+
+	previousLevel := configuration.Get().Encryption.Level
+	defer func() { configuration.Get().Encryption.Level = previousLevel }()
+
+	configuration.Get().Encryption.Level = encryption.FullEncryptionStored
+	chunkUUID := "e2enotconfigured123"
+	err := os.WriteFile("test/data/chunk-"+chunkUUID, []byte("testcontent"), 0600)
+	test.IsNil(t, err)
+	metadataBefore := len(database.GetAllMetadata())
+
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKey.Id},
+		{Name: "uuid", Value: chunkUUID},
+		{Name: "filename", Value: "test.upload"},
+		{Name: "filesize", Value: "11"},
+		{Name: "isE2E", Value: "true"},
+		{Name: "realsize", Value: "11"},
+	}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"end-to-end encryption is not enabled on this server","ErrorCode":10}`)
+	test.IsEqualInt(t, len(database.GetAllMetadata()), metadataBefore)
+
+	// The same request succeeds once the server is actually configured for E2E.
+	configuration.Get().Encryption.Level = encryption.EndToEndEncryption
+	err = os.WriteFile("test/data/chunk-"+chunkUUID, []byte("testcontent"), 0600)
+	test.IsNil(t, err)
+	w, r = test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKey.Id},
+		{Name: "uuid", Value: chunkUUID},
+		{Name: "filename", Value: "test.upload"},
+		{Name: "filesize", Value: "11"},
+		{Name: "isE2E", Value: "true"},
+		{Name: "realsize", Value: "11"},
+	}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.IsEqualInt(t, len(database.GetAllMetadata()), metadataBefore+1)
 }
 
 func TestMinorFunctions(t *testing.T) {

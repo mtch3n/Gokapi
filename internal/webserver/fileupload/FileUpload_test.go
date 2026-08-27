@@ -3,6 +3,7 @@ package fileupload
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/forceu/gokapi/internal/configuration"
+	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
@@ -66,8 +68,19 @@ func TestParseConfig(t *testing.T) {
 	test.IsEqualBool(t, config.UnlimitedTime, true)
 	test.IsEqualBool(t, config.UnlimitedDownload, true)
 
+	// isE2E is only honoured while the server is configured for end-to-end
+	// encryption; the server, not the caller, is authoritative here (F2).
 	data.isE2E = "true"
 	data.realSize = "200"
+	previousLevel := configuration.Get().Encryption.Level
+	defer func() { configuration.Get().Encryption.Level = previousLevel }()
+
+	configuration.Get().Encryption.Level = encryption.FullEncryptionStored
+	config, err = parseConfig(data)
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, ErrE2ENotConfigured), true)
+
+	configuration.Get().Encryption.Level = encryption.EndToEndEncryption
 	config, err = parseConfig(data)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.IsEndToEndEncrypted, true)
@@ -244,10 +257,40 @@ func TestCreateUploadConfigEnforcesExpiry(t *testing.T) {
 	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
 
 	// The file-request path asks for an unlimited lifetime; it must not get one
-	config := CreateUploadConfig(0, 0, "", true, true, false, 0, "somerequest")
+	config, err := CreateUploadConfig(0, 0, "", true, true, false, 0, "somerequest")
+	test.IsNil(t, err)
 	test.IsEqualBool(t, config.UnlimitedTime, false)
 	test.IsEqualInt(t, config.Expiry, 7)
 	test.IsEqualBool(t, config.ExpiryTimestamp > time.Now().Unix(), true)
+}
+
+// TestCreateUploadConfigRejectsE2EWhenNotConfigured is the choke-point test for F2:
+// the server, not a client-supplied isEnd2End flag, must decide whether a file is
+// end-to-end encrypted. Asserting E2E at any level other than EndToEndEncryption
+// must be rejected, and the flag must keep working once that level is configured.
+func TestCreateUploadConfigRejectsE2EWhenNotConfigured(t *testing.T) {
+	previousLevel := configuration.Get().Encryption.Level
+	defer func() { configuration.Get().Encryption.Level = previousLevel }()
+
+	for _, level := range []int{encryption.NoEncryption, encryption.LocalEncryptionStored,
+		encryption.LocalEncryptionInput, encryption.FullEncryptionStored, encryption.FullEncryptionInput} {
+		configuration.Get().Encryption.Level = level
+		_, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "")
+		test.IsNotNil(t, err)
+		test.IsEqualBool(t, errors.Is(err, ErrE2ENotConfigured), true)
+	}
+
+	configuration.Get().Encryption.Level = encryption.EndToEndEncryption
+	config, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, config.IsEndToEndEncrypted, true)
+	test.IsEqualInt64(t, config.RealSize, 100)
+
+	// Unchanged behaviour: isEnd2End=false never triggers the check, regardless of level.
+	configuration.Get().Encryption.Level = encryption.NoEncryption
+	config, err = CreateUploadConfig(1, 14, "", false, false, false, 0, "")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, config.IsEndToEndEncrypted, false)
 }
 
 func TestClampExpiryTimestamp(t *testing.T) {

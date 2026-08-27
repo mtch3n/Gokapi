@@ -9,6 +9,7 @@ import (
 
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
@@ -129,9 +130,21 @@ func CompleteChunk(chunkId string, header chunking.FileHeader, userId int, confi
 	return storage.NewFileFromChunk(chunkId, header, userId, config)
 }
 
-// CreateUploadConfig populates a new models.UploadParameters struct
-func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string) models.UploadParameters {
+// ErrE2ENotConfigured is returned by CreateUploadConfig when a caller asserts
+// end-to-end encryption but the server is not configured for it. The server,
+// not a client-supplied flag, is authoritative on whether a file is E2E
+// encrypted: trusting the caller here would mislabel the file and corrupt how
+// it is later served (see file.Encryption.IsEndToEndEncrypted / F2).
+var ErrE2ENotConfigured = errors.New("end-to-end encryption is not enabled on this server")
+
+// CreateUploadConfig populates a new models.UploadParameters struct.
+// It returns ErrE2ENotConfigured if isEnd2End is set while the server's
+// encryption level is not encryption.EndToEndEncryption.
+func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string) (models.UploadParameters, error) {
 	settings := configuration.Get()
+	if isEnd2End && settings.Encryption.Level != encryption.EndToEndEncryption {
+		return models.UploadParameters{}, ErrE2ENotConfigured
+	}
 	expiryDays, unlimitedTime = applyMaxExpiry(expiryDays, unlimitedTime)
 	return models.UploadParameters{
 		AllowedDownloads:    allowedDownloads,
@@ -145,14 +158,14 @@ func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlim
 		IsEndToEndEncrypted: isEnd2End,
 		RealSize:            realSize,
 		FileRequestId:       fileRequestId,
-	}
+	}, nil
 }
 
 func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	fileRequestId := values.Get("fileRequestId")
 	if fileRequestId != "" {
 		return CreateUploadConfig(0, 0, "",
-			true, true, false, 0, fileRequestId), nil
+			true, true, false, 0, fileRequestId)
 	}
 	allowedDownloads := values.Get("allowedDownloads")
 	expiryDays := values.Get("expiryDays")
@@ -186,7 +199,7 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 			return models.UploadParameters{}, err
 		}
 	}
-	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, password, unlimitedTime, unlimitedDownload, isEnd2End, realSize, ""), nil
+	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, password, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "")
 }
 
 type formOrHeader interface {
