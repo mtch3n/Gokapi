@@ -998,8 +998,9 @@ func TestAuthList(t *testing.T) {
 	// Verify structure
 	test.IsEqualBool(t, result[0].PublicId != "", true)
 	test.IsEqualBool(t, result[0].IsOwnedByCaller, true)
-	// For owned keys, Id should be present
-	test.IsEqualBool(t, result[0].Id != "", true)
+	// Verify Id is redacted, not full secret
+	test.IsEqualString(t, result[0].Id, apiKey.GetRedactedId())
+	test.IsNotEqualString(t, result[0].Id, apiKey.Id)
 }
 
 func TestChangeFriendlyName(t *testing.T) {

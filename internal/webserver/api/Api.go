@@ -350,6 +350,7 @@ func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ 
 
 		isOwned := apiKey.UserId == user.Id
 		item := apiKeyListItem{
+			Id:              apiKey.GetRedactedId(),
 			PublicId:        apiKey.PublicId,
 			FriendlyName:    apiKey.FriendlyName,
 			Permissions:     int(apiKey.Permissions),
@@ -357,10 +358,6 @@ func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ 
 			Expiry:          apiKey.Expiry,
 			IsOwnedByCaller: isOwned,
 			UserId:          apiKey.UserId,
-		}
-		// Only expose full Id for keys owned by caller
-		if isOwned {
-			item.Id = apiKey.Id
 		}
 		result = append(result, item)
 	}
