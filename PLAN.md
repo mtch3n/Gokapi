@@ -606,6 +606,16 @@ layer can be added afterwards.
   is clamped; duplicate-with- and without-`ParamExpiry` both end ≤ 30 days.
 
 **W18 — Session hardening: `Secure` cookie attribute + shorter lifetime [decision-independent]**
+- *STATUS: DONE* (`7751262`, merged). `Secure` is gated on `configuration.UsesHttps()`, which
+  is derived from `ServerUrl` rather than from a request header, so a TLS-terminating proxy
+  only works correctly if `ServerUrl` is configured `https://` — W8 must pin this and W20
+  must spot-check it. New `GOKAPI_SESSION_DURATION_DAYS`, default 7, confirmed by the user.
+- *UPSTREAMING NOTE (review finding):* when this is extracted into an upstream pull request,
+  split it. Upstream gets the `Secure` fix and the configurability knob with `envDefault:"30"`,
+  preserving existing behaviour; our deployment sets `GOKAPI_SESSION_DURATION_DAYS=7`. Upstream
+  maintainers are unlikely to accept a silent 30-to-7 change in default session lifetime, and
+  this keeps W18 consistent with W4, which was deliberately specified to default to upstream
+  behaviour. One-character change at PR time.
 - *Why (Codex finding, VERIFIED):* `writeSessionCookie` sets `HttpOnly` and
   `SameSite=Lax` but **no `Secure` attribute**
   (`internal/webserver/authentication/sessionmanager/SessionManager.go:85-95`),
