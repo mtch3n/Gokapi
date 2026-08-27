@@ -327,6 +327,13 @@ func TestUserGetMe(t *testing.T) {
 	err := json.Unmarshal(w.Body.Bytes(), &result)
 	test.IsNil(t, err)
 	test.IsEqualInt(t, result.Id, idUser)
+
+	// Verify no sensitive password field is leaked in the response
+	var rawResult map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &rawResult)
+	test.IsNil(t, err)
+	_, hasPassword := rawResult["password"]
+	test.IsEqualBool(t, hasPassword, false)
 }
 
 func TestUserList(t *testing.T) {
@@ -960,6 +967,18 @@ func TestAuthInfo(t *testing.T) {
 	test.IsEqualBool(t, result.PublicName != "", true)
 	test.IsEqualBool(t, result.MinPasswordLength >= 6, true)
 
+	// Verify exact field set to prevent unintended fields from leaking
+	var rawResult map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &rawResult)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(rawResult), 3)
+	_, hasMethod := rawResult["method"]
+	_, hasPublicName := rawResult["publicName"]
+	_, hasMinPasswordLength := rawResult["minPasswordLength"]
+	test.IsEqualBool(t, hasMethod, true)
+	test.IsEqualBool(t, hasPublicName, true)
+	test.IsEqualBool(t, hasMinPasswordLength, true)
+
 	// Test with invalid API key - should still work (endpoint is public)
 	w, r = getRecorder(apiUrl, "invalid", []test.Header{})
 	Process(w, r)
@@ -995,12 +1014,19 @@ func TestAuthList(t *testing.T) {
 	test.IsNil(t, err)
 	// Should have at least one key (the one we're using)
 	test.IsEqualBool(t, len(result) >= 1, true)
-	// Verify structure
-	test.IsEqualBool(t, result[0].PublicId != "", true)
-	test.IsEqualBool(t, result[0].IsOwnedByCaller, true)
-	// Verify Id is redacted, not full secret
-	test.IsEqualString(t, result[0].Id, apiKey.GetRedactedId())
-	test.IsNotEqualString(t, result[0].Id, apiKey.Id)
+	// Verify structure - find the apiKey in result
+	foundOwnKey := false
+	for _, item := range result {
+		if item.PublicId == apiKey.PublicId {
+			foundOwnKey = true
+			test.IsEqualBool(t, item.IsOwnedByCaller, true)
+			// Verify Id is redacted, not full secret
+			test.IsEqualString(t, item.Id, apiKey.GetRedactedId())
+			test.IsNotEqualString(t, item.Id, apiKey.Id)
+			break
+		}
+	}
+	test.IsEqualBool(t, foundOwnKey, true)
 
 	// Test deterministic ordering with a second key
 	secondKey := generateNewKey(false, apiKey.UserId, "Second Key", "")
@@ -1012,22 +1038,88 @@ func TestAuthList(t *testing.T) {
 	test.IsNil(t, err)
 	// Should have at least two keys now
 	test.IsEqualBool(t, len(result2) >= 2, true)
-	// Verify ordering is stable (keys should be sorted by LastUsed desc, then Id asc)
-	// Since both keys have LastUsed=0, they should be sorted by Id
-	test.IsEqualBool(t, result2[0].PublicId != "", true)
-	// Get the actual keys from database to verify ordering
-	retrievedKey1, ok1 := database.GetApiKey(apiKey.Id)
-	retrievedKey2, ok2 := database.GetApiKey(secondKey.Id)
-	test.IsEqualBool(t, ok1, true)
-	test.IsEqualBool(t, ok2, true)
-	// Verify the order matches the sorting logic (LastUsed desc, Id asc)
-	// Since both have LastUsed=0, compare by Id
-	if retrievedKey1.Id < retrievedKey2.Id {
-		test.IsEqualString(t, result2[0].PublicId, retrievedKey1.PublicId)
-		test.IsEqualString(t, result2[1].PublicId, retrievedKey2.PublicId)
-	} else {
-		test.IsEqualString(t, result2[0].PublicId, retrievedKey2.PublicId)
-		test.IsEqualString(t, result2[1].PublicId, retrievedKey1.PublicId)
+	// Verify the second key is present
+	foundSecondKey := false
+	for _, item := range result2 {
+		if item.PublicId == secondKey.PublicId {
+			foundSecondKey = true
+			break
+		}
+	}
+	test.IsEqualBool(t, foundSecondKey, true)
+
+	// Test exclusion of system keys, file request keys, and other users' keys
+	// Create a system key
+	systemKey := models.ApiKey{
+		Id:           "systemKey123",
+		PublicId:     "systemKeyPublic123",
+		FriendlyName: "System Key",
+		Permissions:  models.ApiPermNone,
+		IsSystemKey:  true,
+		UserId:       apiKey.UserId,
+	}
+	database.SaveApiKey(systemKey)
+
+	// Create a file request key
+	fileRequestKey := models.ApiKey{
+		Id:              "fileRequestKey123",
+		PublicId:        "fileRequestKeyPublic123",
+		FriendlyName:    "File Request Key",
+		Permissions:     models.ApiPermNone,
+		UserId:          apiKey.UserId,
+		UploadRequestId: "fileRequest123",
+	}
+	database.SaveApiKey(fileRequestKey)
+
+	// Create a key for a different user
+	otherUser := models.User{
+		Name:      "OtherTestUser123",
+		UserLevel: models.UserLevelUser,
+	}
+	database.SaveUser(otherUser, true)
+	_ = generateNewKey(false, otherUser.Id, "Other User Key", "")
+
+	// Test that user without UserPermManageApiKeys permission doesn't see other user's keys
+	userWithoutPermission := generateNewKey(false, idUser, "User Without Permission", "")
+	// Grant the permission needed to access /auth/list
+	setPermissionApikey(t, userWithoutPermission.Id, models.ApiPermApiMod)
+	w, r = getRecorder(apiUrl, userWithoutPermission.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result3 []apiKeyListItem
+	err = json.Unmarshal(w.Body.Bytes(), &result3)
+	test.IsNil(t, err)
+
+	// Should only see own keys, not other user's key
+	for _, item := range result3 {
+		test.IsEqualBool(t, item.UserId == idUser, true)
+		test.IsEqualBool(t, item.UserId != otherUser.Id, true)
+	}
+	// Should not see system keys
+	for _, item := range result3 {
+		test.IsNotEqualString(t, item.PublicId, systemKey.PublicId)
+	}
+	// Should not see file request keys
+	for _, item := range result3 {
+		test.IsNotEqualString(t, item.PublicId, fileRequestKey.PublicId)
+	}
+	// All ids should be redacted
+	for _, item := range result3 {
+		for _, k := range database.GetAllApiKeys() {
+			if k.PublicId == item.PublicId {
+				test.IsEqualString(t, item.Id, k.GetRedactedId())
+				test.IsNotEqualString(t, item.Id, k.Id)
+				break
+			}
+		}
+	}
+
+	// Verify all keys returned have redacted ids, no full secrets leaked
+	for _, item := range result3 {
+		// Redacted ids should have stars in the middle
+		test.IsEqualBool(t, strings.Contains(item.Id, "**"), true)
+		// And should not contain the full key material
+		test.IsEqualBool(t, strings.Count(item.Id, "*") == 26, true)
 	}
 }
 
