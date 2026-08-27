@@ -92,35 +92,6 @@ func TestGetFile(t *testing.T) {
 	database.DeleteMetaData(pendingFile.Id)
 }
 
-func TestGetEncInfoFromExistingFile(t *testing.T) {
-	configuration.Get().Encryption.Level = 0
-	_, result := getEncInfoFromExistingFile("testhash")
-	test.IsEqualBool(t, result, true)
-	file := models.File{
-		Id:   "testhash",
-		Name: "testhash",
-		SHA1: "testhash",
-		Encryption: models.EncryptionInfo{
-			IsEncrypted:   true,
-			DecryptionKey: nil,
-			Nonce:         nil,
-		},
-		UnlimitedDownloads: true,
-		UnlimitedTime:      true,
-	}
-	database.SaveMetaData(file)
-	encinfo, result := getEncInfoFromExistingFile("testhash")
-	test.IsEqualBool(t, encinfo.IsEncrypted, false)
-	test.IsEqualBool(t, result, true)
-	configuration.Get().Encryption.Level = 1
-	encinfo, result = getEncInfoFromExistingFile("testhash")
-	test.IsEqualBool(t, result, true)
-	test.IsEqualBool(t, encinfo.IsEncrypted, true)
-	_, result = getEncInfoFromExistingFile("testhashinvalid")
-	test.IsEqualBool(t, result, false)
-	configuration.Get().Encryption.Level = 0
-}
-
 func TestGetFileByHotlink(t *testing.T) {
 	_, result := GetFileByHotlink("invalid")
 	test.IsEqualBool(t, result, false)
@@ -362,8 +333,6 @@ func TestNewFile(t *testing.T) {
 	os.Remove("bigfile")
 
 	configuration.Get().Encryption.Level = 1
-	previousSalt := configuration.Get().Authentication.SaltFiles
-	configuration.Get().Authentication.SaltFiles = "testsaltfiles"
 	cipher, err := encryption.GetRandomCipher()
 	test.IsNil(t, err)
 	encryption.Init(models.Configuration{Encryption: models.Encryption{
@@ -371,11 +340,24 @@ func TestNewFile(t *testing.T) {
 		Cipher: cipher,
 	}})
 
+	// Encrypted uploads must never be deduplicated: two uploads of identical content (both the
+	// in-memory and the temp-file path) get their own random storage identifier, their own blob
+	// on disk and their own key/nonce, instead of sharing the first upload's.
 	newFile, err = createTestFile()
 	test.IsNil(t, err)
 	retrievedFile, ok = database.GetMetaDataById(newFile.File.Id)
 	test.IsEqualBool(t, ok, true)
-	test.IsEqualString(t, retrievedFile.SHA1, "5bbfa18805eb12c678cfd284c956718d57039e37")
+	test.IsEqualBool(t, strings.HasPrefix(retrievedFile.SHA1, "enc-"), true)
+	test.IsEqualBool(t, retrievedFile.Encryption.IsEncrypted, true)
+
+	secondSmallFile, err := createTestFile()
+	test.IsNil(t, err)
+	secondSmallRetrieved, ok := database.GetMetaDataById(secondSmallFile.File.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsNotEqualString(t, retrievedFile.SHA1, secondSmallRetrieved.SHA1)
+	test.IsEqualBool(t, bytes.Equal(retrievedFile.Encryption.DecryptionKey, secondSmallRetrieved.Encryption.DecryptionKey), false)
+	test.FileExists(t, configuration.Get().DataDir+"/"+retrievedFile.SHA1)
+	test.FileExists(t, configuration.Get().DataDir+"/"+secondSmallRetrieved.SHA1)
 
 	createBigFile("bigfile", 20)
 	header.Size = int64(20) * 1024 * 1024
@@ -385,19 +367,19 @@ func TestNewFile(t *testing.T) {
 	retrievedFile, ok = database.GetMetaDataById(file.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, retrievedFile.Name, "bigfile")
-	test.IsEqualString(t, retrievedFile.SHA1, "c1c165c30d0def15ba2bc8f1bd243be13b8c8fe7")
-
+	test.IsEqualBool(t, strings.HasPrefix(retrievedFile.SHA1, "enc-"), true)
 	bigFile.Close()
-	database.DeleteMetaData(retrievedFile.Id)
 
 	bigFile, _ = os.Open("bigfile")
-	file, err = NewFile(bigFile, &header, 99, request)
+	secondBigFile, err := NewFile(bigFile, &header, 99, request)
 	test.IsNil(t, err)
-	retrievedFile, ok = database.GetMetaDataById(file.Id)
-	test.IsEqualBool(t, ok, true)
+	test.IsNotEqualString(t, retrievedFile.SHA1, secondBigFile.SHA1)
+	test.IsEqualBool(t, bytes.Equal(retrievedFile.Encryption.DecryptionKey, secondBigFile.Encryption.DecryptionKey), false)
+	test.FileExists(t, configuration.Get().DataDir+"/"+retrievedFile.SHA1)
+	test.FileExists(t, configuration.Get().DataDir+"/"+secondBigFile.SHA1)
+	bigFile.Close()
 	os.Remove("bigfile")
 
-	configuration.Get().Authentication.SaltFiles = previousSalt
 	configuration.Get().Encryption.Level = 0
 
 	if aws.IsIncludedInBuild {
@@ -964,6 +946,116 @@ func createBigFile(name string, megabytes int64) {
 	_, _ = file.Seek(size-1, 0)
 	_, _ = file.Write([]byte{0})
 	_ = file.Close()
+}
+
+// TestNewFileFromChunkEncryptedNeverDeduplicated locks in that chunked uploads follow the same rule
+// as NewFile: once server-side encryption is active, two chunk uploads with identical content must
+// never share a blob or a key, must both remain independently downloadable, and deleting one must
+// not affect the other. This runs after TestDeleteFile (which re-seeds the fixtures via
+// testconfiguration.Create) because DeleteFile triggers an asynchronous, database-wide CleanUp that
+// would otherwise race with the fixtures TestCleanUp depends on.
+func TestNewFileFromChunkEncryptedNeverDeduplicated(t *testing.T) {
+	configuration.Get().Encryption.Level = 1
+	cipher, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:  encryption.LocalEncryptionStored,
+		Cipher: cipher,
+	}})
+	defer func() { configuration.Get().Encryption.Level = 0 }()
+
+	content := []byte("identical chunk content uploaded twice while encryption is active")
+	writeChunk := func() (string, chunking.FileHeader, models.UploadParameters) {
+		header, request := createRawTestFile(content)
+		chunkId := helper.GenerateRandomString(15)
+		fileheader := chunking.FileHeader{
+			Filename:    header.Filename,
+			ContentType: header.Header.Get("Content-Type"),
+			Size:        header.Size,
+		}
+		writeErr := os.WriteFile("test/data/chunk-"+chunkId, content, 0600)
+		test.IsNil(t, writeErr)
+		return chunkId, fileheader, request
+	}
+
+	chunkIdA, fileHeaderA, requestA := writeChunk()
+	fileA, err := NewFileFromChunk(chunkIdA, fileHeaderA, 99, requestA)
+	test.IsNil(t, err)
+
+	chunkIdB, fileHeaderB, requestB := writeChunk()
+	fileB, err := NewFileFromChunk(chunkIdB, fileHeaderB, 99, requestB)
+	test.IsNil(t, err)
+
+	test.IsEqualBool(t, strings.HasPrefix(fileA.SHA1, "enc-"), true)
+	test.IsEqualBool(t, strings.HasPrefix(fileB.SHA1, "enc-"), true)
+	test.IsNotEqualString(t, fileA.SHA1, fileB.SHA1)
+	test.IsEqualBool(t, bytes.Equal(fileA.Encryption.DecryptionKey, fileB.Encryption.DecryptionKey), false)
+	test.FileExists(t, configuration.Get().DataDir+"/"+fileA.SHA1)
+	test.FileExists(t, configuration.Get().DataDir+"/"+fileB.SHA1)
+
+	// Both must be independently downloadable and decrypt back to the original content.
+	for _, f := range []models.File{fileA, fileB} {
+		retrieved, ok := database.GetMetaDataById(f.Id)
+		test.IsEqualBool(t, ok, true)
+		r := httptest.NewRequest("GET", "/", nil)
+		w := httptest.NewRecorder()
+		served := ServeFile(retrieved, w, r, true, false, false, false)
+		test.IsEqualBool(t, served, true)
+		body, readErr := io.ReadAll(w.Result().Body)
+		test.IsNil(t, readErr)
+		test.IsEqualString(t, string(body), string(content))
+	}
+
+	// Deleting one file must not remove the other's independent blob.
+	DeleteFile(fileA.Id, true)
+	time.Sleep(time.Second)
+	test.FileDoesNotExist(t, configuration.Get().DataDir+"/"+fileA.SHA1)
+	test.FileExists(t, configuration.Get().DataDir+"/"+fileB.SHA1)
+	_, ok := GetFile(fileB.Id)
+	test.IsEqualBool(t, ok, true)
+
+	DeleteFile(fileB.Id, true)
+	time.Sleep(time.Second)
+	test.FileDoesNotExist(t, configuration.Get().DataDir+"/"+fileB.SHA1)
+}
+
+// TestDuplicateFileSharesBlobEvenWhenEncrypted documents the deliberate exception to "never reuse a
+// blob": DuplicateFile intentionally keeps sharing the source file's storage identifier and, if
+// encrypted, its key and nonce, because the duplicate is byte-identical by construction (see the
+// doc comment on DuplicateFile) rather than independently-uploaded content that merely happens to
+// hash the same. CleanUp must not delete that shared blob while either metadata row still exists.
+func TestDuplicateFileSharesBlobEvenWhenEncrypted(t *testing.T) {
+	configuration.Get().Encryption.Level = 1
+	cipher, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:  encryption.LocalEncryptionStored,
+		Cipher: cipher,
+	}})
+	defer func() { configuration.Get().Encryption.Level = 0 }()
+
+	original, err := createTestFile()
+	test.IsNil(t, err)
+	originalFile := original.File
+
+	duplicate, err := DuplicateFile(originalFile, 0, "", models.UploadParameters{})
+	test.IsNil(t, err)
+
+	test.IsEqualString(t, duplicate.SHA1, originalFile.SHA1)
+	test.IsEqualByteSlice(t, duplicate.Encryption.DecryptionKey, originalFile.Encryption.DecryptionKey)
+	test.IsEqualByteSlice(t, duplicate.Encryption.Nonce, originalFile.Encryption.Nonce)
+
+	// Deleting the original must not remove the blob the duplicate still relies on.
+	DeleteFile(originalFile.Id, true)
+	time.Sleep(time.Second)
+	test.FileExists(t, configuration.Get().DataDir+"/"+originalFile.SHA1)
+	_, ok := GetFile(duplicate.Id)
+	test.IsEqualBool(t, ok, true)
+
+	// Deleting the duplicate as well must finally remove the now-unreferenced blob.
+	DeleteFile(duplicate.Id, true)
+	time.Sleep(time.Second)
+	test.FileDoesNotExist(t, configuration.Get().DataDir+"/"+originalFile.SHA1)
 }
 
 func TestDeleteAllEncrypted(t *testing.T) {
