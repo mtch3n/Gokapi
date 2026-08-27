@@ -2,6 +2,7 @@ package fileupload
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -52,7 +53,10 @@ func ProcessCompleteFile(w http.ResponseWriter, r *http.Request, userId, maxMemo
 		// Fail closed: without a durable audit record of this upload, the file must not be
 		// confirmed to the client. Remove what was just stored rather than leave an unaudited
 		// file behind.
-		_ = storage.DeleteFile(result.Id, true)
+		if !storage.DeleteFile(result.Id, true) {
+			fmt.Println("audit: could not roll back unaudited upload", result.Id, "after an audit write failure - "+
+				"the file may still be present on disk without a durable audit record")
+		}
 		return err
 	}
 	_, _ = io.WriteString(w, result.ToJsonResult(config.ExternalUrl, configuration.Get().IncludeFilename))

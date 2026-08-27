@@ -15,15 +15,26 @@ switched on without migrating or re-canonicalising anything written before that 
   - Seq is a strictly monotonic sequence number, gap-free across everything that was
     successfully written (a write that fails does not consume a sequence number).
   - PrevHash links every entry to the hash of the one before it (the empty string for the
-    first entry ever written), and Hash = SHA-256(PrevHash || canonical JSON of the entry
-    with Hash cleared). A later signer only needs to countersign the most recent Hash: that
-    transitively covers every entry back to the first one, without touching any of them.
-  - The "canonical JSON" is simply encoding/json applied to a fixed struct: Go serialises
-    struct fields in declaration order and this package never puts a map or an interface{}
-    value into an entry, so the encoding is already deterministic without a bespoke
-    canonicaliser.
-Nothing here is signed yet (that is a later work item); the chain exists from the first
-entry so that when signing is added, all history already collected is covered.
+    first entry ever written).
+  - Hash field placement and the verification rule (this is what a verifier, e.g. W16, should
+    implement): Hash is declared last in AuditEntry and has no `omitempty`, so it is always
+    the final "hash":"<64 hex chars>"} in the stored line. Both writing and verifying work
+    directly on those bytes, never on a second call to encoding/json:
+      - To write: marshal the entry once with Hash == "" (giving a line ending in
+        "hash":""}), compute SHA-256(PrevHash || thatLine), and splice the resulting hex
+        string into the empty hash value directly in the byte slice. See
+        finalizeEntryLine().
+      - To verify a stored line: take its exact bytes, replace the value of the trailing
+        "hash":"..." field with "" (undoing exactly the splice above), compute
+        SHA-256(PrevHash || clearedLine), and compare to the hash that was in the line. See
+        recomputeEntryHash(), used both by startup recovery and by any future verifier.
+    Because both directions operate on raw stored bytes rather than re-serialising the parsed
+    Go struct, a verifier never has to reproduce encoding/json's output on any Go version,
+    past or future - it only has to do the string splice above.
+A later signer only needs to countersign the most recent Hash: that transitively covers every
+entry back to the first one, without touching any of them. Nothing here is signed yet (that is
+a later work item); the chain exists from the first entry so that when signing is added, all
+history already collected is covered.
 */
 
 import (
@@ -114,6 +125,14 @@ var auditMutex sync.Mutex
 var auditNextSeq uint64 = 1
 var auditPrevHash = ""
 
+// auditChainUnusable is set when recovery finds an existing, non-empty audit log in which not
+// a single entry parses and self-verifies. That is not the ordinary torn-tail case (a crash mid
+// fsync corrupts at most the last line); it means the file's sequence/hash state cannot be
+// trusted at all. Silently starting a fresh chain at seq 1 in that situation would produce
+// duplicate sequence numbers on disk that no future verifier could reconcile, so instead every
+// write is refused (see appendAuditEntry) until the file is manually moved aside or repaired.
+var auditChainUnusable = false
+
 // initAudit sets the path of the audit chain file and recovers Seq/PrevHash from it, so that
 // a restart continues the same chain instead of starting a new one.
 func initAudit(filePath string) {
@@ -121,16 +140,18 @@ func initAudit(filePath string) {
 	recoverAuditChainState()
 }
 
-// recoverAuditChainState reads the tail of the audit log (bounded to the last 64KiB, several
-// hundred entries at typical sizes) and resumes the chain from the last entry that parses
-// correctly. If the very end of the file is an incomplete JSON line - the shape a crash mid
-// fsync would leave - it is skipped and reported, but never deleted: the file is append-only
-// evidence and this package never truncates or rewrites it.
+// recoverAuditChainState reads the audit log and resumes the chain from the last entry that
+// both parses and self-verifies (its own Hash matches SHA-256(PrevHash || the line with the
+// hash cleared), recomputed from the exact stored bytes - see recomputeEntryHash). If the very
+// end of the file is an incomplete or tampered line, it is skipped and reported, but never
+// deleted: the file is append-only evidence and this package never truncates or rewrites it.
+// If nothing in the whole file verifies, the chain is marked unusable rather than silently
+// restarting at seq 1 (see auditChainUnusable).
 func recoverAuditChainState() {
 	auditNextSeq = 1
 	auditPrevHash = ""
+	auditChainUnusable = false
 
-	const tailWindow = 64 * 1024
 	f, err := os.Open(auditLogPath)
 	if err != nil {
 		return // no existing chain to resume (missing or unreadable): start a fresh one
@@ -138,20 +159,24 @@ func recoverAuditChainState() {
 	defer f.Close()
 
 	info, err := f.Stat()
-	if err != nil || info.Size() == 0 {
+	if err != nil {
+		fmt.Println("audit: could not stat existing audit log, refusing to append to it until this is resolved:", err)
+		auditChainUnusable = true
 		return
 	}
-	offset := int64(0)
-	if info.Size() > tailWindow {
-		offset = info.Size() - tailWindow
-	}
-	if _, err = f.Seek(offset, io.SeekStart); err != nil {
-		fmt.Println("audit: could not read existing audit log, starting a new chain from seq 1:", err)
+	if info.Size() == 0 {
 		return
 	}
+
+	// The whole file is read rather than only its tail: a bounded read would let an entry that
+	// still verifies further back in the file go undiscovered, forcing an unnecessary restart
+	// at seq 1. Audit logs for a self-hosted file-sharing instance are not expected to reach a
+	// size where a one-time read at startup is a problem; if that changes, retention (a
+	// deferred, separate work item) is the right fix, not skipping verification here.
 	buf, err := io.ReadAll(f)
 	if err != nil {
-		fmt.Println("audit: could not read existing audit log, starting a new chain from seq 1:", err)
+		fmt.Println("audit: could not read existing audit log, refusing to append to it until this is resolved:", err)
+		auditChainUnusable = true
 		return
 	}
 
@@ -172,20 +197,28 @@ func recoverAuditChainState() {
 		}
 		var entry AuditEntry
 		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.Hash != "" {
-			if badTail > 0 {
-				fmt.Printf("audit: recovered chain state from entry seq %d after skipping %d unparsable trailing line(s), "+
-					"likely a partial write from a crash; the malformed data was left in place for forensic review\n", entry.Seq, badTail)
+			if recomputed, ok := recomputeEntryHash(line, entry.PrevHash); ok && recomputed == entry.Hash {
+				if badTail > 0 {
+					fmt.Printf("audit: recovered chain state from entry seq %d after skipping %d unparsable or "+
+						"unverifiable trailing line(s), likely a partial write from a crash; the malformed data was "+
+						"left in place for forensic review\n", entry.Seq, badTail)
+				}
+				auditNextSeq = entry.Seq + 1
+				auditPrevHash = entry.Hash
+				return
 			}
-			auditNextSeq = entry.Seq + 1
-			auditPrevHash = entry.Hash
-			return
 		}
 		badTail++
 	}
-	if badTail > 0 {
-		fmt.Println("audit: audit log tail could not be parsed, likely a partial write from a crash; starting a new chain " +
-			"from seq 1. The malformed data was left in place for forensic review.")
-	}
+	// Nothing in the file parsed and self-verified. Unlike the small torn-tail case this covers
+	// the whole file, which is unexplained corruption rather than an interrupted last write:
+	// refuse to append until a human resolves it (see auditChainUnusable), rather than silently
+	// starting a fresh chain that could collide with whatever sequence numbers are already
+	// sitting unverified on disk.
+	fmt.Println("audit: audit log exists but no entry in it could be parsed and verified; refusing to append to it until " +
+		"this is resolved manually (e.g. by moving the file aside so a fresh chain can start). Not deleting or " +
+		"modifying the existing file.")
+	auditChainUnusable = true
 }
 
 // ensureTrailingNewline appends a single newline byte to the audit log if a prior write was
@@ -203,6 +236,49 @@ func ensureTrailingNewline() {
 	_ = f.Sync()
 }
 
+// hashFieldSuffix is the exact tail every stored line has while its hash value is still empty:
+// Hash is declared last in AuditEntry with no `omitempty`, so a marshaled entry with Hash == ""
+// always ends in exactly this. finalizeEntryLine and recomputeEntryHash both rely on it.
+const hashFieldSuffix = `"hash":""}`
+
+// finalizeEntryLine takes preImage - json.Marshal(entry) with entry.Hash == "" - and prevHash,
+// computes hash = SHA-256(prevHash || preImage), and returns the final line with that hash
+// spliced directly into the trailing hash value: no second call to encoding/json is made, so
+// the stored bytes are guaranteed to be exactly preImage with only the hash value filled in.
+// See the package doc comment for why this, rather than re-marshaling, is the format's
+// verification rule.
+func finalizeEntryLine(preImage []byte, prevHash string) (line []byte, hashHex string, ok bool) {
+	s := string(preImage)
+	if !strings.HasSuffix(s, hashFieldSuffix) {
+		return nil, "", false
+	}
+	sum := sha256.Sum256(append([]byte(prevHash), preImage...))
+	hashHex = hex.EncodeToString(sum[:])
+	// Drop the trailing `"}` (the empty value's closing quote and the entry's closing brace),
+	// leaving the line ending right after the value's opening quote, then fill in the hash.
+	return []byte(s[:len(s)-2] + hashHex + `"}`), hashHex, true
+}
+
+// recomputeEntryHash is the inverse of finalizeEntryLine: given the exact bytes of a stored
+// line and the prevHash it claims, it strips the line's own hash value back out (recovering the
+// same preImage finalizeEntryLine hashed), recomputes SHA-256(prevHash || preImage) and returns
+// it for the caller to compare against the hash actually stored in the line. Used by startup
+// recovery, and is the rule any later external verifier should implement.
+func recomputeEntryHash(line string, prevHash string) (hashHex string, ok bool) {
+	const marker = `"hash":"`
+	idx := strings.LastIndex(line, marker)
+	if idx == -1 || !strings.HasSuffix(line, `"}`) {
+		return "", false
+	}
+	valueStart := idx + len(marker)
+	if valueStart > len(line)-2 {
+		return "", false
+	}
+	cleared := line[:valueStart] + `"}` // same shape finalizeEntryLine started from
+	sum := sha256.Sum256(append([]byte(prevHash), []byte(cleared)...))
+	return hex.EncodeToString(sum[:]), true
+}
+
 // appendAuditEntry assigns Seq/PrevHash/Hash/Timestamp/Version, appends the entry to the audit
 // chain and fsyncs it before returning. It blocks until the write is durable on local storage;
 // it never ships anything over the network. Callers on a "serve bytes" path (downloads) or a
@@ -211,6 +287,11 @@ func ensureTrailingNewline() {
 func appendAuditEntry(entry AuditEntry) error {
 	auditMutex.Lock()
 	defer auditMutex.Unlock()
+
+	if auditChainUnusable {
+		return fmt.Errorf("audit: chain state could not be recovered from an existing, unverifiable audit log at %s; "+
+			"refusing to append until this is resolved manually", auditLogPath)
+	}
 
 	entry.Version = auditFormatVersion
 	entry.Timestamp = time.Now().Unix()
@@ -222,12 +303,9 @@ func appendAuditEntry(entry AuditEntry) error {
 	if err != nil {
 		return fmt.Errorf("audit: could not canonicalise entry: %w", err)
 	}
-	sum := sha256.Sum256(append([]byte(entry.PrevHash), preImage...))
-	entry.Hash = hex.EncodeToString(sum[:])
-
-	line, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("audit: could not serialise entry: %w", err)
+	line, hashHex, ok := finalizeEntryLine(preImage, entry.PrevHash)
+	if !ok {
+		return fmt.Errorf("audit: marshaled entry did not have the expected trailing empty hash field")
 	}
 
 	file, err := os.OpenFile(auditLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -244,7 +322,7 @@ func appendAuditEntry(entry AuditEntry) error {
 	}
 
 	auditNextSeq++
-	auditPrevHash = entry.Hash
+	auditPrevHash = hashHex
 	return nil
 }
 

@@ -632,7 +632,16 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	// fails - so a crash between the two can only over-log (an audit entry for a download that
 	// did not fully complete), never serve content with no record of it. See
 	// internal/logging/AuditLog.go for the chain design.
+	//
+	// Note the increaseCounter block above (W2's territory) already ran: if increaseCounter was
+	// set, this file's download allowance was already decremented before this point, so a
+	// failure here is an irreversible state change with no audit record of it - not merely a
+	// refused request. logging.LogAuditWriteFailure is a best-effort attempt to still record
+	// that fact via the separate human-readable log, since the two are independent files.
 	if err := logging.LogDownload(file, r, configuration.Get().SaveIp); err != nil {
+		if increaseCounter {
+			logging.LogAuditWriteFailure(fmt.Sprintf("download allowance for file %s was already decremented", file.Id), err)
+		}
 		fmt.Println("audit: refusing download, could not record audit event:", err)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("Service temporarily unavailable, please try again."))

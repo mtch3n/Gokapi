@@ -1,5 +1,8 @@
 config/
 data/
+# internal/logging's tests write log.txt/audit.jsonl crash debris directly under this path (not
+# under config/ or data/), see internal/logging/Logging_test.go and AuditLog_test.go
+/internal/logging/test/
 .idea/
 Gokapi
 build/*.zip

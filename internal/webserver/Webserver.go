@@ -249,6 +249,13 @@ func redirectFromFilename(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	file, ok := storage.GetFile(id)
 	if !ok {
+		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
+		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
+		// recording on their own (PLAN.md), not just outright denials against a real file.
+		if err := logging.LogDownloadDenied(models.File{Id: id}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		redirect(w, r, "../../error")
 		return
 	}
@@ -564,6 +571,13 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 	keyId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
 	file, ok := storage.GetFile(keyId)
 	if !ok || file.IsFileRequest() {
+		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
+		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
+		// recording on their own (PLAN.md), not just outright denials against a real file.
+		if err := logging.LogDownloadDenied(models.File{Id: keyId}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		redirectOnIncorrectId(w, r, "error")
 		return
 	}
@@ -580,6 +594,7 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 		BaseUrl:            config.ServerUrl,
 		IsFailedLogin:      false,
 		UsesHttps:          configuration.UsesHttps(),
+		PrivacyNotice:      privacyNoticeText,
 		CustomContent:      customStaticInfo,
 	}
 
@@ -641,6 +656,13 @@ func showHotlink(w http.ResponseWriter, r *http.Request) {
 	addNoCacheHeader(w)
 	file, ok := storage.GetFileByHotlink(hotlinkId)
 	if !ok || file.IsFileRequest() {
+		// Covers an unknown hotlink id, an expired file and a file pending deletion alike:
+		// GetFileByHotlink does not distinguish the reason. Unknown-id probes are an
+		// enumeration signal worth recording on their own (PLAN.md).
+		if err := logging.LogDownloadDenied(models.File{Id: hotlinkId}, r, configuration.Get().SaveIp, "unknown, expired, or invalid hotlink id"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		w.Header().Set("Content-Type", "image/svg+xml")
 		_, _ = w.Write(imageExpiredPicture)
 		return
@@ -731,6 +753,16 @@ func showE2ESetup(w http.ResponseWriter, r *http.Request) {
 	helper.CheckIgnoreTimeout(err)
 }
 
+// privacyNoticeText discloses that access details are recorded, as required on the public
+// download, download-password and file-request upload pages (PLAN.md W7: the audit log this
+// item introduces is a PI repository, and PIPEDA disclosure is part of this item, not
+// optional). The final wording, and a defined retention period, belong to a separate item
+// (PLAN.md notes "W12 owns the wording"); this is a minimal, honest placeholder so the
+// disclosure obligation itself is not silently dropped while that wording is pending - it is
+// deliberately renderable as a single template value so W12 only has to replace this constant.
+const privacyNoticeText = "For security purposes, this server records the IP address, timestamp and file " +
+	"identifier associated with this action. Retention period: not yet defined by this instance's operator."
+
 // DownloadView contains parameters for the download template
 type DownloadView struct {
 	Name                 string
@@ -746,6 +778,7 @@ type DownloadView struct {
 	ClientSideDecryption bool
 	EndToEndEncryption   bool
 	UsesHttps            bool
+	PrivacyNotice        string
 	CustomContent        customStatic
 }
 
@@ -1002,6 +1035,7 @@ func showPublicUpload(w http.ResponseWriter, r *http.Request) {
 		ChunkSize:     config.ChunkSize,
 		MaxServerSize: config.MaxFileSizeMB,
 		FileRequest:   &request,
+		PrivacyNotice: privacyNoticeText,
 		CustomContent: customStaticInfo,
 	}
 
@@ -1059,6 +1093,13 @@ func downloadPresigned(w http.ResponseWriter, r *http.Request) {
 	}
 	presignedUrl, ok := presign.Get(presignKey[0])
 	if !ok {
+		// The presign key itself is a single-use, short-lived bearer token, not a file
+		// identifier, so it is not recorded as the file id here - only the fact that an invalid
+		// or expired one was presented.
+		if err := logging.LogDownloadDenied(models.File{}, r, configuration.Get().SaveIp, "invalid or expired presigned url"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		responseError(w, storage.ErrorInvalidPresign)
 		return
 	}
@@ -1066,6 +1107,10 @@ func downloadPresigned(w http.ResponseWriter, r *http.Request) {
 	for _, file := range presignedUrl.FileIds {
 		storedFile, ok := storage.GetFile(file)
 		if !ok {
+			if err := logging.LogDownloadDenied(models.File{Id: file}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id in presigned url"); err != nil {
+				respondAuditWriteFailed(w)
+				return
+			}
 			responseError(w, storage.ErrorFileNotFound)
 			return
 		}
@@ -1087,6 +1132,13 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	savedFile, ok := storage.GetFile(id)
 
 	if !ok || savedFile.IsFileRequest() {
+		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
+		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
+		// recording on their own (PLAN.md), not just outright denials against a real file.
+		if err := logging.LogDownloadDenied(models.File{Id: id}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		if isRootUrl {
 			redirectOnIncorrectId(w, r, "error")
 		} else {
@@ -1239,6 +1291,7 @@ type publicUploadView struct {
 	PublicName     string
 	ChunkSize      int
 	MaxServerSize  int
+	PrivacyNotice  string
 	CustomContent  customStatic
 	FileRequest    *models.FileRequest
 }

@@ -76,7 +76,7 @@ func TestAuditChainRecoversFromTornWrite(t *testing.T) {
 	test.IsNil(t, err)
 	test.IsNil(t, f.Close())
 
-	initAudit(dir) // re-run recovery, as Init() would on the next process start
+	initAudit(dir)                           // re-run recovery, as Init() would on the next process start
 	test.IsEqual(t, auditNextSeq, uint64(3)) // resumed from the last good entry, not from the torn one
 
 	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryEdit, Action: "file.edited", Outcome: OutcomeSuccess}))
@@ -97,29 +97,107 @@ func TestAuditChainMissingFileStartsFresh(t *testing.T) {
 	test.IsEqualString(t, auditPrevHash, "")
 }
 
+// TestAuditChainRejectsTamperedTail verifies that recovery does not just check that the last
+// line is syntactically valid JSON with a non-empty Hash field (which a tampered line can
+// still be) - it recomputes the hash from the stored bytes and rejects the entry if it does not
+// match, falling back to the last entry that does verify.
+func TestAuditChainRejectsTamperedTail(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryEdit, Action: "file.edited", Outcome: OutcomeSuccess, FileId: "untouched"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryEdit, Action: "file.edited", Outcome: OutcomeSuccess, FileId: "willBeTampered"}))
+
+	// Tamper with the second entry's content without recomputing its hash - the shape of an
+	// on-disk edit, as opposed to a crash-torn write (covered by TestAuditChainRecoversFromTornWrite).
+	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	test.IsNil(t, err)
+	tampered := strings.Replace(string(content), `"fileId":"willBeTampered"`, `"fileId":"tamperedByAttacker"`, 1)
+	test.IsNotEqualString(t, tampered, string(content))
+	test.IsNil(t, os.WriteFile(filepath.Join(dir, "audit.jsonl"), []byte(tampered), 0600))
+
+	initAudit(dir)                           // re-run recovery, as Init() would on the next process start
+	test.IsEqual(t, auditNextSeq, uint64(2)) // resumed from entry 1, not the tampered entry 2
+	test.IsEqualBool(t, auditChainUnusable, false)
+
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryEdit, Action: "file.edited", Outcome: OutcomeSuccess}))
+	entries := readAuditEntries(t, dir)
+	test.IsEqualInt(t, len(entries), 3) // the two original plus the newly appended one
+	test.IsEqual(t, entries[2].Seq, uint64(2))
+}
+
+// TestAuditChainUnusableWhenFullyCorrupted verifies the "fail loudly" behaviour for the case
+// where nothing in an existing, non-empty audit log can be parsed and verified: rather than
+// silently restarting the sequence at 1 (which could collide with unknown sequence numbers
+// already on disk), every write must be refused until a human resolves it.
+func TestAuditChainUnusableWhenFullyCorrupted(t *testing.T) {
+	dir := t.TempDir()
+	test.IsNil(t, os.WriteFile(filepath.Join(dir, "audit.jsonl"), []byte("not json at all\nneither is this\n"), 0600))
+
+	initAudit(dir)
+	test.IsEqualBool(t, auditChainUnusable, true)
+
+	err := appendAuditEntry(AuditEntry{Category: categoryEdit, Action: "file.edited", Outcome: OutcomeSuccess})
+	test.IsNotNil(t, err)
+
+	// The unreadable file must not have been touched.
+	content, readErr := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	test.IsNil(t, readErr)
+	test.IsEqualString(t, string(content), "not json at all\nneither is this\n")
+}
+
 // TestNoSecretMaterialInAuditEntries is a grep-style assertion (PLAN.md W7 acceptance
 // criterion): the audit chain must never contain file content, decryption keys, passwords,
-// session cookies or API key secrets, whatever gets logged around it.
+// session cookies or API key secrets. Real secret-shaped values are fed through every object
+// the logging path touches (file password hash, encryption key/nonce, API key secret) so that
+// this actually exercises the redaction rather than asserting the absence of strings that were
+// never logged in the first place.
 func TestNoSecretMaterialInAuditEntries(t *testing.T) {
 	dir := t.TempDir()
 	initAudit(dir)
 
 	logPath = dir + "/log.txt" // avoid writing the human-readable log into the shared config/ dir
 
-	secretPassword := "sup3rSecretFilePassword!"
-	secretKey := "0123456789abcdef0123456789abcdef"
-	file := models.File{Id: "secretTestFile", Name: "secret file", PasswordHash: "irrelevant-hash-not-the-password"}
+	secretPasswordHash := "sup3rSecretFilePasswordHash-do-not-leak-me"
+	secretDecryptionKey := []byte("THIS-IS-A-32-BYTE-SECRET-AES-KEY")
+	secretNonce := []byte("secret-nonce")
+	file := models.File{
+		Id:           "secretTestFile",
+		Name:         "secret file",
+		PasswordHash: secretPasswordHash,
+		Encryption: models.EncryptionInfo{
+			IsEncrypted:   true,
+			DecryptionKey: secretDecryptionKey,
+			Nonce:         secretNonce,
+		},
+	}
 	r := httptest.NewRequest("GET", "/test", nil)
 
 	test.IsNil(t, LogDownload(file, r, false))
 	test.IsNil(t, LogDownloadDenied(file, r, false, "incorrect password"))
 	test.IsNil(t, LogUpload(file, models.User{Id: 1, Name: "someuser"}, models.FileRequest{}, r, false))
+	LogEdit(file, models.User{Id: 1, Name: "someuser"})
+
+	secretApiKeyId := "gk_liveSecretBearerTokenDoNotLeak0123456789"
+	apiKey := models.ApiKey{Id: secretApiKeyId, PublicId: "publicKeyId1234", FriendlyName: "test key", UserId: 1}
+	LogApiKeyCreated(apiKey, models.User{Id: 1, Name: "someuser"})
+	LogApiKeyDeleted(apiKey, models.User{Id: 1, Name: "someuser"})
+	LogApiKeyPermissionChanged(apiKey, models.User{Id: 1, Name: "someuser"}, "1", true)
+
+	// Give the synchronous chain a moment to flush the async (non-guarded) events above.
+	time.Sleep(300 * time.Millisecond)
 
 	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
 	test.IsNil(t, err)
-	test.IsEqualBool(t, strings.Contains(string(content), secretPassword), false)
-	test.IsEqualBool(t, strings.Contains(string(content), secretKey), false)
+	test.IsEqualBool(t, strings.Contains(string(content), secretPasswordHash), false)
+	test.IsEqualBool(t, strings.Contains(string(content), string(secretDecryptionKey)), false)
+	test.IsEqualBool(t, strings.Contains(string(content), string(secretNonce)), false)
+	test.IsEqualBool(t, strings.Contains(string(content), secretApiKeyId), false)
 	test.IsEqualBool(t, strings.Contains(strings.ToLower(string(content)), "decryptionkey"), false)
+
+	// Positive control: the redacted API key ID must still appear, proving the API key events
+	// above actually produced entries rather than this test passing vacuously.
+	test.IsEqualBool(t, strings.Contains(string(content), apiKey.GetRedactedId()), true)
+	test.IsEqualBool(t, strings.Contains(string(content), "secretTestFile"), true)
 
 	// The human-readable log.txt write is fire-and-forget (see createLogEntry); give it time to
 	// land before the temp dir is removed and logPath potentially reassigned by another test.

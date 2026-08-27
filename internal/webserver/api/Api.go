@@ -506,6 +506,9 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 		return
 	}
 	if request.IsNonBlocking {
+		// The client is told "OK" here, before the file is even created - see the doc comment
+		// on doBlockingPartCompleteChunk for why the audit fail-closed guarantee does not cover
+		// this branch.
 		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
 		return
@@ -513,6 +516,16 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 	doBlockingPartCompleteChunk(w, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
 }
 
+// doBlockingPartCompleteChunk finalises an uploaded chunked file and is the choke point for the
+// LogUpload fail-closed guarantee - EXCEPT when it is invoked from the IsNonBlocking branch of
+// apiChunkComplete/apiChunkUploadRequestComplete (both call it via `go doBlockingPartCompleteChunk(nil, ...)`).
+// In that mode the client is already told "OK" before this function even runs, since the whole
+// point of "non-blocking" is that CompleteChunk (which creates the file) and this function's
+// audit write both happen after the response was sent. The rollback below still runs and still
+// prevents an unaudited file from being left on disk, but the "never confirm an unaudited
+// upload" guarantee does not hold for that path: the client has already been told the upload
+// was accepted before the file, let alone its audit record, exists. Closing that gap would need
+// a callback/polling completion signal, which is out of scope for this item.
 func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid string, fileHeader chunking.FileHeader, user models.User, uploadParameters models.UploadParameters) {
 	file, err := fileupload.CompleteChunk(uuid, fileHeader, user.Id, uploadParameters)
 	if err != nil {
@@ -528,7 +541,10 @@ func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid st
 	if err != nil {
 		// Fail closed: without a durable audit record of this upload, the file must not be
 		// confirmed. Remove what was just stored rather than leave an unaudited file behind.
-		_ = storage.DeleteFile(file.Id, true)
+		if !storage.DeleteFile(file.Id, true) {
+			fmt.Println("audit: could not roll back unaudited upload", file.Id, "after an audit write failure - "+
+				"the file may still be present on disk without a durable audit record")
+		}
 		sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, upload refused")
 		return
 	}
@@ -553,6 +569,9 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 		return
 	}
 	if request.IsNonBlocking {
+		// The client is told "OK" here, before the file is even created - see the doc comment
+		// on doBlockingPartCompleteChunk for why the audit fail-closed guarantee does not cover
+		// this branch.
 		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
 		return
@@ -644,6 +663,12 @@ func apiDownloadSingle(w http.ResponseWriter, r requestParser, user models.User,
 	}
 	file, statusCode, errCode, errMessage := checkDownloadAllowed(request.Id, user)
 	if statusCode != 0 {
+		// Covers an unknown/expired file id as well as a permission denial; both are recorded,
+		// attributed to the authenticated API user rather than as an anonymous share access.
+		if auditErr := logging.LogDownloadDenied(models.File{Id: request.Id}, logging.WithActor(request.WebRequest, user), configuration.Get().SaveIp, errMessage); auditErr != nil {
+			sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, request refused")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		sendError(w, statusCode, errCode, errMessage)
 		return
@@ -668,6 +693,13 @@ func apiDownloadZip(w http.ResponseWriter, r requestParser, user models.User, _ 
 	for _, fileId := range request.Ids {
 		file, statusCode, errCode, errMessage := checkDownloadAllowed(fileId, user)
 		if statusCode != 0 {
+			// Covers an unknown/expired file id as well as a permission denial; both are
+			// recorded, attributed to the authenticated API user rather than as an anonymous
+			// share access.
+			if auditErr := logging.LogDownloadDenied(models.File{Id: fileId}, logging.WithActor(request.WebRequest, user), configuration.Get().SaveIp, errMessage); auditErr != nil {
+				sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, request refused")
+				return
+			}
 			w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 			sendError(w, statusCode, errCode, errMessage)
 			return

@@ -336,7 +336,11 @@ func LogLogout(user models.User, r *http.Request) {
 // downloadFileConfig captures a file's sharing configuration for the audit chain
 func downloadFileConfig(file models.File) *AuditFileConfig {
 	return &AuditFileConfig{
-		OneTime:           !file.UnlimitedDownloads && file.DownloadsRemaining <= 1,
+		// DownloadCount + DownloadsRemaining is the file's original total download allowance,
+		// and is invariant over the file's lifetime (each decrement of one is paired with an
+		// increment of the other) - unlike DownloadsRemaining alone, which would misreport a
+		// link with more than one allowed download as "one-time" once only one download is left.
+		OneTime:           !file.UnlimitedDownloads && file.DownloadCount+file.DownloadsRemaining == 1,
 		ExpiresAt:         file.ExpireAt,
 		PasswordProtected: file.PasswordHash != "",
 	}
@@ -365,6 +369,17 @@ func LogDownload(file models.File, r *http.Request, saveIp bool) error {
 		Actor:      buildActorFromRequest(r),
 		FileConfig: downloadFileConfig(file),
 	})
+}
+
+// LogAuditWriteFailure is a best-effort fallback for the one case where the primary structured
+// audit chain write fails AFTER an irreversible state change already happened - specifically,
+// ServeFile's download-allowance decrement, which lives in the W2 item and is not reordered
+// around the audit write here (see the call site). It writes into the human-readable log.txt
+// only, a different file than the one that just failed, so it has an independent chance of
+// succeeding; it is blocking, since by the time this is called the request is already being
+// refused, and it is not part of the chain and carries none of its tamper-evidence guarantees.
+func LogAuditWriteFailure(context string, auditErr error) {
+	createLogEntry(categoryWarning, fmt.Sprintf("AUDIT WRITE FAILED after an irreversible state change (%s): %s", context, auditErr), true)
 }
 
 // LogDownloadDenied records that a download attempt was refused, e.g. a wrong file password or
@@ -413,18 +428,14 @@ func LogUpload(file models.File, user models.User, fr models.FileRequest, r *htt
 		createLogEntry(categoryUpload, fmt.Sprintf("%s, ID %s, IP %s, uploaded by %s (user #%d)", file.Name, ip, file.Id, user.Name, user.Id), false)
 	}
 	return appendAuditEntry(AuditEntry{
-		Category:  categoryUpload,
-		Action:    action,
-		Outcome:   OutcomeSuccess,
-		Ip:        ip,
-		FileId:    file.Id,
-		RequestId: fr.Id,
-		Actor:     AuditActor{UserId: user.Id, Email: user.Name},
-		FileConfig: &AuditFileConfig{
-			OneTime:           !file.UnlimitedDownloads && file.DownloadsRemaining <= 1,
-			ExpiresAt:         file.ExpireAt,
-			PasswordProtected: file.PasswordHash != "",
-		},
+		Category:   categoryUpload,
+		Action:     action,
+		Outcome:    OutcomeSuccess,
+		Ip:         ip,
+		FileId:     file.Id,
+		RequestId:  fr.Id,
+		Actor:      AuditActor{UserId: user.Id, Email: user.Name},
+		FileConfig: downloadFileConfig(file),
 	})
 }
 
