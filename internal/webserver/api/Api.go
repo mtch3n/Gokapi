@@ -489,7 +489,7 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	uploadParams := fileupload.CreateUploadConfig(request.AllowedDownloads,
+	uploadParams, err := fileupload.CreateUploadConfig(request.AllowedDownloads,
 		request.ExpiryDays,
 		request.Password,
 		request.UnlimitedTime,
@@ -497,6 +497,10 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 		request.IsE2E,
 		request.FileSize,
 		"")
+	if err != nil {
+		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+		return
+	}
 	if request.IsNonBlocking {
 		go doBlockingPartCompleteChunk(nil, request.Uuid, request.FileHeader, user, uploadParams)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
@@ -530,9 +534,13 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 		sendError(w, status, errorCode, errorMsg)
 		return
 	}
-	uploadParams := fileupload.CreateUploadConfig(0,
+	uploadParams, err := fileupload.CreateUploadConfig(0,
 		0, "", true, true,
 		false, request.FileSize, fileRequest.Id)
+	if err != nil {
+		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+		return
+	}
 	if request.IsNonBlocking {
 		go doBlockingPartCompleteChunk(nil, request.Uuid, request.FileHeader, user, uploadParams)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
@@ -723,7 +731,7 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to duplicate this file")
 		return
 	}
-	uploadConfig := fileupload.CreateUploadConfig(request.AllowedDownloads,
+	uploadConfig, err := fileupload.CreateUploadConfig(request.AllowedDownloads,
 		request.ExpiryDays,
 		request.Password,
 		request.UnlimitedTime,
@@ -731,6 +739,10 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 		false, // is not being used by storage.DuplicateFile
 		0,     // is not being used by storage.DuplicateFile
 		"")
+	if err != nil {
+		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+		return
+	}
 	uploadConfig.UserId = user.Id
 	newFile, err := storage.DuplicateFile(file, request.RequestedChanges, request.FileName, uploadConfig)
 	if err != nil {
