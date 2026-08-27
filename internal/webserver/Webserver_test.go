@@ -244,6 +244,25 @@ func TestInvalidLink(t *testing.T) {
 	})
 }
 
+// TestInvalidLinkIsAudited is a W7 coverage test: an unknown-id probe against a public download
+// link (the most common denial case, and one PLAN.md explicitly calls out as an enumeration
+// signal worth recording) must produce a "denied" audit entry, not just the redirect.
+func TestInvalidLinkIsAudited(t *testing.T) {
+	t.Parallel()
+	const unknownId = "doesNotExistW7auditCoverageTest"
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:                "http://localhost:53843/d?id=" + unknownId,
+		IgnoreRedirectParm: true,
+		RedirectUrl:        "error",
+	})
+	// LogDownloadDenied is synchronous and fsync'd before the redirect above is issued, so the
+	// entry is guaranteed to already be on disk here - no sleep needed.
+	content, err := os.ReadFile("test/data/audit.jsonl")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, strings.Contains(string(content), `"fileId":"`+unknownId+`"`), true)
+	test.IsEqualBool(t, strings.Contains(string(content), `"outcome":"denied"`), true)
+}
+
 func TestError(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
@@ -370,7 +389,7 @@ func TestDownloadNoPassword(t *testing.T) {
 	test.HttpPageResult(t, test.HttpTestConfig{
 		Url:             "http://127.0.0.1:53843/d?id=Wzol7LyY2QVczXynJtVo",
 		IsHtml:          true,
-		RequiredContent: []string{"smallfile2"},
+		RequiredContent: []string{"smallfile2", "Retention period"}, // W7 privacy notice
 	})
 	// Download
 	test.HttpPageResult(t, test.HttpTestConfig{
@@ -396,7 +415,7 @@ func TestDownloadPagePassword(t *testing.T) {
 	test.HttpPageResult(t, test.HttpTestConfig{
 		Url:             "http://127.0.0.1:53843/d?id=jpLXGJKigM4hjtA6T6sN",
 		IsHtml:          true,
-		RequiredContent: []string{"Password required"},
+		RequiredContent: []string{"Password required", "Retention period"}, // W7 privacy notice
 	})
 }
 func TestDownloadPageIncorrectPassword(t *testing.T) {

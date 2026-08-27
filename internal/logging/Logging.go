@@ -26,6 +26,10 @@ const categoryUpload = "upload"
 const categoryEdit = "edit"
 const categoryAuth = "auth"
 const categoryWarning = "warning"
+const categoryDenied = "denied"
+const categoryExpiry = "expiry"
+const categoryApiKey = "apikey"
+const categoryConfig = "config"
 
 var outputToStdout = false
 var useCloudflare = false
@@ -40,6 +44,7 @@ func Init(filePath string) {
 	outputToStdout = env.LogToStdout
 	useCloudflare = env.UseCloudFlare
 	parseTrustedProxies(env.TrustedProxies, !env.DisableDockerTrustedProxy)
+	initAudit(filePath)
 }
 
 // parseTrustedProxies processes the raw strings into net.IP and net.IPNet objects
@@ -252,37 +257,152 @@ func LogDeploymentPassword() {
 func LogUserDeletion(modifiedUser, userEditor models.User) {
 	createLogEntry(categoryAuth, fmt.Sprintf("%s (#%d) was deleted by %s (user #%d)",
 		modifiedUser.Name, modifiedUser.Id, userEditor.Name, userEditor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "user.deleted",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: userEditor.Id, Email: userEditor.Name},
+		Detail:   fmt.Sprintf("target user %s (#%d)", modifiedUser.Name, modifiedUser.Id),
+	})
 }
 
 // LogUserEdit adds a log entry to indicate that a user was modified. Non-blocking
 func LogUserEdit(modifiedUser, userEditor models.User) {
 	createLogEntry(categoryAuth, fmt.Sprintf("%s (#%d) was modified by %s (user #%d)",
 		modifiedUser.Name, modifiedUser.Id, userEditor.Name, userEditor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "user.edited",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: userEditor.Id, Email: userEditor.Name},
+		Detail:   fmt.Sprintf("target user %s (#%d)", modifiedUser.Name, modifiedUser.Id),
+	})
 }
 
 // LogUserCreation adds a log entry to indicate that a user was created. Non-blocking
 func LogUserCreation(modifiedUser, userEditor models.User) {
 	createLogEntry(categoryAuth, fmt.Sprintf("%s (#%d) was created by %s (user #%d)",
 		modifiedUser.Name, modifiedUser.Id, userEditor.Name, userEditor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "user.created",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: userEditor.Id, Email: userEditor.Name},
+		Detail:   fmt.Sprintf("target user %s (#%d)", modifiedUser.Name, modifiedUser.Id),
+	})
 }
 
 // LogInvalidLogin adds a log entry to indicate that an invalid login was attempted. Non-blocking
 func LogInvalidLogin(username, ip string) {
 	createLogEntry(categoryAuth, fmt.Sprintf("Invalid login for user %s by IP %s", username, ip), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "login",
+		Outcome:  OutcomeFailure,
+		Ip:       ip,
+		Actor:    AuditActor{Email: username},
+		Error:    "invalid credentials",
+	})
 }
 
 // LogValidLogin adds a log entry to indicate that a login was successful. Non-blocking
-func LogValidLogin(username string) {
+// oidcSubject is the OIDC "sub" claim for OAuth2 logins, empty otherwise: this is the only
+// point in the request lifecycle where Gokapi still has it, so it is recorded here or not at
+// all - sessions created after login do not carry it, and later actions by the same user
+// cannot be tied back to it.
+func LogValidLogin(username, oidcSubject, ip string) {
 	createLogEntry(categoryAuth, fmt.Sprintf("%s logged in sucessfully", username), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "login",
+		Outcome:  OutcomeSuccess,
+		Ip:       ip,
+		Actor:    AuditActor{Email: username, OidcSubject: oidcSubject},
+	})
 }
 
-// LogDownload adds a log entry when a download was requested. Non-Blocking
-func LogDownload(file models.File, r *http.Request, saveIp bool) {
+// LogLogout adds a log entry to indicate that a user logged out. Non-blocking
+func LogLogout(user models.User, r *http.Request) {
+	createLogEntry(categoryAuth, fmt.Sprintf("%s (user #%d) logged out", user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "logout",
+		Outcome:  OutcomeSuccess,
+		Ip:       GetIpAddress(r),
+		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+	})
+}
+
+// downloadFileConfig captures a file's sharing configuration for the audit chain
+func downloadFileConfig(file models.File) *AuditFileConfig {
+	return &AuditFileConfig{
+		// DownloadCount + DownloadsRemaining is the file's original total download allowance,
+		// and is invariant over the file's lifetime (each decrement of one is paired with an
+		// increment of the other) - unlike DownloadsRemaining alone, which would misreport a
+		// link with more than one allowed download as "one-time" once only one download is left.
+		OneTime:           !file.UnlimitedDownloads && file.DownloadCount+file.DownloadsRemaining == 1,
+		ExpiresAt:         file.ExpireAt,
+		PasswordProtected: file.PasswordHash != "",
+	}
+}
+
+// LogDownload records that a file was served to a client. This is a guarded, fail-closed
+// event: the audit entry is fsync'd to the local chain before this function returns, and the
+// caller must not write any file bytes to the response if it returns a non-nil error - refuse
+// the request instead. The identity of the requester is read from r if it was attached with
+// WithActor (admin/API downloads); public share/hotlink downloads carry no identity by design
+// and are recorded as anonymous.
+func LogDownload(file models.File, r *http.Request, saveIp bool) error {
+	ip := ""
 	if saveIp {
-		createLogEntry(categoryDownload, fmt.Sprintf("%s, IP %s, ID %s, Useragent %s", file.Name, GetIpAddress(r), file.Id, sanitiseUserAgent(r)), false)
+		ip = GetIpAddress(r)
+		createLogEntry(categoryDownload, fmt.Sprintf("%s, IP %s, ID %s, Useragent %s", file.Name, ip, file.Id, sanitiseUserAgent(r)), false)
 	} else {
 		createLogEntry(categoryDownload, fmt.Sprintf("%s, ID %s, Useragent %s", file.Name, file.Id, sanitiseUserAgent(r)), false)
 	}
+	return appendAuditEntry(AuditEntry{
+		Category:   categoryDownload,
+		Action:     "download",
+		Outcome:    OutcomeSuccess,
+		Ip:         ip,
+		FileId:     file.Id,
+		Actor:      buildActorFromRequest(r),
+		FileConfig: downloadFileConfig(file),
+	})
+}
+
+// LogAuditWriteFailure is a best-effort fallback for the one case where the primary structured
+// audit chain write fails AFTER an irreversible state change already happened - specifically,
+// ServeFile's download-allowance decrement, which lives in the W2 item and is not reordered
+// around the audit write here (see the call site). It writes into the human-readable log.txt
+// only, a different file than the one that just failed, so it has an independent chance of
+// succeeding; it is blocking, since by the time this is called the request is already being
+// refused, and it is not part of the chain and carries none of its tamper-evidence guarantees.
+func LogAuditWriteFailure(context string, auditErr error) {
+	createLogEntry(categoryWarning, fmt.Sprintf("AUDIT WRITE FAILED after an irreversible state change (%s): %s", context, auditErr), true)
+}
+
+// LogDownloadDenied records that a download attempt was refused, e.g. a wrong file password or
+// an exhausted/expired link. This is a guarded, fail-closed event like LogDownload: nothing
+// about the file may be revealed to the caller (not even that it is expired vs. wrong
+// password, which the calling handler controls) if this returns a non-nil error - refuse with
+// a generic error instead of rendering the normal denial page.
+func LogDownloadDenied(file models.File, r *http.Request, saveIp bool, reason string) error {
+	ip := ""
+	if saveIp {
+		ip = GetIpAddress(r)
+	}
+	createLogEntry(categoryDenied, fmt.Sprintf("%s, ID %s, IP %s, download denied: %s", file.Name, file.Id, ip, reason), false)
+	return appendAuditEntry(AuditEntry{
+		Category:   categoryDenied,
+		Action:     "download",
+		Outcome:    OutcomeDenied,
+		Ip:         ip,
+		FileId:     file.Id,
+		Actor:      buildActorFromRequest(r),
+		FileConfig: downloadFileConfig(file),
+		Error:      reason,
+	})
 }
 
 var regexUserAgent = regexp.MustCompile(`[^A-Za-z0-9/. ;:+(|)_\-,]`)
@@ -291,49 +411,188 @@ func sanitiseUserAgent(r *http.Request) string {
 	return regexUserAgent.ReplaceAllString(r.UserAgent(), "")
 }
 
-// LogUpload adds a log entry when an upload was created. Non-Blocking
-func LogUpload(file models.File, user models.User, fr models.FileRequest) {
-	if fr.Id != "" {
-		createLogEntry(categoryUpload, fmt.Sprintf("%s, ID %s, uploaded to file request %s (%s), owned by %s (user #%d) ", file.Name, file.Id, fr.Id, fr.Name, user.Name, user.Id), false)
-	} else {
-		createLogEntry(categoryUpload, fmt.Sprintf("%s, ID %s, uploaded by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+// LogUpload records that a file was created. This is a guarded, fail-closed event: the audit
+// entry is fsync'd to the local chain before this function returns, and the caller must not
+// confirm success to the client if it returns a non-nil error - the uploaded file should be
+// removed again and the request refused instead.
+func LogUpload(file models.File, user models.User, fr models.FileRequest, r *http.Request, saveIp bool) error {
+	ip := ""
+	if saveIp {
+		ip = GetIpAddress(r)
 	}
+	action := "upload"
+	if fr.Id != "" {
+		createLogEntry(categoryUpload, fmt.Sprintf("%s, ID %s, IP %s, uploaded to file request %s (%s), owned by %s (user #%d) ", file.Name, ip, file.Id, fr.Id, fr.Name, user.Name, user.Id), false)
+		action = "upload.filerequest"
+	} else {
+		createLogEntry(categoryUpload, fmt.Sprintf("%s, ID %s, IP %s, uploaded by %s (user #%d)", file.Name, ip, file.Id, user.Name, user.Id), false)
+	}
+	return appendAuditEntry(AuditEntry{
+		Category:   categoryUpload,
+		Action:     action,
+		Outcome:    OutcomeSuccess,
+		Ip:         ip,
+		FileId:     file.Id,
+		RequestId:  fr.Id,
+		Actor:      AuditActor{UserId: user.Id, Email: user.Name},
+		FileConfig: downloadFileConfig(file),
+	})
 }
 
 // LogEdit adds a log entry when an upload was edited. Non-Blocking
 func LogEdit(file models.File, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, edited by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category:   categoryEdit,
+		Action:     "file.edited",
+		Outcome:    OutcomeSuccess,
+		FileId:     file.Id,
+		Actor:      AuditActor{UserId: user.Id, Email: user.Name},
+		FileConfig: downloadFileConfig(file),
+	})
 }
 
 // LogCreateFileRequest adds a log entry when a file request was added. Non-Blocking
 func LogCreateFileRequest(fr models.FileRequest, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) created by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category:  categoryEdit,
+		Action:    "filerequest.created",
+		Outcome:   OutcomeSuccess,
+		RequestId: fr.Id,
+		Actor:     AuditActor{UserId: user.Id, Email: user.Name},
+	})
 }
 
 // LogEditFileRequest adds a log entry when a file request was edited. Non-Blocking
 func LogEditFileRequest(fr models.FileRequest, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) created by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category:  categoryEdit,
+		Action:    "filerequest.edited",
+		Outcome:   OutcomeSuccess,
+		RequestId: fr.Id,
+		Actor:     AuditActor{UserId: user.Id, Email: user.Name},
+	})
 }
 
 // LogDeleteFileRequest adds a log entry when a file request was deleted. Non-Blocking
 func LogDeleteFileRequest(fr models.FileRequest, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) and associated files deleted by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category:  categoryEdit,
+		Action:    "filerequest.deleted",
+		Outcome:   OutcomeSuccess,
+		RequestId: fr.Id,
+		Actor:     AuditActor{UserId: user.Id, Email: user.Name},
+	})
 }
 
 // LogReplace adds a log entry when an upload was replaced. Non-Blocking
 func LogReplace(originalFile, newContent models.File, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s had content replaced with %s (ID %s) by %s (user #%d)",
 		originalFile.Name, originalFile.Id, newContent.Name, newContent.Id, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "file.replaced",
+		Outcome:  OutcomeSuccess,
+		FileId:   originalFile.Id,
+		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+		Detail:   fmt.Sprintf("content replaced with new file ID %s", newContent.Id),
+	})
 }
 
 // LogDelete adds a log entry when an upload was deleted. Non-Blocking
 func LogDelete(file models.File, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, deleted by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "file.deleted",
+		Outcome:  OutcomeSuccess,
+		FileId:   file.Id,
+		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+	})
 }
 
 // LogRestore adds a log entry when the pending deletion of a file was cancelled and the file restored. Non-Blocking
 func LogRestore(file models.File, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, restored by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "file.restored",
+		Outcome:  OutcomeSuccess,
+		FileId:   file.Id,
+		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+	})
+}
+
+// LogFileExpired records that a file's metadata (and, unless deduplicated, its stored blob)
+// was automatically disposed of by the periodic cleanup job. There is no requester to
+// attribute this to; it is a system action. Non-blocking, as this runs off the request path.
+func LogFileExpired(file models.File, reason string) {
+	createLogEntry(categoryExpiry, fmt.Sprintf("%s, ID %s, automatically disposed of: %s", file.Name, file.Id, reason), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryExpiry,
+		Action:   "file.disposed",
+		Outcome:  OutcomeSuccess,
+		FileId:   file.Id,
+		Detail:   reason,
+	})
+}
+
+// LogApiKeyCreated records that an API key was created. Non-blocking.
+func LogApiKeyCreated(key models.ApiKey, actor models.User) {
+	createLogEntry(categoryApiKey, fmt.Sprintf("API key %s (%s) created by %s (user #%d)", key.GetRedactedId(), key.FriendlyName, actor.Name, actor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryApiKey,
+		Action:   "apikey.created",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
+		Detail:   fmt.Sprintf("key %s (%s), owner user #%d", key.GetRedactedId(), key.FriendlyName, key.UserId),
+	})
+}
+
+// LogApiKeyDeleted records that an API key was deleted. Non-blocking.
+func LogApiKeyDeleted(key models.ApiKey, actor models.User) {
+	createLogEntry(categoryApiKey, fmt.Sprintf("API key %s (%s) deleted by %s (user #%d)", key.GetRedactedId(), key.FriendlyName, actor.Name, actor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryApiKey,
+		Action:   "apikey.deleted",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
+		Detail:   fmt.Sprintf("key %s (%s), owner user #%d", key.GetRedactedId(), key.FriendlyName, key.UserId),
+	})
+}
+
+// LogApiKeyPermissionChanged records that an API key's permissions were changed. Non-blocking.
+func LogApiKeyPermissionChanged(key models.ApiKey, actor models.User, permission string, granted bool) {
+	verb := "granted"
+	if !granted {
+		verb = "revoked"
+	}
+	createLogEntry(categoryApiKey, fmt.Sprintf("Permission %s %s for API key %s (%s) by %s (user #%d)", permission, verb, key.GetRedactedId(), key.FriendlyName, actor.Name, actor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryApiKey,
+		Action:   "apikey.permission_changed",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
+		Detail:   fmt.Sprintf("key %s (%s): permission %s %s", key.GetRedactedId(), key.FriendlyName, permission, verb),
+	})
+}
+
+// LogEncryptionConfigChange records that the encryption configuration was changed via the
+// reconfiguration setup. Non-blocking. There is no models.User to attribute this to: the
+// reconfiguration setup is protected by its own single-use, generated credentials rather than
+// a normal account (see configuration/setup.RunConfigModification).
+func LogEncryptionConfigChange(oldLevel, newLevel int, r *http.Request) {
+	createLogEntry(categoryConfig, fmt.Sprintf("Encryption level changed from %d to %d via reconfiguration setup", oldLevel, newLevel), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryConfig,
+		Action:   "config.encryption_changed",
+		Outcome:  OutcomeSuccess,
+		Ip:       GetIpAddress(r),
+		Detail:   fmt.Sprintf("encryption level %d -> %d, via reconfiguration setup", oldLevel, newLevel),
+	})
 }
 
 // LogDeprecation adds a log entry to indicate that a deprecated feature is being used. Blocking

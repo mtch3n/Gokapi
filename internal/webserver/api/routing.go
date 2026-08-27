@@ -683,11 +683,13 @@ type paramChunkComplete struct {
 	IsNonBlocking      bool   `header:"nonblocking"`
 	UnlimitedDownloads bool
 	UnlimitedTime      bool
+	WebRequest         *http.Request
 	FileHeader         chunking.FileHeader
 	foundHeaders       map[string]bool
 }
 
-func (p *paramChunkComplete) ProcessParameter(_ *http.Request) error {
+func (p *paramChunkComplete) ProcessParameter(r *http.Request) error {
+	p.WebRequest = r
 
 	if !p.foundHeaders["realsize"] {
 		if !p.IsE2E {
@@ -754,11 +756,13 @@ type paramChunkUploadRequestComplete struct {
 	ContentType   string `header:"contenttype"`
 	IsNonBlocking bool   `header:"nonblocking"`
 	ApiKey        string `header:"apikey" unpublished:"true"` // not published in API documentation
+	WebRequest    *http.Request
 	FileHeader    chunking.FileHeader
 	foundHeaders  map[string]bool
 }
 
-func (p *paramChunkUploadRequestComplete) ProcessParameter(_ *http.Request) error {
+func (p *paramChunkUploadRequestComplete) ProcessParameter(r *http.Request) error {
+	p.WebRequest = r
 	p.ContentType = helper.SanitiseContentType(p.ContentType)
 	p.FileName = helper.SanitiseFilename(p.FileName)
 	p.FileHeader = chunking.FileHeader{

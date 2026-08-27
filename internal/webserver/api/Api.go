@@ -170,6 +170,7 @@ func apiDeleteKey(w http.ResponseWriter, r requestParser, user models.User, _ mo
 		return
 	}
 	database.DeleteApiKey(apiKey.Id)
+	logging.LogApiKeyDeleted(apiKey, user)
 }
 
 func apiModifyApiKey(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
@@ -217,11 +218,13 @@ func apiModifyApiKey(w http.ResponseWriter, r requestParser, user models.User, _
 	if request.GrantPermission && !apiKey.HasPermission(request.Permission) {
 		apiKey.GrantPermission(request.Permission)
 		database.SaveApiKey(apiKey)
+		logging.LogApiKeyPermissionChanged(apiKey, user, fmt.Sprintf("%d", request.Permission), true)
 		return
 	}
 	if !request.GrantPermission && apiKey.HasPermission(request.Permission) {
 		apiKey.RemovePermission(request.Permission)
 		database.SaveApiKey(apiKey)
+		logging.LogApiKeyPermissionChanged(apiKey, user, fmt.Sprintf("%d", request.Permission), false)
 	}
 }
 
@@ -257,6 +260,7 @@ func apiCreateApiKey(w http.ResponseWriter, r requestParser, user models.User, _
 	}
 
 	key := generateNewKey(request.BasicPermissions, user.Id, request.FriendlyName, "")
+	logging.LogApiKeyCreated(key, user)
 	output := models.ApiKeyOutput{
 		Result:   "OK",
 		Id:       key.Id,
@@ -502,14 +506,27 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 		return
 	}
 	if request.IsNonBlocking {
-		go doBlockingPartCompleteChunk(nil, request.Uuid, request.FileHeader, user, uploadParams)
+		// The client is told "OK" here, before the file is even created - see the doc comment
+		// on doBlockingPartCompleteChunk for why the audit fail-closed guarantee does not cover
+		// this branch.
+		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
 		return
 	}
-	doBlockingPartCompleteChunk(w, request.Uuid, request.FileHeader, user, uploadParams)
+	doBlockingPartCompleteChunk(w, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
 }
 
-func doBlockingPartCompleteChunk(w http.ResponseWriter, uuid string, fileHeader chunking.FileHeader, user models.User, uploadParameters models.UploadParameters) {
+// doBlockingPartCompleteChunk finalises an uploaded chunked file and is the choke point for the
+// LogUpload fail-closed guarantee - EXCEPT when it is invoked from the IsNonBlocking branch of
+// apiChunkComplete/apiChunkUploadRequestComplete (both call it via `go doBlockingPartCompleteChunk(nil, ...)`).
+// In that mode the client is already told "OK" before this function even runs, since the whole
+// point of "non-blocking" is that CompleteChunk (which creates the file) and this function's
+// audit write both happen after the response was sent. The rollback below still runs and still
+// prevents an unaudited file from being left on disk, but the "never confirm an unaudited
+// upload" guarantee does not hold for that path: the client has already been told the upload
+// was accepted before the file, let alone its audit record, exists. Closing that gap would need
+// a callback/polling completion signal, which is out of scope for this item.
+func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid string, fileHeader chunking.FileHeader, user models.User, uploadParameters models.UploadParameters) {
 	file, err := fileupload.CompleteChunk(uuid, fileHeader, user.Id, uploadParameters)
 	if err != nil {
 		_ = chunking.DeleteChunk(uuid)
@@ -520,7 +537,17 @@ func doBlockingPartCompleteChunk(w http.ResponseWriter, uuid string, fileHeader 
 		chunkreservation.SetComplete(uploadParameters.FileRequestId, uuid)
 	}
 	fr, _ := filerequest.Get(uploadParameters.FileRequestId)
-	logging.LogUpload(file, user, fr)
+	err = logging.LogUpload(file, user, fr, r, configuration.Get().SaveIp)
+	if err != nil {
+		// Fail closed: without a durable audit record of this upload, the file must not be
+		// confirmed. Remove what was just stored rather than leave an unaudited file behind.
+		if !storage.DeleteFile(file.Id, true) {
+			fmt.Println("audit: could not roll back unaudited upload", file.Id, "after an audit write failure - "+
+				"the file may still be present on disk without a durable audit record")
+		}
+		sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, upload refused")
+		return
+	}
 	outputFileJson(w, file)
 }
 
@@ -542,11 +569,14 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 		return
 	}
 	if request.IsNonBlocking {
-		go doBlockingPartCompleteChunk(nil, request.Uuid, request.FileHeader, user, uploadParams)
+		// The client is told "OK" here, before the file is even created - see the doc comment
+		// on doBlockingPartCompleteChunk for why the audit fail-closed guarantee does not cover
+		// this branch.
+		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
 		return
 	}
-	doBlockingPartCompleteChunk(w, request.Uuid, request.FileHeader, user, uploadParams)
+	doBlockingPartCompleteChunk(w, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
 }
 
 func apiVersionInfo(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
@@ -633,13 +663,21 @@ func apiDownloadSingle(w http.ResponseWriter, r requestParser, user models.User,
 	}
 	file, statusCode, errCode, errMessage := checkDownloadAllowed(request.Id, user)
 	if statusCode != 0 {
+		// Covers an unknown/expired file id as well as a permission denial; both are recorded,
+		// attributed to the authenticated API user rather than as an anonymous share access.
+		if auditErr := logging.LogDownloadDenied(models.File{Id: request.Id}, logging.WithActor(request.WebRequest, user), configuration.Get().SaveIp, errMessage); auditErr != nil {
+			sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, request refused")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		sendError(w, statusCode, errCode, errMessage)
 		return
 	}
 	if !request.PresignUrl {
 		forceDecryption := file.Encryption.IsEncrypted && !file.Encryption.IsEndToEndEncrypted
-		storage.ServeFile(file, w, request.WebRequest, true, request.IncreaseCounter, forceDecryption, false)
+		// Attribute the audit entry for this download to the authenticated API user rather
+		// than recording it as an anonymous share access.
+		storage.ServeFile(file, w, logging.WithActor(request.WebRequest, user), true, request.IncreaseCounter, forceDecryption, false)
 		return
 	}
 	createAndOutputPresignedUrl([]string{file.Id}, w, "")
@@ -655,6 +693,13 @@ func apiDownloadZip(w http.ResponseWriter, r requestParser, user models.User, _ 
 	for _, fileId := range request.Ids {
 		file, statusCode, errCode, errMessage := checkDownloadAllowed(fileId, user)
 		if statusCode != 0 {
+			// Covers an unknown/expired file id as well as a permission denial; both are
+			// recorded, attributed to the authenticated API user rather than as an anonymous
+			// share access.
+			if auditErr := logging.LogDownloadDenied(models.File{Id: fileId}, logging.WithActor(request.WebRequest, user), configuration.Get().SaveIp, errMessage); auditErr != nil {
+				sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, request refused")
+				return
+			}
 			w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 			sendError(w, statusCode, errCode, errMessage)
 			return
@@ -663,7 +708,9 @@ func apiDownloadZip(w http.ResponseWriter, r requestParser, user models.User, _ 
 		requestedFileIds = append(requestedFileIds, file.Id)
 	}
 	if !request.PresignUrl {
-		storage.ServeFilesAsZip(requestedFiles, request.Filename, w, request.WebRequest)
+		// Attribute the audit entry for each download in this zip to the authenticated API
+		// user rather than recording it as an anonymous share access.
+		storage.ServeFilesAsZip(requestedFiles, request.Filename, w, logging.WithActor(request.WebRequest, user))
 		return
 	}
 	createAndOutputPresignedUrl(requestedFileIds, w, request.Filename)
