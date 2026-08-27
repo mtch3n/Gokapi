@@ -939,6 +939,39 @@ func countApiKeys() int {
 	return len(database.GetAllApiKeys())
 }
 
+func TestAuthInfo(t *testing.T) {
+	const apiUrl = "/auth/info"
+
+	// Test unauthenticated access - should work
+	w, r := getRecorder(apiUrl, "", []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	type authInfoResponse struct {
+		Method            int    `json:"method"`
+		PublicName        string `json:"publicName"`
+		MinPasswordLength int    `json:"minPasswordLength"`
+	}
+	var result authInfoResponse
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	// Verify structure
+	test.IsEqualBool(t, result.Method >= 0, true)
+	test.IsEqualBool(t, result.PublicName != "", true)
+	test.IsEqualBool(t, result.MinPasswordLength >= 6, true)
+
+	// Test with invalid API key - should still work (endpoint is public)
+	w, r = getRecorder(apiUrl, "invalid", []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	// Test that other endpoints still require authentication
+	const otherUrl = "/info/version"
+	w, r = getRecorder(otherUrl, "", []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+}
+
 func TestAuthList(t *testing.T) {
 	const apiUrl = "/auth/list"
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermApiMod)

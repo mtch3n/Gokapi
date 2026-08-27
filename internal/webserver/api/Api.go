@@ -42,6 +42,13 @@ func Process(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("cache-control", "no-store")
 	requestUrl := parseRequestUrl(r)
 
+	// Unauthenticated endpoint: /auth/info
+	if r.Method == "GET" && requestUrl == "/auth/info" {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		apiAuthInfo(w, nil, models.User{}, models.ApiKey{})
+		return
+	}
+
 	routing, ok := getRouting(requestUrl)
 	if !ok {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
@@ -356,6 +363,25 @@ func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ 
 			item.Id = apiKey.Id
 		}
 		result = append(result, item)
+	}
+	resultJson, err := json.Marshal(result)
+	helper.Check(err)
+	_, _ = w.Write(resultJson)
+}
+
+func apiAuthInfo(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
+	type authInfoResponse struct {
+		Method            int    `json:"method"`
+		PublicName        string `json:"publicName"`
+		MinPasswordLength int    `json:"minPasswordLength"`
+	}
+
+	config := configuration.Get()
+	env := configuration.GetEnvironment()
+	result := authInfoResponse{
+		Method:            config.Authentication.Method,
+		PublicName:        config.PublicName,
+		MinPasswordLength: env.MinLengthPassword,
 	}
 	resultJson, err := json.Marshal(result)
 	helper.Check(err)

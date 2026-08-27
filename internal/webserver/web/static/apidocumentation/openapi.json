@@ -1607,6 +1607,28 @@
         }
       }
     },
+    "/auth/info": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Get authentication information",
+        "description": "This API call returns public authentication information including the authentication method, public name, and minimum password length. This endpoint does not require authentication",
+        "operationId": "authinfo",
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/list": {
       "get": {
         "tags": [
@@ -2723,6 +2745,28 @@
           }
         },
         "description": "ApiKeyListItem is used for listing API keys",
+        "x-go-package": "Gokapi/internal/webserver/api"
+      },
+      "AuthInfo": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": "integer",
+            "description": "Authentication method (0=internal, 1=oauth2, 2=header, 3=disabled)",
+            "example": 0
+          },
+          "publicName": {
+            "type": "string",
+            "description": "Public name of the Gokapi instance",
+            "example": "Gokapi"
+          },
+          "minPasswordLength": {
+            "type": "integer",
+            "description": "Minimum password length required",
+            "example": 8
+          }
+        },
+        "description": "AuthInfo contains public authentication information",
         "x-go-package": "Gokapi/internal/webserver/api"
       },
       "VersionInfo": {

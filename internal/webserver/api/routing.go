@@ -129,6 +129,12 @@ var routes = []apiRoute{
 		RequestParser: &paramFilesRestore{},
 	},
 	{
+		Url:           "/auth/info",
+		ApiPerm:       models.ApiPermNone,
+		execution:     apiAuthInfo,
+		RequestParser: nil,
+	},
+	{
 		Url:           "/auth/create",
 		ApiPerm:       models.ApiPermApiMod,
 		execution:     apiCreateApiKey,
