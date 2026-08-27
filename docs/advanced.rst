@@ -134,6 +134,14 @@ Available environment variables
 +-------------------------------------+----------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_PORT                         | Sets the webserver port                                                                | Yes             | 53842                       |
 +-------------------------------------+----------------------------------------------------------------------------------------+-----------------+-----------------------------+
+| GOKAPI_SESSION_DURATION_DAYS        | Sets the number of days after which an admin or password-protected-file session        | No              | 7                           |
+|                                     |                                                                                        |                 |                             |
+|                                     | expires and needs to be renewed by logging in again. Does not apply to sessions        |                 |                             |
+|                                     |                                                                                        |                 |                             |
+|                                     | created through OAuth2, which are instead bound to the recheck interval configured     |                 |                             |
+|                                     |                                                                                        |                 |                             |
+|                                     | in the admin menu. Value must be 1 or greater                                          |                 |                             |
++-------------------------------------+----------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_TRUSTED_PROXIES              | Sets a list of trusted proxies. If set, the webserver will trust the IP addresses sent | No              | 127.0.0.1                   |
 |                                     |                                                                                        |                 |                             |
 |                                     | by these proxies with the X-Forwarded-For and X-REAL-IP header                         |                 |                             |

@@ -74,6 +74,11 @@ type Environment struct {
 	MinLengthPassword int `env:"MIN_LENGTH_PASSWORD" envDefault:"8" minValue:"6"`
 	// Allows all users by default to create file requests, if set to true
 	PermRequestGrantedByDefault bool `env:"GUEST_UPLOAD_BY_DEFAULT" envDefault:"false"`
+	// Sets the number of days after which an admin or password-protected-file session
+	// expires and needs to be renewed by logging in again. Does not apply to sessions
+	// created through OAuth2, which are instead bound to the recheck interval configured
+	// in the admin menu
+	SessionDurationDays int `env:"SESSION_DURATION_DAYS" envDefault:"7" minValue:"1"`
 	// Sets a list of trusted proxies. If set, the webserver will trust the IP addresses sent
 	// by these proxies with the X-Forwarded-For and X-REAL-IP header
 	// List is comma separated; entries can be fixed IPs ("10.0.0.1, 10.0.0.2")
