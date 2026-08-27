@@ -313,6 +313,22 @@ func TestInvalidRouting(t *testing.T) {
 
 // ## /user/##
 
+func TestUserGetMe(t *testing.T) {
+	const apiUrl = "/user/me"
+	generateTestData()
+
+	// Test with regular user API key
+	userApiKey := generateNewKey(false, idUser, "", "")
+	w, r := getRecorder(apiUrl, userApiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var result models.User
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, result.Id, idUser)
+}
+
 func TestUserCreate(t *testing.T) {
 	const apiUrl = "/user/create"
 	const headerUsername = "username"

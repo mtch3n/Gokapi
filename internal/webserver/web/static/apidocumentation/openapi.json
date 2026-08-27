@@ -1845,6 +1845,31 @@
         }
       }
     },
+    "/user/me": {
+      "get": {
+        "tags": [
+          "user"
+        ],
+        "summary": "Get the calling user's information",
+        "description": "This API call returns information about the user associated with the API key making the request. Requires any valid API key (no specific permission required)",
+        "operationId": "getme",
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewUser"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication"
+          }
+        }
+      }
+    },
     "/user/create": {
       "post": {
         "tags": [

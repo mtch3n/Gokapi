@@ -271,6 +271,10 @@ func apiCreateApiKey(w http.ResponseWriter, r requestParser, user models.User, _
 	_, _ = w.Write(result)
 }
 
+func apiGetCurrentUser(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
+	_, _ = w.Write([]byte(user.ToJson()))
+}
+
 func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramUserCreate)
 	if !ok {
