@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -121,6 +122,9 @@ func Start() {
 	mux.HandleFunc("/logs", requireLogin(showLogs, true, false))
 	mux.HandleFunc("/logout", doLogout)
 	mux.HandleFunc("/publicUpload", showPublicUpload)
+	mux.HandleFunc("/pubapi/file", pubApiFileMetadata)
+	mux.HandleFunc("/pubapi/filepassword", pubApiFilePassword)
+	mux.HandleFunc("/pubapi/uploadrequest", pubApiUploadRequest)
 	mux.HandleFunc("/uploadChunk", requireLogin(uploadChunk, false, false))
 	mux.HandleFunc("/uploadStatus", requireLogin(sse.GetStatusSSE, false, false))
 	mux.HandleFunc("/users", requireLogin(showUserAdmin, true, false))
@@ -1171,6 +1175,189 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
+}
+
+// Handling of /pubapi/file
+// Public, unauthenticated endpoint that returns file metadata as JSON.
+// These endpoints are intentionally public to enable standalone client SPAs to drive the UI.
+func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	keyId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	if keyId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	file, ok := storage.GetFile(keyId)
+	if !ok || file.IsFileRequest() {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Determine downloads remaining: -1 for unlimited, otherwise the actual count
+	downloadsRemaining := file.DownloadsRemaining
+	if file.UnlimitedDownloads {
+		downloadsRemaining = -1
+	}
+
+	// Determine expiry: 0 if unlimited, otherwise the unix timestamp
+	expiresAt := file.ExpireAt
+	if file.UnlimitedTime {
+		expiresAt = 0
+	}
+
+	// Build the response, hiding filename if password-protected
+	name := file.Name
+	if file.PasswordHash != "" {
+		name = ""
+	}
+
+	response := map[string]interface{}{
+		"name":                     name,
+		"size":                     file.Size,
+		"requiresPassword":         file.PasswordHash != "",
+		"expiresAt":                expiresAt,
+		"downloadsRemaining":       downloadsRemaining,
+		"isE2E":                    file.Encryption.IsEndToEndEncrypted,
+		"requiresClientDecryption": file.RequiresClientDecryption(),
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Handling of /pubapi/filepassword
+// Public, unauthenticated endpoint that verifies a password for a file.
+// On success, sets the same cookie that showDownload sets.
+func pubApiFilePassword(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	keyId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	if keyId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	file, ok := storage.GetFile(keyId)
+	if !ok || file.IsFileRequest() {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Parse password from body (support both form and JSON)
+	var password string
+	contentType := r.Header.Get("Content-Type")
+	if strings.Contains(contentType, "application/json") {
+		var body struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			password = body.Password
+		}
+	} else {
+		_ = r.ParseForm()
+		password = r.PostForm.Get("password")
+	}
+
+	// Rate limit the password check attempt
+	ip := logging.GetIpAddress(r)
+	ratelimiter.WaitOnDownloadPassword(ip)
+
+	// Verify password using the same logic as showDownload
+	isValid, isLegacy := configuration.VerifyPassword(password, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
+	if isValid {
+		// Migrate legacy passwords to the new format
+		if isLegacy {
+			file.PasswordHash = configuration.HashPassword(password, false, "")
+			database.SaveMetaData(file)
+		}
+		writeFilePwCookie(w, file)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "{\"ok\":true}")
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "{\"ok\":false}")
+}
+
+// Handling of /pubapi/uploadrequest
+// Public, unauthenticated endpoint that returns file request metadata as JSON.
+// These endpoints are intentionally public to enable standalone client SPAs to drive the UI.
+func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	requestId := queryUrl(w, r, "id", errorHandling.TypeInvalidFileRequest)
+	if requestId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	request, ok := filerequest.Get(requestId)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	apiKey := queryUrl(w, r, "key", errorHandling.TypeInvalidFileRequest)
+	if apiKey == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Validate the API key using constant-time comparison
+	if subtle.ConstantTimeCompare([]byte(request.ApiKey), []byte(apiKey)) != 1 {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Check if the request is expired
+	if !request.IsUnlimitedTime() && request.Expiry < time.Now().Unix() {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "{\"valid\":false,\"reason\":\"expired\"}")
+		return
+	}
+
+	// Check if the request has reached max files
+	if !request.IsUnlimitedFiles() && request.UploadedFiles >= request.MaxFiles {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "{\"valid\":false,\"reason\":\"full\"}")
+		return
+	}
+
+	// Calculate remaining files
+	remainingFiles := request.MaxFiles - request.UploadedFiles
+	if request.IsUnlimitedFiles() {
+		remainingFiles = -1
+	}
+
+	config := configuration.Get()
+
+	response := map[string]interface{}{
+		"valid":          true,
+		"name":           request.Name,
+		"notes":          request.Notes,
+		"maxFiles":       request.MaxFiles,
+		"remainingFiles": remainingFiles,
+		"maxSizeMB":      request.MaxSize,
+		"chunkSize":      config.ChunkSize,
+		"expiry":         request.Expiry,
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // respondAuditWriteFailed refuses a request whose audit record could not be committed to

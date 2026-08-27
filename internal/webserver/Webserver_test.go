@@ -690,3 +690,170 @@ func TestServeWasmE2E(t *testing.T) {
 		IsHtml: false,
 	})
 }
+
+// TestPublicApiFileUnprotected tests GET /pubapi/file for an unprotected file
+func TestPublicApiFileUnprotected(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=Wzol7LyY2QVczXynJtVo")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	// Verify the response contains the expected fields
+	if name, ok := response["name"]; !ok || name != "smallfile2" {
+		t.Errorf("Expected name 'smallfile2', got %v", name)
+	}
+	if size, ok := response["size"]; !ok || size != "8 B" {
+		t.Errorf("Expected size '8 B', got %v", size)
+	}
+	if requiresPw, ok := response["requiresPassword"]; !ok || requiresPw != false {
+		t.Errorf("Expected requiresPassword false, got %v", requiresPw)
+	}
+	if _, ok := response["expiresAt"]; !ok {
+		t.Errorf("Missing expiresAt field")
+	}
+	if _, ok := response["downloadsRemaining"]; !ok {
+		t.Errorf("Missing downloadsRemaining field")
+	}
+}
+
+// TestPublicApiFilePasswordProtected tests GET /pubapi/file for a password-protected file
+func TestPublicApiFilePasswordProtected(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=jpLXGJKigM4hjtA6T6sN")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	// Verify that filename is hidden for password-protected files
+	if name, ok := response["name"]; !ok || name != "" {
+		t.Errorf("Expected name to be empty for password-protected file, got %v", name)
+	}
+	if requiresPw, ok := response["requiresPassword"]; !ok || requiresPw != true {
+		t.Errorf("Expected requiresPassword true, got %v", requiresPw)
+	}
+}
+
+// TestPublicApiFileNotFound tests GET /pubapi/file for a non-existent file
+func TestPublicApiFileNotFound(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=unknownfileid123456")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if error, ok := response["error"]; !ok || error != "not found" {
+		t.Errorf("Expected error 'not found', got %v", error)
+	}
+}
+
+// TestPublicApiFilePasswordWrong tests POST /pubapi/filepassword with wrong password
+func TestPublicApiFilePasswordWrong(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	data := strings.NewReader("password=wrongpassword")
+	resp, err := client.Post("http://127.0.0.1:53843/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if ok, exists := response["ok"]; !exists || ok != false {
+		t.Errorf("Expected ok false, got %v", ok)
+	}
+
+	// Verify no password cookie was set
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "pjpLXGJKigM4hjtA6T6sN" {
+			t.Errorf("Expected no password cookie to be set, but found one")
+		}
+	}
+}
+
+// TestPublicApiFilePasswordCorrect tests POST /pubapi/filepassword with correct password
+func TestPublicApiFilePasswordCorrect(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	data := strings.NewReader("password=123")
+	resp, err := client.Post("http://127.0.0.1:53843/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if ok, exists := response["ok"]; !exists || ok != true {
+		t.Errorf("Expected ok true, got %v", ok)
+	}
+
+	// Verify the password cookie was set
+	pwCookieFound := false
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "pjpLXGJKigM4hjtA6T6sN" {
+			pwCookieFound = true
+			if cookie.HttpOnly != true {
+				t.Errorf("Expected cookie to be HttpOnly")
+			}
+			break
+		}
+	}
+
+	if !pwCookieFound {
+		t.Errorf("Expected password cookie pjpLXGJKigM4hjtA6T6sN to be set")
+	}
+}
