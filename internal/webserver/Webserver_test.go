@@ -772,6 +772,63 @@ func TestPublicApiFilePasswordProtected(t *testing.T) {
 	}
 }
 
+// TestPublicApiFilePasswordProtectedWithCookie tests GET /pubapi/file for a password-protected file with valid cookie
+func TestPublicApiFilePasswordProtectedWithCookie(t *testing.T) {
+	t.Parallel()
+	// First, get a valid password cookie by authenticating
+	client := &http.Client{}
+	data := strings.NewReader("password=123")
+	resp, err := client.Post("http://127.0.0.1:53843/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
+	if err != nil {
+		t.Errorf("Failed to authenticate: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Get the cookie from the response
+	var cookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "pjpLXGJKigM4hjtA6T6sN" {
+			cookie = c
+			break
+		}
+	}
+
+	if cookie == nil {
+		t.Errorf("Expected password cookie to be set")
+		return
+	}
+
+	// Now make a request to /pubapi/file with the cookie
+	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/file?id=jpLXGJKigM4hjtA6T6sN", nil)
+	if err != nil {
+		t.Errorf("Failed to create request: %v", err)
+		return
+	}
+	req.AddCookie(cookie)
+
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	// Verify that filename is revealed when a valid cookie is present
+	if name, ok := response["name"]; !ok || name == "" {
+		t.Errorf("Expected name to be revealed for password-protected file with valid cookie, got %v", name)
+	}
+}
+
 // TestPublicApiFileNotFound tests GET /pubapi/file for a non-existent file
 func TestPublicApiFileNotFound(t *testing.T) {
 	t.Parallel()

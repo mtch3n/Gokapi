@@ -1210,9 +1210,9 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 		expiresAt = 0
 	}
 
-	// Build the response, hiding filename if password-protected
+	// Build the response, hiding filename if password-protected and not authenticated
 	name := file.Name
-	if file.PasswordHash != "" {
+	if file.PasswordHash != "" && !isValidPwCookie(r, file) {
 		name = ""
 	}
 
