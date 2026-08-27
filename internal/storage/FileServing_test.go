@@ -153,6 +153,59 @@ func TestAddHotlink(t *testing.T) {
 	test.IsEqualString(t, file.HotlinkId, "")
 }
 
+func TestAddHotlinkDisabled(t *testing.T) {
+	os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	// Upstream behaviour: unset env var still allows hotlinking of an image file
+	file := models.File{Name: "test.jpg", Id: "testId", ExpireAt: time.Now().Add(time.Hour).Unix(), ContentType: "image/jpg"}
+	test.IsEqualBool(t, IsAbleHotlink(file), true)
+	AddHotlink(&file)
+	test.IsEqualBool(t, len(file.HotlinkId) > 0, true)
+
+	os.Setenv("GOKAPI_DISABLE_HOTLINKS", "true")
+	defer os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	// Same, otherwise hotlinkable file is refused once hotlinks are disabled
+	file = models.File{Name: "test.jpg", Id: "testId", ExpireAt: time.Now().Add(time.Hour).Unix(), ContentType: "image/jpg"}
+	test.IsEqualBool(t, IsAbleHotlink(file), false)
+	AddHotlink(&file)
+	test.IsEqualString(t, file.HotlinkId, "")
+}
+
+func TestPurgeHotlinksIfDisabled(t *testing.T) {
+	os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	file := models.File{
+		Id:                 "purgehotlinktest",
+		Name:               "purgehotlinktest.jpg",
+		SHA1:               "purgehotlinktest",
+		ContentType:        "image/jpg",
+		HotlinkId:          "purgehotlinktestlink.jpg",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	}
+	database.SaveMetaData(file)
+	database.SaveHotlink(file)
+	_, ok := database.GetHotlink(file.HotlinkId)
+	test.IsEqualBool(t, ok, true)
+
+	// Upstream behaviour: with the env var unset, a pre-existing hotlink is left untouched
+	purgeHotlinksIfDisabled()
+	_, ok = database.GetHotlink(file.HotlinkId)
+	test.IsEqualBool(t, ok, true)
+	storedFile, ok := database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, storedFile.HotlinkId, file.HotlinkId)
+
+	// Enabling the env var must purge the hotlink and clear it from the file, even though the
+	// hotlink was created before the setting was switched on
+	os.Setenv("GOKAPI_DISABLE_HOTLINKS", "true")
+	defer os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	purgeHotlinksIfDisabled()
+	_, ok = database.GetHotlink(file.HotlinkId)
+	test.IsEqualBool(t, ok, false)
+	storedFile, ok = database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, storedFile.HotlinkId, "")
+}
+
 type testFile struct {
 	File    models.File
 	Request models.UploadParameters

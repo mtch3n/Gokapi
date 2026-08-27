@@ -1457,6 +1457,45 @@ func TestDuplicate(t *testing.T) {
 	apiDuplicateFile(nil, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
+func TestEditFileHotlinkDisabled(t *testing.T) {
+	const apiUrl = "/files/modify"
+	os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	apiKey := generateNewKey(true, idUser, "", "")
+
+	seedHotlinkableFile := func(id string) {
+		database.SaveMetaData(models.File{
+			Id:                 id,
+			Name:               id + ".jpg",
+			SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+			ContentType:        "image/jpg",
+			UnlimitedDownloads: true,
+			UnlimitedTime:      true,
+			UserId:             idUser,
+		})
+	}
+
+	// Upstream behaviour: editing a file that could be hotlinked, but currently isn't, re-creates
+	// the hotlink
+	seedHotlinkableFile("hotlinkedittest1")
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{Name: "id", Value: "hotlinkedittest1"}, {Name: "allowedDownloads", Value: "5"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	editedFile, ok := database.GetMetaDataById("hotlinkedittest1")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, editedFile.HotlinkId != "", true)
+
+	// With hotlinks disabled, the very same edit must not re-create one
+	os.Setenv("GOKAPI_DISABLE_HOTLINKS", "true")
+	defer os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	seedHotlinkableFile("hotlinkedittest2")
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{{Name: "id", Value: "hotlinkedittest2"}, {Name: "allowedDownloads", Value: "5"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	editedFile, ok = database.GetMetaDataById("hotlinkedittest2")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, editedFile.HotlinkId, "")
+}
+
 func TestChunkUpload(t *testing.T) {
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermUpload)

@@ -64,6 +64,16 @@ func TestEnvLoad(t *testing.T) {
 	os.Unsetenv("GOKAPI_MAX_FILESIZE")
 }
 
+func TestDisableHotlinks(t *testing.T) {
+	os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	env := New()
+	test.IsEqualBool(t, env.DisableHotlinks, false)
+	os.Setenv("GOKAPI_DISABLE_HOTLINKS", "true")
+	env = New()
+	test.IsEqualBool(t, env.DisableHotlinks, true)
+	os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+}
+
 func TestIsAwsProvided(t *testing.T) {
 	os.Unsetenv("GOKAPI_AWS_BUCKET")
 	os.Unsetenv("GOKAPI_AWS_REGION")

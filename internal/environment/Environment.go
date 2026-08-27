@@ -87,6 +87,9 @@ type Environment struct {
 	// multiple downloads. It is only recommended to use video hotlinking for uploads with
 	// unlimited downloads enabled
 	HotlinkVideos bool `env:"ENABLE_HOTLINK_VIDEOS" envDefault:"false"`
+	// Disables the creation of hotlinks, if set to true. Existing hotlinks are purged on startup,
+	// so that no password-free URL keeps serving a file after this is enabled
+	DisableHotlinks bool `env:"DISABLE_HOTLINKS" envDefault:"false"`
 	// Sets the AWS bucket name
 	AwsBucket string `env:"AWS_BUCKET"`
 	// Sets the AWS region name
