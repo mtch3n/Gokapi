@@ -1289,6 +1289,47 @@ deferred compliance project.
 - **Q8(d) — External witness / RFC 3161:** recommend DEFER; triggers and the
   cheap quarterly-checkpoint-export interim are in W15.
 
+## 5a. Compliance as configurable profiles, not built-in behaviour
+
+**User direction, recorded 2026-08-27.** Audit and compliance behaviour must **not** be
+mandatory or hardcoded. It should be expressed as selectable features or profiles, so an
+operator turns on the specific controls they need — for example log retention, file
+retention, which events are captured, and how logs are retrieved — rather than the
+product imposing one regime on everyone.
+
+This is a design correction to work already delivered. W7 currently hardwires its
+behaviour: the event set, fail-closed writing, IP capture and the chained format are all
+unconditional. That was reasonable for getting capture in place, but it is the wrong
+long-term shape.
+
+**Why this direction is right, beyond the user's preference.** It is also what makes the
+work upstreamable. Upstream Gokapi would not accept a general-purpose file-sharing tool
+that forces healthcare-grade audit behaviour on every install, but would plausibly accept
+an optional profile mechanism with a light default. That directly serves the Q7 decision
+to keep each concern separately extractable.
+
+**Shape to aim for** (not yet designed in detail; do this before W15):
+- A profile selector (`none` / `basic` / a named regime / `custom`) with per-setting
+  overrides, following the existing env-var and setup-wizard conventions.
+- Settings that should be individually controllable: which event categories are captured;
+  audit log retention; file retention (`GOKAPI_MAX_EXPIRY_DAYS` already exists and should
+  fold into this); whether audit writes are fail-closed or best-effort; whether client IPs
+  are recorded (`SaveIp` exists); how logs are retrieved or exported.
+- The **default must stay light** — a plain self-hosted install should not pay for
+  controls it did not ask for, and must not be able to take itself down through a
+  fail-closed audit path it never opted into.
+
+**Consequence for the W7 availability note above:** fail-closed serving becomes a profile
+setting rather than an unconditional behaviour, which also removes the objection that a
+corrupt audit file can stop an install that never wanted audit guarantees in the first
+place.
+
+**Affects:** W7 (retrofit behind the profile), W15/W16 (design against it from the
+start), W12 (the profile is what the documentation describes), and the deferred
+compliance work generally.
+
+---
+
 ## 5b. Reference projects evaluated
 
 Three comparable products were read in depth. None replaces Gokapi as the base — the
