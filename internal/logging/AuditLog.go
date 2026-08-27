@@ -369,3 +369,82 @@ func buildActorFromRequest(r *http.Request) AuditActor {
 	}
 	return AuditActor{Anonymous: true}
 }
+
+// GetAuditEntriesSince reads the audit log file and returns entries whose Seq > fromSeq,
+// oldest-first, capped at limit. If limit <= 0, defaults to 500; hard-capped at 2000.
+// Also returns lastSeq = the highest Seq present in the file (0 if file does not exist or is empty).
+// Parse errors are skipped (corruption tolerance for a read path); blank lines are ignored.
+// Does not take the append mutex: opens the file read-only and reads independently.
+func GetAuditEntriesSince(fromSeq uint64, limit int) ([]AuditEntry, uint64) {
+	// Default and cap limit
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+
+	f, err := os.Open(auditLogPath)
+	if err != nil {
+		// File does not exist yet, return empty
+		return []AuditEntry{}, 0
+	}
+	defer f.Close()
+
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		// Read error, return empty
+		return []AuditEntry{}, 0
+	}
+
+	if len(buf) == 0 {
+		return []AuditEntry{}, 0
+	}
+
+	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+	var entries []AuditEntry
+	var lastSeq uint64 = 0
+
+	// First pass: find the lastSeq (highest Seq in the entire file)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var entry AuditEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			// Parse error, skip this line
+			continue
+		}
+
+		// Track the highest seq seen
+		if entry.Seq > lastSeq {
+			lastSeq = entry.Seq
+		}
+	}
+
+	// Second pass: collect entries after fromSeq, limited by limit
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var entry AuditEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			// Parse error, skip this line
+			continue
+		}
+
+		// Only include entries after fromSeq
+		if entry.Seq > fromSeq {
+			entries = append(entries, entry)
+			if len(entries) >= limit {
+				break
+			}
+		}
+	}
+
+	return entries, lastSeq
+}

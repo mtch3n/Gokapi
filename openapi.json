@@ -837,6 +837,73 @@
         }
       }
     },
+    "/logs/audit": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Outputs hash-chained audit log entries",
+        "description": "This API call returns audit log entries with optional pagination. The audit log is a hash-chained compliance record of all audited actions. Requires API permission MANAGE_LOGS",
+        "operationId": "logsAudit",
+        "security": [
+          {
+            "apikey": [
+              "MANAGE_LOGS"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fromSeq",
+            "in": "header",
+            "description": "Optional sequence number to start from (exclusive); only entries with Seq > fromSeq are returned",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "header",
+            "description": "Optional limit on number of entries to return (default 500, max 2000)",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "description": "Array of audit entries, oldest-first",
+                      "items": {
+                        "$ref": "#/components/schemas/AuditEntry"
+                      }
+                    },
+                    "lastSeq": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "The highest sequence number present in the audit log"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication"
+          }
+        }
+      }
+    },
     "/logs/systemStatus": {
       "get": {
         "tags": [
@@ -2475,6 +2542,121 @@
           }
         },
         "description": "ServerStats is a struct used for passing server status information"
+      },
+      "AuditEntry": {
+        "type": "object",
+        "description": "A single immutable record in the hash-chained audit log",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Schema version of the audit entry",
+            "example": 1
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Strictly monotonic sequence number",
+            "example": "42"
+          },
+          "prevHash": {
+            "type": "string",
+            "description": "SHA-256 hash of the previous entry (empty string for the first entry)",
+            "example": "abc123def456..."
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp when the action occurred",
+            "example": "1694520000"
+          },
+          "category": {
+            "type": "string",
+            "description": "Category of the audited action (e.g., download, upload, edit, delete)",
+            "example": "download"
+          },
+          "action": {
+            "type": "string",
+            "description": "Specific action within the category",
+            "example": "file.downloaded"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "Result of the action (success, failure, or denied)",
+            "enum": ["success", "failure", "denied"],
+            "example": "success"
+          },
+          "ip": {
+            "type": "string",
+            "description": "IP address from which the action was performed",
+            "example": "192.168.1.1"
+          },
+          "fileId": {
+            "type": "string",
+            "description": "ID of the affected file, if applicable",
+            "example": "oNleRD3pUZgaDKn"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "Unique request identifier, if applicable",
+            "example": "req-12345"
+          },
+          "actor": {
+            "type": "object",
+            "description": "Information about who performed the action",
+            "properties": {
+              "userId": {
+                "type": "integer",
+                "description": "Internal user ID if authenticated"
+              },
+              "email": {
+                "type": "string",
+                "description": "Email or username of the authenticated user"
+              },
+              "oidcSubject": {
+                "type": "string",
+                "description": "OIDC subject if authenticated via OIDC"
+              },
+              "anonymous": {
+                "type": "boolean",
+                "description": "True if the action was performed by an unauthenticated user"
+              }
+            }
+          },
+          "fileConfig": {
+            "type": "object",
+            "description": "Configuration of the file at the time of the event",
+            "properties": {
+              "oneTime": {
+                "type": "boolean",
+                "description": "Whether the file is one-time download only"
+              },
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix timestamp when the file expires"
+              },
+              "passwordProtected": {
+                "type": "boolean",
+                "description": "Whether the file is password protected"
+              }
+            }
+          },
+          "detail": {
+            "type": "string",
+            "description": "Free-form details specific to the event (e.g., changed permissions)",
+            "example": "permission changed from read to write"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message if outcome is failure or denied",
+            "example": "incorrect password"
+          },
+          "hash": {
+            "type": "string",
+            "description": "SHA-256 hash of this entry (used for chain verification)",
+            "example": "def456ghi789..."
+          }
+        }
       },
       "FileRequest": {
         "type": "object",

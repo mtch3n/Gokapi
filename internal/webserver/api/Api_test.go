@@ -18,6 +18,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/helper"
+	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
 	"github.com/forceu/gokapi/internal/test"
@@ -2181,4 +2182,149 @@ func TestChunkCompleteSanitisationUnit(t *testing.T) {
 	test.IsEqualBool(t, strings.HasPrefix(p.FileHeader.Filename, ".."), false)
 	test.IsEqualBool(t, strings.Contains(p.FileHeader.Filename, "\r"), false)
 	test.IsEqualBool(t, strings.Contains(p.FileHeader.Filename, "\n"), false)
+}
+
+func TestLogsAudit(t *testing.T) {
+	const apiUrl = "/logs/audit"
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageLogs)
+
+	// Setup: create a temporary config dir and init audit + text logs
+	tempDir := t.TempDir()
+	logging.Init(tempDir)
+
+	// Create test audit entries via the logging package
+	testRequest := httptest.NewRequest("GET", "/test", nil)
+	testRequest.Header.Set("User-Agent", "test-agent")
+
+	test.IsNil(t, logging.LogUpload(models.File{
+		Id:     "testfile1",
+		Name:   "test1.txt",
+		UserId: idAdmin,
+		SHA1:   "abc123",
+		Size:   "1024",
+	}, models.User{Id: idAdmin, Name: "TestAdmin"}, models.FileRequest{}, testRequest, false))
+
+	test.IsNil(t, logging.LogDownload(models.File{
+		Id:     "testfile1",
+		Name:   "test1.txt",
+		UserId: idAdmin,
+		SHA1:   "abc123",
+		Size:   "1024",
+	}, testRequest, false))
+
+	logging.LogDelete(models.File{
+		Id:     "testfile1",
+		Name:   "test1.txt",
+		UserId: idAdmin,
+		SHA1:   "abc123",
+		Size:   "1024",
+	}, models.User{Id: idAdmin, Name: "TestAdmin"})
+
+	// Give async logging time to write
+	time.Sleep(500 * time.Millisecond)
+
+	// Test 1: Get all audit entries with no params
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	type auditResponse struct {
+		Entries []logging.AuditEntry `json:"entries"`
+		LastSeq uint64               `json:"lastSeq"`
+	}
+	var result auditResponse
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+
+	// Should have at least 3 entries
+	test.IsEqualBool(t, len(result.Entries) >= 3, true)
+	// Verify they're in oldest-first order (Seq increasing)
+	if len(result.Entries) > 1 {
+		for i := 1; i < len(result.Entries); i++ {
+			test.IsEqualBool(t, result.Entries[i].Seq > result.Entries[i-1].Seq, true)
+		}
+	}
+	// LastSeq should be the max Seq from entries
+	if len(result.Entries) > 0 {
+		maxSeq := result.Entries[0].Seq
+		for _, entry := range result.Entries {
+			if entry.Seq > maxSeq {
+				maxSeq = entry.Seq
+			}
+		}
+		test.IsEqual(t, result.LastSeq, maxSeq)
+	}
+
+	firstSeq := result.Entries[0].Seq
+	secondSeq := result.Entries[1].Seq
+	firstLastSeq := result.LastSeq
+
+	// Test 2: Get entries from a specific Seq
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "fromSeq", Value: strconv.FormatUint(firstSeq, 10)},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	// Should get entries after firstSeq (not including firstSeq itself)
+	if len(result.Entries) > 0 {
+		test.IsEqualBool(t, result.Entries[0].Seq > firstSeq, true)
+	}
+
+	// Test 3: Limit the number of entries
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "limit", Value: "1"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(result.Entries), 1)
+	// LastSeq should still be the overall max
+	test.IsEqual(t, result.LastSeq, firstLastSeq)
+
+	// Test 4: Test limit with fromSeq
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "fromSeq", Value: strconv.FormatUint(firstSeq, 10)},
+		{Name: "limit", Value: "1"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(result.Entries), 1)
+	test.IsEqual(t, result.Entries[0].Seq, secondSeq)
+
+	// Test 5: Verify the endpoint is read-only (GET only)
+	routeFound := false
+	for _, route := range routes {
+		if route.Url == apiUrl {
+			routeFound = true
+			test.IsEqualBool(t, route.NoJsonResponse, false) // Should return JSON
+			// Note: there's no DELETE for /logs/audit
+		}
+	}
+	test.IsEqualBool(t, routeFound, true)
+
+	// Test 6: Empty audit log returns empty entries array, not nil
+	emptyTempDir := t.TempDir()
+	logging.Init(emptyTempDir)
+	time.Sleep(50 * time.Millisecond)
+
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(result.Entries), 0)
+	test.IsEqual(t, result.LastSeq, uint64(0))
+
+	// Verify it's an empty array, not null
+	bodyStr := w.Body.String()
+	test.IsEqualBool(t, strings.Contains(bodyStr, `"entries":[]`), true)
 }

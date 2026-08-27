@@ -286,6 +286,12 @@ var routes = []apiRoute{
 		RequestParser: &paramLogsGet{},
 	},
 	{
+		Url:           "/logs/audit",
+		ApiPerm:       models.ApiPermManageLogs,
+		execution:     apiLogsAudit,
+		RequestParser: &paramLogsAudit{},
+	},
+	{
 		Url:           "/e2e/get", // not published in API documentation
 		ApiPerm:       models.ApiPermUpload,
 		execution:     apiE2eGet,
@@ -664,6 +670,16 @@ type paramLogsGet struct {
 }
 
 func (p *paramLogsGet) ProcessParameter(_ *http.Request) error {
+	return nil
+}
+
+type paramLogsAudit struct {
+	FromSeq      int64 `header:"fromSeq"`
+	Limit        int   `header:"limit"`
+	foundHeaders map[string]bool
+}
+
+func (p *paramLogsAudit) ProcessParameter(_ *http.Request) error {
 	return nil
 }
 

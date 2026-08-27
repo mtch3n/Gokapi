@@ -1246,6 +1246,35 @@ func apiLogsGet(w http.ResponseWriter, r requestParser, _ models.User, _ models.
 	_, _ = w.Write(resultJson)
 }
 
+func apiLogsAudit(w http.ResponseWriter, r requestParser, _ models.User, _ models.ApiKey) {
+	request, ok := r.(*paramLogsAudit)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+	// Convert int64 to uint64; negative values default to 0
+	fromSeq := uint64(0)
+	if request.FromSeq > 0 {
+		fromSeq = uint64(request.FromSeq)
+	}
+	entries, lastSeq := logging.GetAuditEntriesSince(fromSeq, request.Limit)
+
+	// Ensure we return an empty slice literal, not nil, so it marshals as [] not null
+	if entries == nil {
+		entries = []logging.AuditEntry{}
+	}
+
+	result := struct {
+		Entries []logging.AuditEntry `json:"entries"`
+		LastSeq uint64               `json:"lastSeq"`
+	}{
+		Entries: entries,
+		LastSeq: lastSeq,
+	}
+	resultJson, err := json.Marshal(result)
+	helper.Check(err)
+	_, _ = w.Write(resultJson)
+}
+
 func apiLogSystemStatus(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
 	result := struct {
 		Uptime                int64  `json:"uptime"`
