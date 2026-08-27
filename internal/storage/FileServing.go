@@ -62,18 +62,21 @@ func NewFile(fileContent io.Reader, fileHeader *multipart.FileHeader, userId int
 		return models.File{}, ErrorFileTooLarge
 	}
 	var hasBeenRenamed bool
-	reader, hash, tempFile, encInfo := generateHashAndEncrypt(fileContent, fileHeader)
+	reader, id, tempFile, encInfo := generateHashAndEncrypt(fileContent, fileHeader)
 	defer deleteTempFile(tempFile, &hasBeenRenamed)
 	header, err := chunking.ParseMultipartHeader(fileHeader)
 	if err != nil {
 		return models.File{}, err
 	}
-	file := createNewMetaData(hex.EncodeToString(hash), header, userId, uploadRequest)
+	file := createNewMetaData(id, header, userId, uploadRequest)
 	file.Encryption = encInfo
 	filename := configuration.Get().DataDir + "/" + file.SHA1
 	dataDir := configuration.Get().DataDir
 
-	fileWithHashExists := FileExists(file, configuration.Get().DataDir)
+	// Encrypted uploads are given a fresh, random storage identifier by generateHashAndEncrypt
+	// and must never be deduplicated (each gets its own blob and its own key), so an existing
+	// blob is only ever reused for unencrypted uploads.
+	fileWithHashExists := !file.Encryption.IsEncrypted && FileExists(file, configuration.Get().DataDir)
 
 	if !file.IsLocalStorage() {
 		if !fileWithHashExists {
@@ -84,18 +87,6 @@ func NewFile(fileContent io.Reader, fileHeader *multipart.FileHeader, userId int
 		}
 		database.SaveMetaData(file)
 		return file, nil
-	}
-
-	if fileWithHashExists {
-		encryptionLevel := configuration.Get().Encryption.Level
-		previousEncryption, ok := getEncInfoFromExistingFile(file.SHA1)
-		if !ok && encryptionLevel != encryption.NoEncryption && encryptionLevel != encryption.EndToEndEncryption {
-			err = os.Remove(dataDir + "/" + file.SHA1)
-			helper.Check(err)
-			fileWithHashExists = false
-		} else {
-			file.Encryption = previousEncryption
-		}
 	}
 
 	if !fileWithHashExists {
@@ -176,9 +167,11 @@ func NewFileFromChunk(chunkId string, fileHeader chunking.FileHeader, userId int
 		return models.File{}, err
 	}
 	metaData := createNewMetaData(hash, fileHeader, userId, uploadRequest)
-	fileExists := FileExists(metaData, configuration.Get().DataDir)
+	// Encrypted uploads (including end-to-end encrypted ones) are given a fresh, random storage
+	// identifier by getChunkFileHash and must never be deduplicated, so an existing blob is only
+	// ever reused for unencrypted uploads.
+	fileExists := !metaData.Encryption.IsEncrypted && FileExists(metaData, configuration.Get().DataDir)
 	if fileExists {
-		fileExists = copyEncryptionInfo(&metaData)
 		err = file.Close()
 		if err != nil {
 			return models.File{}, err
@@ -218,33 +211,31 @@ func NewFileFromChunk(chunkId string, fileHeader chunking.FileHeader, userId int
 	return metaData, nil
 }
 
-// copyEncryptionInfo copies encryption info from an existing file,
-// if possible. If not possible due to incompatible encryption level,
-// the old file is removed.
-//
-// The function returns false if the old file was removed.
-func copyEncryptionInfo(metaData *models.File) bool {
-	encryptionLevel := configuration.Get().Encryption.Level
-	previousEncryption, ok := getEncInfoFromExistingFile(metaData.SHA1)
-	if !ok && encryptionLevel != encryption.NoEncryption && encryptionLevel != encryption.EndToEndEncryption {
-		err := os.Remove(configuration.Get().DataDir + "/" + metaData.SHA1)
-		helper.Check(err)
-		return false
-	}
-	metaData.Encryption = previousEncryption
-	return true
-}
-
+// getChunkFileHash returns the storage identifier for a completed chunk upload. Files that are
+// encrypted, whether end-to-end or server-side, must never be deduplicated (see NewFileFromChunk),
+// so they are given a random identifier instead of one derived from their content. Only a plain,
+// unencrypted upload is identified by its content hash, which allows it to be deduplicated.
 func getChunkFileHash(file *os.File, isEndToEndEncryted bool) (string, error) {
 	if isEndToEndEncryted {
 		return "e2e-" + helper.GenerateRandomString(20), nil
 	}
-	hash, err := hashFile(file, isEncryptionRequested())
+	if isEncryptionRequested() {
+		return newEncryptedFileId(), nil
+	}
+	hash, err := hashFile(file, false)
 	if err != nil {
 		_ = file.Close()
 		return "", err
 	}
 	return hash, nil
+}
+
+// newEncryptedFileId returns a random storage identifier for a file that is encrypted server-side,
+// following the same pattern getChunkFileHash already uses for end-to-end encrypted uploads
+// ("e2e-" + random). It is content-independent so that two uploads with colliding SHA-1 hashes
+// never end up sharing, or overwriting, the same on-disk blob.
+func newEncryptedFileId() string {
+	return "enc-" + helper.GenerateRandomString(20)
 }
 
 func encryptChunkFile(file *os.File, metadata *models.File) (*os.File, error) {
@@ -334,20 +325,6 @@ func createNewId() string {
 	return helper.GenerateRandomString(configuration.GetEnvironment().LengthId)
 }
 
-func getEncInfoFromExistingFile(hash string) (models.EncryptionInfo, bool) {
-	encryptionLevel := configuration.Get().Encryption.Level
-	if encryptionLevel == encryption.NoEncryption || encryptionLevel == encryption.EndToEndEncryption {
-		return models.EncryptionInfo{}, true
-	}
-	allFiles := database.GetAllMetadata()
-	for _, existingFile := range allFiles {
-		if existingFile.SHA1 == hash {
-			return existingFile.Encryption, true
-		}
-	}
-	return models.EncryptionInfo{}, false
-}
-
 func deleteTempFile(file *os.File, hasBeenRenamed *bool) {
 	if file != nil && !*hasBeenRenamed {
 		err := file.Close()
@@ -403,6 +380,13 @@ func isChangeRequested(parametersToChange, parameter int) bool {
 }
 
 // DuplicateFile creates a copy of an existing file with new parameters
+//
+// The duplicate deliberately keeps sharing the source file's storage blob and, if encrypted, its
+// key and nonce (via copier.Copy below). This is unrelated to the content-hash deduplication that
+// NewFile/NewFileFromChunk perform between independent uploads: here the "second copy" is known by
+// construction to be byte-identical to the first, since it is the same already-stored file, not
+// attacker-supplied content that merely happens to produce the same hash. Reusing the blob and key
+// is therefore safe and does not depend on SHA-1 collision resistance.
 func DuplicateFile(file models.File, parametersToChange int, newFileName string, fileParameters models.UploadParameters) (models.File, error) {
 
 	// apiDuplicateFile expects fileParameters.IsEndToEndEncrypted and fileParameters.RealSize not to be used,
@@ -455,9 +439,12 @@ func hashFile(input io.Reader, useSalt bool) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// Generates the SHA1 hash of an uploaded file and returns a reader for the file, the hash and if a temporary file was created the
-// reference to that file.
-func generateHashAndEncrypt(fileContent io.Reader, fileHeader *multipart.FileHeader) (io.Reader, []byte, *os.File, models.EncryptionInfo) {
+// Generates the storage identifier of an uploaded file and returns a reader for the file, the
+// identifier and if a temporary file was created the reference to that file. An unencrypted upload
+// is identified by the hex-encoded SHA1 hash of its content, which allows it to be deduplicated. A
+// file that is encrypted server-side is never deduplicated (see NewFile) and is instead given a
+// random identifier, the same way getChunkFileHash does for chunked uploads.
+func generateHashAndEncrypt(fileContent io.Reader, fileHeader *multipart.FileHeader) (io.Reader, string, *os.File, models.EncryptionInfo) {
 	hash := sha1.New()
 	encInfo := models.EncryptionInfo{}
 	if fileHeader.Size <= int64(configuration.Get().MaxMemory)*1024*1024 {
@@ -468,10 +455,9 @@ func generateHashAndEncrypt(fileContent io.Reader, fileHeader *multipart.FileHea
 			encContent := new(bytes.Buffer)
 			err = encryption.Encrypt(&encInfo, bytes.NewReader(content), encContent)
 			helper.Check(err)
-			hash.Write([]byte(configuration.Get().Authentication.SaltFiles))
-			return bytes.NewReader(encContent.Bytes()), hash.Sum(nil), nil, encInfo
+			return bytes.NewReader(encContent.Bytes()), newEncryptedFileId(), nil, encInfo
 		}
-		return bytes.NewReader(content), hash.Sum(nil), nil, encInfo
+		return bytes.NewReader(content), hex.EncodeToString(hash.Sum(nil)), nil, encInfo
 	}
 	tempFile, err := os.CreateTemp(configuration.Get().DataDir, "upload")
 	helper.Check(err)
@@ -490,11 +476,10 @@ func generateHashAndEncrypt(fileContent io.Reader, fileHeader *multipart.FileHea
 		helper.Check(err)
 		err = os.Remove(tempFile.Name())
 		helper.Check(err)
-		hash.Write([]byte(configuration.Get().Authentication.SaltFiles))
-		tempFile = tempFileEnc
+		return tempFileEnc, newEncryptedFileId(), tempFileEnc, encInfo
 	}
 	// Instead of returning a reference to the file as the 3rd result, one could use reflections. However, that would be more expensive.
-	return tempFile, hash.Sum(nil), tempFile, encInfo
+	return tempFile, hex.EncodeToString(hash.Sum(nil)), tempFile, encInfo
 }
 
 func isEncryptionRequested() bool {
