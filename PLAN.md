@@ -673,6 +673,16 @@ layer can be added afterwards.
 
 ### Phase 2 — Decision-independent platform, identity and hardening
 
+> **Operational consequence of W7 that W8 and W20 must handle.** Audit writes are
+> fail-closed, and startup recovery sets `auditChainUnusable` if a non-empty audit file
+> has no entry that verifies, refusing every subsequent write. Combined, a fully
+> corrupted audit file makes the instance answer **every download, upload and denial
+> with 503** until an operator moves the file aside and restarts. The trigger is narrow
+> — torn tails and mid-file tampering still recover to the last verifiable entry — but
+> the escape hatch is currently **stdout only**: nothing surfaces in the admin UI or a
+> health endpoint. W8 must document the operator procedure and alert on it; W20 should
+> drill it. Consider surfacing the state on a health endpoint so the platform can see it.
+
 **W8 — Azure App Service deployment profile [decision-independent, except the
 master-key app setting which is Level-2-specific]**
 - *Why:* Encode the constraints so the deployment is reproducible and its residual
