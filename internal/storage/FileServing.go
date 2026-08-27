@@ -627,7 +627,17 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	}
 	apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 
-	logging.LogDownload(file, r, configuration.Get().SaveIp)
+	// Fail closed: the audit record for this download is committed (fsync'd) to durable local
+	// storage before any bytes are served below, and the request is refused if that write
+	// fails - so a crash between the two can only over-log (an audit entry for a download that
+	// did not fully complete), never serve content with no record of it. See
+	// internal/logging/AuditLog.go for the chain design.
+	if err := logging.LogDownload(file, r, configuration.Get().SaveIp); err != nil {
+		fmt.Println("audit: refusing download, could not record audit event:", err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("Service temporarily unavailable, please try again."))
+		return true
+	}
 	go serverstats.AddTraffic(uint64(file.SizeBytes))
 
 	if !file.IsLocalStorage() {
@@ -707,6 +717,15 @@ func ServeFilesAsZip(files []models.File, filename string, w http.ResponseWriter
 	filenames := make(map[string]bool)
 	for _, file := range files {
 		file.Name = makeFilenameUnique(file.Name, &filenames)
+		// Fail closed: the HTTP status for this response was already sent above to start the
+		// zip stream, so a 503 can no longer be returned if the audit write fails. Instead,
+		// this file (and the zip stream entirely) is not written, leaving the client with a
+		// truncated - and therefore visibly invalid - zip rather than a complete one containing
+		// a file with no durable audit record.
+		if err := logging.LogDownload(file, r, saveIp); err != nil {
+			fmt.Println("audit: aborting zip download, could not record audit event for", file.Id, ":", err)
+			return
+		}
 		header := &zip.FileHeader{
 			Name:     file.Name,
 			Method:   zip.Store,
@@ -714,7 +733,6 @@ func ServeFilesAsZip(files []models.File, filename string, w http.ResponseWriter
 		}
 		entryWriter, err := zipWriter.CreateHeader(header)
 		helper.Check(err)
-		logging.LogDownload(file, r, saveIp)
 		go serverstats.AddTraffic(uint64(file.SizeBytes))
 		if !file.IsLocalStorage() {
 			statusId := downloadstatus.SetDownload(file)
@@ -804,7 +822,16 @@ func CleanUp(periodic bool) {
 	wasItemDeleted := false
 	for key, element := range database.GetAllMetadata() {
 		fileExists := FileExists(element, configuration.Get().DataDir)
-		if !fileExists || isExpiredFileWithoutDownload(element, timeNow) || isPendingToBeDeleted(element, timeNow) {
+		reason := ""
+		switch {
+		case !fileExists:
+			reason = "stored object missing"
+		case isExpiredFileWithoutDownload(element, timeNow):
+			reason = "expired"
+		case isPendingToBeDeleted(element, timeNow):
+			reason = "pending deletion timer elapsed"
+		}
+		if reason != "" {
 			deleteFile := true
 			for _, secondLoopElement := range database.GetAllMetadata() {
 				if (element.Id != secondLoopElement.Id) && (element.SHA1 == secondLoopElement.SHA1) {
@@ -819,6 +846,7 @@ func CleanUp(periodic bool) {
 				database.DeleteHotlink(element.HotlinkId)
 			}
 			database.DeleteMetaData(key)
+			logging.LogFileExpired(element, reason)
 			wasItemDeleted = true
 		}
 	}

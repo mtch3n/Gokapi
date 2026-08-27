@@ -31,6 +31,7 @@ import (
 	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/helper"
+	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage/filesystem/s3filesystem/aws"
 )
@@ -810,7 +811,11 @@ func handleResult(w http.ResponseWriter, r *http.Request) {
 		outputError(w, err)
 		return
 	}
+	previousEncryptionLevel := configuration.Get().Encryption.Level
 	configuration.LoadFromSetup(newConfig, cloudSettings, e2eConfig, authInfo.PasswordInternalAuth)
+	if !isInitialSetup && previousEncryptionLevel != newConfig.Encryption.Level {
+		logging.LogEncryptionConfigChange(previousEncryptionLevel, newConfig.Encryption.Level, r)
+	}
 	w.WriteHeader(200)
 	_, _ = w.Write([]byte("{ \"result\": \"OK\"}"))
 	go func() {

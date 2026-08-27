@@ -285,7 +285,11 @@ func serveE2EWasm(w http.ResponseWriter, r *http.Request) {
 
 // Handling of /logout
 func doLogout(w http.ResponseWriter, r *http.Request) {
+	user, isLoggedIn, err := authentication.IsAuthenticated(w, r)
 	authentication.Logout(w, r)
+	if err == nil && isLoggedIn {
+		logging.LogLogout(user, r)
+	}
 }
 
 // Handling of /index and redirecting to globalConfig.RedirectUrl
@@ -517,7 +521,7 @@ func showLogin(w http.ResponseWriter, r *http.Request) {
 		ratelimiter.WaitOnLogin(ip)
 		retrievedUser, validCredentials, validCsfr := authentication.IsCorrectUsernameAndPassword(user, pw, csfr)
 		if validCredentials {
-			logging.LogValidLogin(user)
+			logging.LogValidLogin(user, "", ip)
 			sessionmanager.CreateSession(w, false, 0, retrievedUser.Id)
 			redirect(w, r, "admin")
 			return
@@ -614,6 +618,10 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 			redirect(w, r, "d?id="+file.Id)
 			return
 		}
+		if err := logging.LogDownloadDenied(file, r, config.SaveIp, "incorrect password"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		view.IsFailedLogin = true
 		view.IsPasswordView = true
 		err := templateFolder.ExecuteTemplate(w, "download_password", view)
@@ -639,7 +647,12 @@ func showHotlink(w http.ResponseWriter, r *http.Request) {
 	}
 	validFile := storage.ServeFile(file, w, r, false, true, false, true)
 	if !validFile {
-		// Only called if the file has already expired during the expiry check of storage.ServeFile()
+		// Called if the file has expired or its download allowance was exhausted, checked
+		// during storage.ServeFile()
+		if err := logging.LogDownloadDenied(file, r, configuration.Get().SaveIp, "link expired or download allowance exhausted"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		w.Header().Set("Content-Type", "image/svg+xml")
 		_, _ = w.Write(imageExpiredPicture)
 		return
@@ -1093,7 +1106,12 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	}
 	validFile := storage.ServeFile(savedFile, w, r, true, true, false, true)
 	if !validFile {
-		// Only called if the file has already expired during the expiry check of storage.ServeFile()
+		// Called if the file has expired or its download allowance was exhausted, checked
+		// during storage.ServeFile()
+		if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp, "link expired or download allowance exhausted"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
 		if isRootUrl {
 			redirectOnIncorrectId(w, r, "error")
 		} else {
@@ -1101,6 +1119,15 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
+}
+
+// respondAuditWriteFailed refuses a request whose audit record could not be committed to
+// durable local storage. The fail-closed design requires that the caller not proceed after
+// calling this - not serve file content, not reveal whether a denial was due to a wrong
+// password or an expired/exhausted link, nothing - since none of that would be recorded.
+func respondAuditWriteFailed(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("Service temporarily unavailable, please try again."))
 }
 
 func requireLogin(next http.HandlerFunc, isUiCall, isPwChangeView bool) http.HandlerFunc {

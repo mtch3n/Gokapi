@@ -14,6 +14,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/helper"
+	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/webserver/authentication/csrftoken"
 	"github.com/forceu/gokapi/internal/webserver/authentication/sessionmanager"
@@ -237,10 +238,12 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 		}
 		if ok {
 			sessionmanager.CreateSession(w, true, authSettings.OAuthRecheckInterval, user.Id)
+			logging.LogValidLogin(userInfo.Email, userInfo.Subject, logging.GetIpAddress(r))
 			http.Redirect(w, r, "admin", http.StatusTemporaryRedirect)
 			return nil
 		}
 	}
+	logging.LogInvalidLogin(userInfo.Email, logging.GetIpAddress(r))
 	errorHandling.RedirectGenericErrorPage(w, r, errorHandling.TypeOAuthNotAuthorised)
 	return nil
 }

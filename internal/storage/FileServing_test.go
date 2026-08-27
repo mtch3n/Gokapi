@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"os"
@@ -786,6 +787,32 @@ func TestServeFile(t *testing.T) {
 	w = httptest.NewRecorder()
 	ServeFile(file, w, r, true, true, false, false)
 	test.ResponseBodyContains(t, w, "Error decrypting file")
+}
+
+// TestServeFileAuditWriteFailureRefusesDownload verifies the W7 fail-closed design: if the
+// durable local audit record for a download cannot be written, the file must not be served.
+func TestServeFileAuditWriteFailureRefusesDownload(t *testing.T) {
+	auditPath := "test/data/audit.jsonl"
+	test.IsNil(t, os.RemoveAll(auditPath))
+	// os.OpenFile() on a directory fails with EISDIR regardless of user/permissions, which
+	// gives a reliable, portable way to force the audit write to fail.
+	test.IsNil(t, os.MkdirAll(auditPath, 0777))
+	defer os.RemoveAll(auditPath)
+
+	file := models.File{
+		Id:                 "auditFailureTestFile",
+		Name:               "should-not-be-served.txt",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+
+	handled := ServeFile(file, w, r, false, false, false, false)
+
+	test.IsEqualBool(t, handled, true)
+	test.IsEqualInt(t, w.Code, http.StatusServiceUnavailable)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), file.Name), false)
 }
 
 func TestCleanUp(t *testing.T) {
