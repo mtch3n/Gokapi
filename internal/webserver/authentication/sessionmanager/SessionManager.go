@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 )
 
-// If no login occurred during this time, the admin session will be deleted. Default 30 days
-const cookieLifeAdmin = 30 * 24 * time.Hour
 const lengthSessionId = 60
 
 // IsValidSession checks if the user is submitting a valid session token
@@ -58,7 +58,7 @@ func useSession(w http.ResponseWriter, id string, session models.Session, isOaut
 // CreateSession creates a new session - called after login with correct username / password
 // If sessions parameter is nil, it will be loaded from config
 func CreateSession(w http.ResponseWriter, isOauth bool, OAuthRecheckInterval int, userId int) {
-	timeExpiry := time.Now().Add(cookieLifeAdmin)
+	timeExpiry := time.Now().Add(sessionDuration())
 	if isOauth {
 		timeExpiry = time.Now().Add(time.Duration(OAuthRecheckInterval) * time.Hour)
 	}
@@ -88,7 +88,15 @@ func writeSessionCookie(w http.ResponseWriter, sessionString string, expiry time
 		Value:    sessionString,
 		Expires:  expiry,
 		HttpOnly: true,
+		Secure:   configuration.UsesHttps(),
 		SameSite: http.SameSiteLaxMode,
 	}
 	http.SetCookie(w, c)
+}
+
+// sessionDuration returns the configured lifetime for admin and password-protected-file
+// sessions. Does not apply to OAuth2 sessions, which use OAuthRecheckInterval instead.
+// Default 7 days
+func sessionDuration() time.Duration {
+	return time.Duration(environment.New().SessionDurationDays) * 24 * time.Hour
 }
