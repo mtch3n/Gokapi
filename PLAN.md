@@ -1289,6 +1289,80 @@ deferred compliance project.
 - **Q8(d) — External witness / RFC 3161:** recommend DEFER; triggers and the
   cheap quarterly-checkpoint-export interim are in W15.
 
+## 5b. Reference projects evaluated
+
+Three comparable products were read in depth. None replaces Gokapi as the base — the
+combination this product needs (large files, both directions, accounts and an audit
+trail) does not exist off the shelf, which is why the fork exists. What each one is
+useful for is recorded here so the evaluation is not repeated.
+
+### yopass (jhaals/yopass) — Apache-2.0, ~3.1k stars, very actively maintained
+
+**Why it cannot be the base.** File cap 512 KB default and 1 MB hard without a licence;
+expiry presets are only 1h/1d/1w, so the decided 30-day retention (Q1) is impossible;
+OIDC, audit logging, secret requests, webhooks and theming are all licence-gated; and
+critically, even the licensed audit log has **no tamper-evidence or signing**, so the
+standing "signed and verified" requirement cannot be bought there. It is a secrets tool,
+not a file-exchange platform. Note the licence-gated features' source **is** in the
+Apache-2.0 repository behind a runtime key check; if its features ever fit, the correct
+response is to buy a licence, not to strip the gate.
+
+**Why it is worth keeping as a design reference.** Its "Secret Requests" feature is a
+shipped, working implementation of the sealed-box design that was cancelled here:
+the requester's browser generates an ECC key pair, the public key is registered
+server-side, the private key stays in `localStorage`, and the responder's browser
+fetches the public key, **verifies it against a fingerprint carried in the URL fragment**
+(so a server substituting its own key is detectable), then encrypts with OpenPGP. If G1
+ever selects a hybrid, that is the design to study — including the fingerprint check,
+which is a refinement this plan had not proposed.
+
+**The countervailing signal, which matters more than the reference value.** yopass caps
+Secret Request file responses at 512 KB and stores them in the database backend only,
+while its *ordinary* uploads stream via `file.stream()` and support disk/S3. Reading the
+source explains why: `encryptFileWithPublicKey` does `new Uint8Array(await
+file.arrayBuffer())` — the whole file in memory — whereas the symmetric upload path
+streams. **The asymmetric path does not stream, and streaming is exactly the part we
+would need.** A hybrid design here must seal a random file key and stream the body under
+it; yopass does not demonstrate that, so the reference stops short of the hard part.
+
+Also worth borrowing regardless of G1: the audit field set (adopted into W7); putting the
+filename **inside** the encrypted packet rather than in the URL fragment; webhook payload
+hygiene (a SHA-256 fingerprint of the id rather than the id, HMAC-signed body,
+exponential-backoff retries with a stable delivery id); and the read-only split
+deployment, where an internet-facing instance has creation endpoints disabled entirely
+and shares a database with an internal instance that can create.
+
+### PrivCloud_Sharing (Simthem/PrivCloud_Sharing) — BSD-2 fork of Pingvin Share
+
+**Assessment: do not adopt.** 2 stars, 1 fork, created February 2026, effectively one
+author, with an unusually large security-critical surface built very fast — team
+workspaces, folders, access logs, PDF signing at QES level, WebDAV import, four mail
+integrations, and "post-quantum-ready" ML-KEM. The README claims no security audit and
+carries no warning that the cryptography is unreviewed, which is a weaker posture than
+upstream Gokapi, whose own docs at least state plainly that its encryption has not been
+independently audited. Attribution is handled correctly (BSD-2 retaining Elias
+Schneider's copyright plus a modification notice).
+
+**The specific technical objection.** Its anonymous reverse shares use a **symmetric
+per-reverse-share key carried in the link fragment**: "senders encrypt files with the key
+from the link fragment." Anyone holding that link can therefore **decrypt** everything
+uploaded through it, not merely encrypt to it. For this product's inbound flow — several
+different clients uploading to us — that means one client could read another's upload,
+and a forwarded link exposes everything already sent. Compare yopass's asymmetric design,
+where the sender holds only a public key and cannot decrypt even their own submission.
+Both are described as end-to-end encrypted reverse shares; the confidentiality guarantees
+are materially different. Its ML-KEM support is metadata/key storage only, not in use for
+user data.
+
+**What it does establish.** The Pingvin lineage has folder and team models that Gokapi
+lacks. If multi-file grouping becomes a hard requirement rather than something a client
+side zip can satisfy, the credible candidate to evaluate is **pingvin-share-x** (~370
+stars, actively maintained, the successor the archived upstream itself points to), not
+this fork. That would be a change of base, not a borrowed design, and should be decided
+deliberately.
+
+---
+
 ## 6. Traceability
 
 Every finding, requirement, Codex review point and user decision maps to a work
