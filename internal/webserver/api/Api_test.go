@@ -338,9 +338,9 @@ func TestUserList(t *testing.T) {
 	test.IsEqualInt(t, w.Code, 200)
 
 	type userListItem struct {
-		Id            int `json:"id"`
-		Name          string
-		UploadCount   int `json:"uploadCount"`
+		Id          int `json:"id"`
+		Name        string
+		UploadCount int `json:"uploadCount"`
 	}
 	var result []userListItem
 	err := json.Unmarshal(w.Body.Bytes(), &result)

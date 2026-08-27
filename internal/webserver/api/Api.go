@@ -313,14 +313,14 @@ func apiGetUserList(w http.ResponseWriter, _ requestParser, _ models.User, _ mod
 
 func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
 	type apiKeyListItem struct {
-		Id                string `json:"id,omitempty"`
-		PublicId          string `json:"publicId"`
-		FriendlyName      string `json:"friendlyName"`
-		Permissions       int    `json:"permissions"`
-		LastUsed          int64  `json:"lastUsed"`
-		Expiry            int64  `json:"expiry"`
-		IsOwnedByCaller   bool   `json:"isOwnedByCaller"`
-		UserId            int    `json:"userId"`
+		Id              string `json:"id,omitempty"`
+		PublicId        string `json:"publicId"`
+		FriendlyName    string `json:"friendlyName"`
+		Permissions     int    `json:"permissions"`
+		LastUsed        int64  `json:"lastUsed"`
+		Expiry          int64  `json:"expiry"`
+		IsOwnedByCaller bool   `json:"isOwnedByCaller"`
+		UserId          int    `json:"userId"`
 	}
 
 	// Build user map for existence check
