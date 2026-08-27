@@ -38,6 +38,7 @@ history already collected is covered.
 */
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -391,22 +392,15 @@ func GetAuditEntriesSince(fromSeq uint64, limit int) ([]AuditEntry, uint64) {
 	}
 	defer f.Close()
 
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		// Read error, return empty
-		return []AuditEntry{}, 0
-	}
+	scanner := bufio.NewScanner(f)
+	// Set a large buffer to tolerate long lines
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
-	if len(buf) == 0 {
-		return []AuditEntry{}, 0
-	}
-
-	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
 	var entries []AuditEntry
-	var lastSeq uint64 = 0
+	var maxSeq uint64 = 0
 
-	// First pass: find the lastSeq (highest Seq in the entire file)
-	for _, line := range lines {
+	for scanner.Scan() {
+		line := scanner.Text()
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -419,32 +413,15 @@ func GetAuditEntriesSince(fromSeq uint64, limit int) ([]AuditEntry, uint64) {
 		}
 
 		// Track the highest seq seen
-		if entry.Seq > lastSeq {
-			lastSeq = entry.Seq
-		}
-	}
-
-	// Second pass: collect entries after fromSeq, limited by limit
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var entry AuditEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			// Parse error, skip this line
-			continue
+		if entry.Seq > maxSeq {
+			maxSeq = entry.Seq
 		}
 
 		// Only include entries after fromSeq
-		if entry.Seq > fromSeq {
+		if entry.Seq > fromSeq && len(entries) < limit {
 			entries = append(entries, entry)
-			if len(entries) >= limit {
-				break
-			}
 		}
 	}
 
-	return entries, lastSeq
+	return entries, maxSeq
 }
