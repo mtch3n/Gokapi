@@ -159,6 +159,12 @@ var routes = []apiRoute{
 		RequestParser: nil,
 	},
 	{
+		Url:           "/user/list",
+		ApiPerm:       models.ApiPermManageUsers,
+		execution:     apiGetUserList,
+		RequestParser: nil,
+	},
+	{
 		Url:           "/user/create",
 		ApiPerm:       models.ApiPermManageUsers,
 		execution:     apiCreateUser,

@@ -329,6 +329,28 @@ func TestUserGetMe(t *testing.T) {
 	test.IsEqualInt(t, result.Id, idUser)
 }
 
+func TestUserList(t *testing.T) {
+	const apiUrl = "/user/list"
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	type userListItem struct {
+		Id            int `json:"id"`
+		Name          string
+		UploadCount   int `json:"uploadCount"`
+	}
+	var result []userListItem
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	// Should have at least the admin, superadmin, and test user from generateTestData
+	test.IsEqualBool(t, len(result) >= 3, true)
+	// Check that at least one user is present
+	test.IsEqualBool(t, result[0].Id > 0, true)
+}
+
 func TestUserCreate(t *testing.T) {
 	const apiUrl = "/user/create"
 	const headerUsername = "username"

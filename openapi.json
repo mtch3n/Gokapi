@@ -1870,6 +1870,41 @@
         }
       }
     },
+    "/user/list": {
+      "get": {
+        "tags": [
+          "user"
+        ],
+        "summary": "List all users",
+        "description": "This API call returns a list of all users with their information and upload counts. Requires API permission MANAGE_USERS",
+        "operationId": "getuserlist",
+        "security": [
+          {
+            "apikey": [
+              "MANAGE_USERS"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserListItem"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          }
+        }
+      }
+    },
     "/user/create": {
       "post": {
         "tags": [
@@ -2576,6 +2611,41 @@
         },
         "description": "NewUser is the struct used for the result after creating a new API key",
         "x-go-package": "Gokapi/internal/models"
+      },
+      "UserListItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "example": 14
+          },
+          "lastOnline": {
+            "type": "integer",
+            "example": 0
+          },
+          "name": {
+            "type": "string",
+            "example": "Gokapi user"
+          },
+          "permissions": {
+            "type": "integer",
+            "example": 0
+          },
+          "resetPassword": {
+            "type": "boolean",
+            "example": false
+          },
+          "uploadCount": {
+            "type": "integer",
+            "example": 5
+          },
+          "userLevel": {
+            "type": "integer",
+            "example": 2
+          }
+        },
+        "description": "UserListItem is used for listing all users with their upload counts",
+        "x-go-package": "Gokapi/internal/webserver/api"
       },
       "VersionInfo": {
         "type": "object",

@@ -275,6 +275,35 @@ func apiGetCurrentUser(w http.ResponseWriter, _ requestParser, user models.User,
 	_, _ = w.Write([]byte(user.ToJson()))
 }
 
+func apiGetUserList(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
+	type userListItem struct {
+		Id            int    `json:"id"`
+		Name          string `json:"name"`
+		Permissions   int    `json:"permissions"`
+		UserLevel     int    `json:"userLevel"`
+		LastOnline    int64  `json:"lastOnline"`
+		ResetPassword bool   `json:"resetPassword"`
+		UploadCount   int    `json:"uploadCount"`
+	}
+
+	uploadCounts := storage.GetUploadCounts()
+	var result []userListItem
+	for _, userEntry := range database.GetAllUsers() {
+		result = append(result, userListItem{
+			Id:            userEntry.Id,
+			Name:          userEntry.Name,
+			Permissions:   int(userEntry.Permissions),
+			UserLevel:     int(userEntry.UserLevel),
+			LastOnline:    userEntry.LastOnline,
+			ResetPassword: userEntry.ResetPassword,
+			UploadCount:   uploadCounts[userEntry.Id],
+		})
+	}
+	resultJson, err := json.Marshal(result)
+	helper.Check(err)
+	_, _ = w.Write(resultJson)
+}
+
 func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramUserCreate)
 	if !ok {
