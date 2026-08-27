@@ -496,16 +496,16 @@ func TestNewFileFromChunk(t *testing.T) {
 // copyEncryptionInfo must copy the existing key/nonce and leave the
 // existing ciphertext blob untouched, never re-encrypt the new upload's
 // content under that old key.
-func TestNewFileFromChunkDedupReusesKeyAndCiphertext(t *testing.T) {
-	configuration.Get().Encryption.Level = encryption.LocalEncryptionStored
+// TestNewFileFromChunkDedupAtNoEncryption covers the one path where
+// deduplication still happens. Encrypted uploads now get a random,
+// content-independent identifier so they are never deduplicated, which
+// leaves NoEncryption as the only level where two identical uploads share
+// a blob. Nothing else asserts that this still works, so a change that
+// disabled dedup everywhere would otherwise pass unnoticed.
+func TestNewFileFromChunkDedupAtNoEncryption(t *testing.T) {
+	configuration.Get().Encryption.Level = encryption.NoEncryption
 	previousSalt := configuration.Get().Authentication.SaltFiles
 	configuration.Get().Authentication.SaltFiles = "testsaltdedup"
-	cipher, err := encryption.GetRandomCipher()
-	test.IsNil(t, err)
-	encryption.Init(models.Configuration{Encryption: models.Encryption{
-		Level:  encryption.LocalEncryptionStored,
-		Cipher: cipher,
-	}})
 	defer func() {
 		configuration.Get().Authentication.SaltFiles = previousSalt
 		configuration.Get().Encryption.Level = 0
@@ -520,14 +520,14 @@ func TestNewFileFromChunkDedupReusesKeyAndCiphertext(t *testing.T) {
 	}
 
 	chunkId1 := helper.GenerateRandomString(15)
-	err = os.WriteFile("test/data/chunk-"+chunkId1, content, 0600)
+	err := os.WriteFile("test/data/chunk-"+chunkId1, content, 0600)
 	test.IsNil(t, err)
 	file1, err := NewFileFromChunk(chunkId1, fileHeader, 99, request)
 	test.IsNil(t, err)
-	test.IsEqualBool(t, file1.Encryption.IsEncrypted, true)
+	test.IsEqualBool(t, file1.Encryption.IsEncrypted, false)
 
 	blobPath := configuration.Get().DataDir + "/" + file1.SHA1
-	ciphertextAfterFirst, err := os.ReadFile(blobPath)
+	contentAfterFirst, err := os.ReadFile(blobPath)
 	test.IsNil(t, err)
 
 	chunkId2 := helper.GenerateRandomString(15)
@@ -536,13 +536,11 @@ func TestNewFileFromChunkDedupReusesKeyAndCiphertext(t *testing.T) {
 	file2, err := NewFileFromChunk(chunkId2, fileHeader, 99, request)
 	test.IsNil(t, err)
 
+	// Identical unencrypted content shares one blob
 	test.IsEqualString(t, file1.SHA1, file2.SHA1)
-	test.IsEqualByteSlice(t, file1.Encryption.DecryptionKey, file2.Encryption.DecryptionKey)
-	test.IsEqualByteSlice(t, file1.Encryption.Nonce, file2.Encryption.Nonce)
-
-	ciphertextAfterSecond, err := os.ReadFile(blobPath)
+	contentAfterSecond, err := os.ReadFile(blobPath)
 	test.IsNil(t, err)
-	test.IsEqualByteSlice(t, ciphertextAfterFirst, ciphertextAfterSecond)
+	test.IsEqualByteSlice(t, contentAfterFirst, contentAfterSecond)
 
 	err = os.Remove(blobPath)
 	test.IsNil(t, err)
@@ -552,8 +550,8 @@ func TestNewFileFromChunkDedupReusesKeyAndCiphertext(t *testing.T) {
 // that actually matters: two uploads that are NOT deduplicated - because
 // their content differs - must never end up sharing key material, and each
 // new stored blob is always encrypted under a freshly generated key. Unlike
-// TestNewFileFromChunkDedupReusesKeyAndCiphertext (which covers the
-// intentional exception for identical content), this is the case that must
+// TestNewFileFromChunkDedupAtNoEncryption (which covers the remaining
+// dedup path, where nothing is encrypted), this is the case that must
 // never regress: a key covering two different plaintexts would be
 // catastrophic AES-GCM nonce reuse.
 func TestNewFileFromChunkDistinctContentGetsDistinctKeys(t *testing.T) {
