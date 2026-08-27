@@ -249,3 +249,38 @@ func TestCreateUploadConfigEnforcesExpiry(t *testing.T) {
 	test.IsEqualInt(t, config.Expiry, 7)
 	test.IsEqualBool(t, config.ExpiryTimestamp > time.Now().Unix(), true)
 }
+
+func TestClampExpiryTimestamp(t *testing.T) {
+	// Unset: upstream behaviour preserved, permanent files still allowed
+	os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	future := time.Now().Add(365 * 24 * time.Hour).Unix()
+	ts, unlimited := ClampExpiryTimestamp(future, false)
+	test.IsEqualBool(t, ts == future, true)
+	test.IsEqualBool(t, unlimited, false)
+	_, unlimited = ClampExpiryTimestamp(0, true)
+	test.IsEqualBool(t, unlimited, true)
+
+	os.Setenv("GOKAPI_MAX_EXPIRY_DAYS", "30")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	latest := time.Now().Add(30 * 24 * time.Hour).Unix()
+
+	// An unlimited lifetime is refused and pinned to the cap
+	ts, unlimited = ClampExpiryTimestamp(0, true)
+	test.IsEqualBool(t, unlimited, false)
+	test.IsEqualBool(t, ts <= latest+2 && ts >= latest-2, true)
+
+	// An expiry a year out is clamped back to the cap
+	ts, unlimited = ClampExpiryTimestamp(future, false)
+	test.IsEqualBool(t, unlimited, false)
+	test.IsEqualBool(t, ts <= latest+2, true)
+
+	// An expiry inside the cap is left untouched
+	soon := time.Now().Add(3 * 24 * time.Hour).Unix()
+	ts, unlimited = ClampExpiryTimestamp(soon, false)
+	test.IsEqualInt(t, int(ts), int(soon))
+	test.IsEqualBool(t, unlimited, false)
+
+	// A zero or negative timestamp without the unlimited flag also gets the cap
+	ts, _ = ClampExpiryTimestamp(0, false)
+	test.IsEqualBool(t, ts <= latest+2 && ts >= latest-2, true)
+}

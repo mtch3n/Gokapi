@@ -112,6 +112,10 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 			file.UnlimitedTime = false
 		}
 	}
+	// Creation paths are clamped in CreateUploadConfig, but this one writes the expiry
+	// directly, so the retention cap has to be applied here too. Clamping after the
+	// branches above also catches a file that predates the cap being configured.
+	file.ExpireAt, file.UnlimitedTime = fileupload.ClampExpiryTimestamp(file.ExpireAt, file.UnlimitedTime)
 
 	if !request.KeepPassword {
 		file.PasswordHash = configuration.HashPassword(request.Password, false, "")

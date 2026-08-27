@@ -211,3 +211,23 @@ func applyMaxExpiry(expiryDays int, unlimitedTime bool) (int, bool) {
 	}
 	return expiryDays, false
 }
+
+// ClampExpiryTimestamp applies GOKAPI_MAX_EXPIRY_DAYS to an absolute expiry timestamp.
+//
+// CreateUploadConfig covers every path that creates a file, but the edit API sets an
+// expiry directly on existing metadata rather than going through an upload config, so
+// without this an authorised editor could hand a file an unlimited lifetime or an
+// arbitrarily distant expiry and defeat the retention policy.
+//
+// A maximum of 0 keeps the upstream behaviour of permitting permanent files.
+func ClampExpiryTimestamp(expiryTimestamp int64, unlimitedTime bool) (int64, bool) {
+	maxExpiryDays := environment.New().MaxExpiryDays
+	if maxExpiryDays < 1 {
+		return expiryTimestamp, unlimitedTime
+	}
+	latest := time.Now().Add(time.Duration(maxExpiryDays) * time.Hour * 24).Unix()
+	if unlimitedTime || expiryTimestamp <= 0 || expiryTimestamp > latest {
+		return latest, false
+	}
+	return expiryTimestamp, false
+}
