@@ -880,6 +880,47 @@ func (p *paramLogsGet) New() requestParser {
 	return &paramLogsGet{}
 }
 
+// ParseRequest reads r and saves the passed header values in the paramLogsAudit struct
+// In the end, ProcessParameter() is called
+func (p *paramLogsAudit) ParseRequest(r *http.Request) error {
+	var err error
+	var exists bool
+	p.foundHeaders = make(map[string]bool)
+
+	// RequestParser header value "fromSeq", required: false
+	exists, err = checkHeaderExists(r, "fromSeq", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["fromSeq"] = exists
+	if exists {
+		p.FromSeq, err = parseHeaderInt64(r, "fromSeq")
+		if err != nil {
+			return fmt.Errorf("invalid value in header fromSeq supplied")
+		}
+	}
+
+	// RequestParser header value "limit", required: false
+	exists, err = checkHeaderExists(r, "limit", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["limit"] = exists
+	if exists {
+		p.Limit, err = parseHeaderInt(r, "limit")
+		if err != nil {
+			return fmt.Errorf("invalid value in header limit supplied")
+		}
+	}
+
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramLogsAudit struct
+func (p *paramLogsAudit) New() requestParser {
+	return &paramLogsAudit{}
+}
+
 // ParseRequest parses the header file. As paramChunkAdd has no fields with the
 // tag header, this method does nothing, except calling ProcessParameter()
 func (p *paramChunkAdd) ParseRequest(r *http.Request) error {
