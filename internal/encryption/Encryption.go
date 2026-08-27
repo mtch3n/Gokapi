@@ -131,14 +131,14 @@ func storeMasterKey(cipherKey []byte) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	encryptedKey, err = EncryptDecryptBytes(cipherKey, ramCipher, make([]byte, nonceSize), true)
+	encryptedKey, err = EncryptDecryptBytes(cipherKey, ramCipher, make([]byte, nonceSize), true) // Zero nonce is safe: ramCipher above is freshly random and encrypts this one value exactly once
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
 func getMasterCipher() []byte {
-	key, err := EncryptDecryptBytes(encryptedKey, ramCipher, make([]byte, nonceSize), false)
+	key, err := EncryptDecryptBytes(encryptedKey, ramCipher, make([]byte, nonceSize), false) // Zero nonce: decrypts the single value storeMasterKey encrypted with this same ramCipher
 	if err != nil {
 		key = []byte{}
 		log.Fatal(err)
@@ -153,7 +153,14 @@ func Encrypt(encInfo *models.EncryptionInfo, input io.Reader, output io.Writer) 
 		return err
 	}
 	stream := getStream(key)
-	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
+	// Zero nonce is safe only as long as a given key is ever paired with exactly one
+	// distinct plaintext. generateNewFileKey draws a fresh key here on every call, so
+	// that holds today (see TestEncryptGeneratesFreshKeyPerCall). The storage layer's
+	// dedup path (copyEncryptionInfo) reuses an existing key for identical plaintext,
+	// which is still safe - it never calls Encrypt again for that content. What would be
+	// catastrophic is a key covering two *different* plaintexts, e.g. a change that fed
+	// new content through an existing key instead of a fresh one.
+	nonce := make([]byte, stream.NonceSize())
 	reader := stream.EncryptReader(input, nonce, nil)
 	_, err = io.Copy(output, reader)
 	return err
@@ -165,7 +172,7 @@ func createDecryptReader(encInfo models.EncryptionInfo, input io.Reader) (*sio.D
 		return nil, err
 	}
 	stream := getStream(key)
-	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
+	nonce := make([]byte, stream.NonceSize()) // Zero nonce mirrors Encrypt; this key was only ever paired with the one plaintext it encrypted
 	return stream.DecryptReader(input, nonce, nil), nil
 }
 
@@ -192,28 +199,28 @@ func IsCorrectKey(encInfo models.EncryptionInfo, input *os.File) bool {
 // GetDecryptWriter returns a writer that can decrypt encrypted files
 func GetDecryptWriter(cipherKey []byte, input io.Writer) (io.Writer, error) {
 	stream := getStream(cipherKey)
-	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
+	nonce := make([]byte, stream.NonceSize()) // Zero nonce: safe iff caller supplies a key never paired with more than one distinct plaintext (same invariant as Encrypt)
 	return stream.DecryptWriter(input, nonce, nil), nil
 }
 
 // GetDecryptReader returns a reader that can decrypt encrypted files
 func GetDecryptReader(cipherKey []byte, input io.Reader) (io.Reader, error) {
 	stream := getStream(cipherKey)
-	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
+	nonce := make([]byte, stream.NonceSize()) // Zero nonce: safe iff caller supplies a key never paired with more than one distinct plaintext (same invariant as Encrypt)
 	return stream.DecryptReader(input, nonce, nil), nil
 }
 
 // GetEncryptReader returns a reader that can encrypt plain files
 func GetEncryptReader(cipherKey []byte, input io.Reader) (io.Reader, error) {
 	stream := getStream(cipherKey)
-	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
+	nonce := make([]byte, stream.NonceSize()) // Zero nonce: safe iff caller supplies a key never paired with more than one distinct plaintext (same invariant as Encrypt)
 	return stream.EncryptReader(input, nonce, nil), nil
 }
 
 // GetEncryptWriter returns a writer that can encrypt plain files
 func GetEncryptWriter(cipherKey []byte, input io.Writer) (*sio.EncWriter, error) {
 	stream := getStream(cipherKey)
-	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
+	nonce := make([]byte, stream.NonceSize()) // Zero nonce: safe iff caller supplies a key never paired with more than one distinct plaintext (same invariant as Encrypt)
 	return stream.EncryptWriter(input, nonce, nil), nil
 
 }

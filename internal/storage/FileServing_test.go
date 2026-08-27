@@ -509,6 +509,125 @@ func TestNewFileFromChunk(t *testing.T) {
 	}
 }
 
+// TestNewFileFromChunkDedupReusesKeyAndCiphertext locks the invariant on the
+// production dedup path: when a chunk hashes to a file that already exists,
+// copyEncryptionInfo must copy the existing key/nonce and leave the
+// existing ciphertext blob untouched, never re-encrypt the new upload's
+// content under that old key.
+func TestNewFileFromChunkDedupReusesKeyAndCiphertext(t *testing.T) {
+	configuration.Get().Encryption.Level = encryption.LocalEncryptionStored
+	previousSalt := configuration.Get().Authentication.SaltFiles
+	configuration.Get().Authentication.SaltFiles = "testsaltdedup"
+	cipher, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:  encryption.LocalEncryptionStored,
+		Cipher: cipher,
+	}})
+	defer func() {
+		configuration.Get().Authentication.SaltFiles = previousSalt
+		configuration.Get().Encryption.Level = 0
+	}()
+
+	content := []byte("This content is identical across both uploads, to exercise dedup")
+	header, request := createRawTestFile(content)
+	fileHeader := chunking.FileHeader{
+		Filename:    header.Filename,
+		ContentType: header.Header.Get("Content-Type"),
+		Size:        header.Size,
+	}
+
+	chunkId1 := helper.GenerateRandomString(15)
+	err = os.WriteFile("test/data/chunk-"+chunkId1, content, 0600)
+	test.IsNil(t, err)
+	file1, err := NewFileFromChunk(chunkId1, fileHeader, 99, request)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, file1.Encryption.IsEncrypted, true)
+
+	blobPath := configuration.Get().DataDir + "/" + file1.SHA1
+	ciphertextAfterFirst, err := os.ReadFile(blobPath)
+	test.IsNil(t, err)
+
+	chunkId2 := helper.GenerateRandomString(15)
+	err = os.WriteFile("test/data/chunk-"+chunkId2, content, 0600)
+	test.IsNil(t, err)
+	file2, err := NewFileFromChunk(chunkId2, fileHeader, 99, request)
+	test.IsNil(t, err)
+
+	test.IsEqualString(t, file1.SHA1, file2.SHA1)
+	test.IsEqualByteSlice(t, file1.Encryption.DecryptionKey, file2.Encryption.DecryptionKey)
+	test.IsEqualByteSlice(t, file1.Encryption.Nonce, file2.Encryption.Nonce)
+
+	ciphertextAfterSecond, err := os.ReadFile(blobPath)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, ciphertextAfterFirst, ciphertextAfterSecond)
+
+	err = os.Remove(blobPath)
+	test.IsNil(t, err)
+}
+
+// TestNewFileFromChunkDistinctContentGetsDistinctKeys locks the invariant
+// that actually matters: two uploads that are NOT deduplicated - because
+// their content differs - must never end up sharing key material, and each
+// new stored blob is always encrypted under a freshly generated key. Unlike
+// TestNewFileFromChunkDedupReusesKeyAndCiphertext (which covers the
+// intentional exception for identical content), this is the case that must
+// never regress: a key covering two different plaintexts would be
+// catastrophic AES-GCM nonce reuse.
+func TestNewFileFromChunkDistinctContentGetsDistinctKeys(t *testing.T) {
+	configuration.Get().Encryption.Level = encryption.LocalEncryptionStored
+	previousSalt := configuration.Get().Authentication.SaltFiles
+	configuration.Get().Authentication.SaltFiles = "testsaltdistinct"
+	cipher, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:  encryption.LocalEncryptionStored,
+		Cipher: cipher,
+	}})
+	defer func() {
+		configuration.Get().Authentication.SaltFiles = previousSalt
+		configuration.Get().Encryption.Level = 0
+	}()
+
+	content1 := []byte("first upload's content, distinct from the second")
+	content2 := []byte("second upload's content, distinct from the first")
+
+	header1, request1 := createRawTestFile(content1)
+	fileHeader1 := chunking.FileHeader{
+		Filename:    header1.Filename,
+		ContentType: header1.Header.Get("Content-Type"),
+		Size:        header1.Size,
+	}
+	chunkId1 := helper.GenerateRandomString(15)
+	err = os.WriteFile("test/data/chunk-"+chunkId1, content1, 0600)
+	test.IsNil(t, err)
+	file1, err := NewFileFromChunk(chunkId1, fileHeader1, 99, request1)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, file1.Encryption.IsEncrypted, true)
+
+	header2, request2 := createRawTestFile(content2)
+	fileHeader2 := chunking.FileHeader{
+		Filename:    header2.Filename,
+		ContentType: header2.Header.Get("Content-Type"),
+		Size:        header2.Size,
+	}
+	chunkId2 := helper.GenerateRandomString(15)
+	err = os.WriteFile("test/data/chunk-"+chunkId2, content2, 0600)
+	test.IsNil(t, err)
+	file2, err := NewFileFromChunk(chunkId2, fileHeader2, 99, request2)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, file2.Encryption.IsEncrypted, true)
+
+	test.IsEqualBool(t, file1.SHA1 == file2.SHA1, false)
+	test.IsEqualBool(t, bytes.Equal(file1.Encryption.DecryptionKey, file2.Encryption.DecryptionKey), false)
+	test.IsEqualBool(t, bytes.Equal(file1.Encryption.Nonce, file2.Encryption.Nonce), false)
+
+	err = os.Remove(configuration.Get().DataDir + "/" + file1.SHA1)
+	test.IsNil(t, err)
+	err = os.Remove(configuration.Get().DataDir + "/" + file2.SHA1)
+	test.IsNil(t, err)
+}
+
 func TestDuplicateFile(t *testing.T) {
 
 	tempFile, err := createTestFile()

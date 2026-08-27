@@ -181,6 +181,69 @@ func TestGetCipherFromFile(t *testing.T) {
 	test.IsEqualByteSlice(t, key, retrievedKey)
 }
 
+// TestEncryptGeneratesFreshKeyPerCall locks the invariant that makes the
+// all-zero stream nonce in Encrypt safe: every call must draw a fresh key,
+// even if it is asked to encrypt byte-identical plaintext. Encrypt itself
+// has no notion of deduplication - it always encrypts what it is given
+// under a brand new key - so this must hold unconditionally. (Storage-layer
+// deduplication for identical content, which intentionally reuses a key
+// instead of calling Encrypt again, is a separate, safe exception covered
+// by TestNewFileFromChunkDedupReusesKeyAndCiphertext in the storage
+// package; what would be catastrophic is a key covering two *different*
+// plaintexts, which is what this test guards against.)
+func TestEncryptGeneratesFreshKeyPerCall(t *testing.T) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	test.IsNil(t, err)
+	storeMasterKey(key)
+
+	plaintext := []byte("identical content passed to Encrypt twice")
+
+	encInfo1 := &models.EncryptionInfo{}
+	var ciphertext1 bytes.Buffer
+	err = Encrypt(encInfo1, bytes.NewReader(plaintext), &ciphertext1)
+	test.IsNil(t, err)
+
+	encInfo2 := &models.EncryptionInfo{}
+	var ciphertext2 bytes.Buffer
+	err = Encrypt(encInfo2, bytes.NewReader(plaintext), &ciphertext2)
+	test.IsNil(t, err)
+
+	test.IsEqualBool(t, bytes.Equal(encInfo1.DecryptionKey, encInfo2.DecryptionKey), false)
+	test.IsEqualBool(t, bytes.Equal(encInfo1.Nonce, encInfo2.Nonce), false)
+	test.IsEqualBool(t, bytes.Equal(ciphertext1.Bytes(), ciphertext2.Bytes()), false)
+
+	// Both must still decrypt correctly with their own, independently generated key.
+	var decrypted1, decrypted2 bytes.Buffer
+	err = DecryptReader(*encInfo1, &ciphertext1, &decrypted1)
+	test.IsNil(t, err)
+	err = DecryptReader(*encInfo2, &ciphertext2, &decrypted2)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, plaintext, decrypted1.Bytes())
+	test.IsEqualByteSlice(t, plaintext, decrypted2.Bytes())
+}
+
+// TestGenerateNewFileKeyNeverRepeats guards the same invariant one level
+// down: the generator that Encrypt relies on must never draw the same key
+// twice. This is what actually makes the zero stream nonce safe to use.
+func TestGenerateNewFileKeyNeverRepeats(t *testing.T) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	test.IsNil(t, err)
+	storeMasterKey(key)
+
+	const draws = 1000
+	seen := make(map[string]bool, draws)
+	for i := 0; i < draws; i++ {
+		encInfo := &models.EncryptionInfo{}
+		fileKey, err := generateNewFileKey(encInfo)
+		test.IsNil(t, err)
+		hexKey := hex.EncodeToString(fileKey)
+		test.IsEqualBool(t, seen[hexKey], false)
+		seen[hexKey] = true
+	}
+}
+
 func TestIsCorrectKey(t *testing.T) {
 	// Create a temporary file for testing
 	file, err := os.CreateTemp("", "testfile")
