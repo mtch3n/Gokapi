@@ -788,6 +788,38 @@ func TestServeFile(t *testing.T) {
 	test.ResponseBodyContains(t, w, "Error decrypting file")
 }
 
+// TestServeFileDeniedWhenExhaustedWithoutRecheck simulates the TOCTOU window the atomic decrement
+// closes: the caller fetched the file while a download was still available (a stale
+// file.DownloadsRemaining == 1 struct), but by the time ServeFile actually runs, a concurrent request
+// has already consumed the last one and the database is authoritative at 0. This is exactly the shape
+// of the API and presigned-download call sites (Api.go apiDownloadSingle, Webserver.go
+// downloadPresigned), which call ServeFile with recheckExpiry == false and therefore never re-fetch
+// DownloadsRemaining before deciding whether to serve - they must rely on IncreaseDownloadCount's own
+// return value instead.
+func TestServeFileDeniedWhenExhaustedWithoutRecheck(t *testing.T) {
+	file := models.File{
+		Id:                 "exhaustedNoRecheck",
+		Name:               "exhaustedNoRecheck.txt",
+		SHA1:               "exhaustedNoRecheck",
+		ContentType:        "text/plain",
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		UnlimitedTime:      true,
+		SizeBytes:          4,
+	}
+	database.SaveMetaData(file)
+
+	staleFile := file
+	staleFile.DownloadsRemaining = 1
+
+	r := httptest.NewRequest("GET", "/"+file.Id, nil)
+	w := httptest.NewRecorder()
+	served := ServeFile(staleFile, w, r, false, true, false, false)
+	test.IsEqualBool(t, served, false)
+	test.IsEqualInt(t, w.Body.Len(), 0)
+	test.IsEqualInt(t, database.GetDownloadsRemaining(file.Id), 0)
+}
+
 func TestCleanUp(t *testing.T) {
 	files := database.GetAllMetadata()
 	downloadstatus.DeleteAll()

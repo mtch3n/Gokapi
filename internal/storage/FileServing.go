@@ -609,6 +609,10 @@ func GetFileByHotlink(id string) (models.File, bool) {
 // ServeFile subtracts a download allowance and serves the file to the browser
 // Returns false if the file expired during the request (most likely race condition due to parallel downloads, requires recheckExpiry)
 func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDownload, increaseCounter, forceDecryption, recheckExpiry bool) bool {
+	// apimutex only serialises this section within the current process; it is a local fast-path that
+	// avoids unnecessary database round trips under in-process contention. The invariant that a capped
+	// file cannot be downloaded more times than allowed is now enforced by the database itself (see
+	// database.IncreaseDownloadCount), which stays correct even across multiple instances sharing one DB.
 	apimutex.Lock(apimutex.TypeMetaData, file.Id)
 	if recheckExpiry {
 		if !file.UnlimitedDownloads {
@@ -620,9 +624,18 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		}
 	}
 	if increaseCounter {
+		if !file.UnlimitedDownloads {
+			if !database.IncreaseDownloadCount(file.Id, true) {
+				// The atomic, floored decrement lost the race (or found the allowance already exhausted) -
+				// this caller must not serve the file, regardless of what the pre-fetched file struct says.
+				apimutex.Unlock(apimutex.TypeMetaData, file.Id)
+				return false
+			}
+		} else {
+			database.IncreaseDownloadCount(file.Id, false)
+		}
 		file.DownloadsRemaining = file.DownloadsRemaining - 1
 		file.DownloadCount = file.DownloadCount + 1
-		database.IncreaseDownloadCount(file.Id, !file.UnlimitedDownloads)
 		go sse.PublishDownloadCount(file)
 	}
 	apimutex.Unlock(apimutex.TypeMetaData, file.Id)

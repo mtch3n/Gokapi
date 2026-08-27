@@ -3,7 +3,10 @@
 package postgres
 
 import (
+	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,6 +211,95 @@ func TestFileMetaData(t *testing.T) {
 	dbInstance.DeleteMetaData("file-1")
 	_, ok = dbInstance.GetMetaDataById("file-1")
 	test.IsEqualBool(t, ok, false)
+}
+
+// TestIncreaseDownloadCountAtomicAcrossInstances proves that the conditional
+// UPDATE ... WHERE DownloadsRemaining > 0 is atomic even when the racing callers are two
+// independently-connected DatabaseProvider values against the same PostgreSQL server - which is
+// what two separate Gokapi instances sharing one database would look like. A process-local mutex
+// (apimutex) cannot serialise this, since the two providers here are unrelated Go values, not the
+// same in-process object.
+//
+// This test proves: the DB-side floor holds under real cross-connection concurrency - never zero
+// winners, never two winners, DownloadsRemaining never goes negative.
+// This test does NOT prove: end-to-end correctness of storage.ServeFile, or behaviour with a true
+// second OS process. See TestServeFile-adjacent coverage in internal/storage for the single-process
+// serving path, and the W8/W20 staging smoke test for the two-process case.
+func TestIncreaseDownloadCountAtomicAcrossInstances(t *testing.T) {
+	config := testConfig(t)
+	instanceA := dbInstance
+	instanceB, err := New(config)
+	test.IsNil(t, err)
+	defer instanceB.Close()
+
+	const iterations = 100
+	for i := 0; i < iterations; i++ {
+		id := fmt.Sprintf("race-%d", i)
+		instanceA.SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1, UnlimitedDownloads: false})
+
+		var wg sync.WaitGroup
+		var successCount int32
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if instanceA.IncreaseDownloadCount(id, true) {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if instanceB.IncreaseDownloadCount(id, true) {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}()
+		wg.Wait()
+
+		test.IsEqualInt(t, int(successCount), 1)
+		test.IsEqualInt(t, instanceA.GetDownloadsRemaining(id), 0)
+
+		instanceA.DeleteMetaData(id)
+	}
+}
+
+// TestIncreaseDownloadCountManyGoroutinesNeverExceedsAllowance hammers a single row with far more
+// concurrent callers than its allowance, split across two independently-connected DatabaseProvider
+// values, and checks the totals rather than a single winner. This is the "many goroutines, assert
+// the total never exceeds the allowance and never goes negative" shape called for when a two-provider,
+// two-concurrent-ServeFile-calls test is not expressible in one process (database.Connect installs a
+// single package-global provider).
+func TestIncreaseDownloadCountManyGoroutinesNeverExceedsAllowance(t *testing.T) {
+	config := testConfig(t)
+	instanceA := dbInstance
+	instanceB, err := New(config)
+	test.IsNil(t, err)
+	defer instanceB.Close()
+
+	const allowance = 5
+	const workers = 50
+	const id = "hammered"
+	instanceA.SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: allowance, UnlimitedDownloads: false})
+
+	var wg sync.WaitGroup
+	var successCount int32
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		instance := instanceA
+		if i%2 == 0 {
+			instance = instanceB
+		}
+		go func() {
+			defer wg.Done()
+			if instance.IncreaseDownloadCount(id, true) {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	test.IsEqualInt(t, int(successCount), allowance)
+	test.IsEqualInt(t, instanceA.GetDownloadsRemaining(id), 0)
+
+	instanceA.DeleteMetaData(id)
 }
 
 func TestHotlinks(t *testing.T) {
