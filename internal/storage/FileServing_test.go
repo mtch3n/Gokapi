@@ -622,6 +622,17 @@ func TestNewFileFromChunkDistinctContentGetsDistinctKeys(t *testing.T) {
 	test.IsEqualBool(t, bytes.Equal(file1.Encryption.DecryptionKey, file2.Encryption.DecryptionKey), false)
 	test.IsEqualBool(t, bytes.Equal(file1.Encryption.Nonce, file2.Encryption.Nonce), false)
 
+	// DecryptionKey holds the file key wrapped under the master cipher with a
+	// per-file nonce, so comparing it alone would pass even if the same raw key
+	// had been reused and merely rewrapped. Unwrap both and compare the actual
+	// keys, which is the value that must never cover two distinct plaintexts.
+	key1, err := encryption.GetCipherFromFile(file1.Encryption)
+	test.IsNil(t, err)
+	key2, err := encryption.GetCipherFromFile(file2.Encryption)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, len(key1) > 0, true)
+	test.IsEqualBool(t, bytes.Equal(key1, key2), false)
+
 	err = os.Remove(configuration.Get().DataDir + "/" + file1.SHA1)
 	test.IsNil(t, err)
 	err = os.Remove(configuration.Get().DataDir + "/" + file2.SHA1)
@@ -1164,4 +1175,44 @@ func TestServeFilesAsZipSanitisation(t *testing.T) {
 	ServeFilesAsZip([]models.File{}, "my-archive", w, r)
 	cd = w.Result().Header.Get("Content-Disposition")
 	test.IsEqualBool(t, strings.Contains(cd, "my-archive.zip"), true)
+}
+
+// TestCleanUpRunsHotlinkPurge guards the wiring rather than the purge itself.
+// purgeHotlinksIfDisabled only ever runs because CleanUp calls it, and CleanUp
+// is what runs at startup and hourly, so dropping that call would silently
+// leave every existing hotlink live with no other test noticing.
+func TestCleanUpRunsHotlinkPurge(t *testing.T) {
+	os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+	file := models.File{
+		Id:                 "cleanuphotlinktest",
+		Name:               "cleanuphotlinktest.jpg",
+		SHA1:               "cleanuphotlinktest",
+		ContentType:        "image/jpg",
+		HotlinkId:          "cleanuphotlinktestlink.jpg",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	}
+	// The blob has to exist, otherwise CleanUp removes the file as unavailable and
+	// the hotlink would disappear as ordinary cleanup rather than as the purge,
+	// which would make this test unable to tell the two apart.
+	blobPath := configuration.Get().DataDir + "/" + file.SHA1
+	err := os.WriteFile(blobPath, []byte("blob"), 0600)
+	test.IsNil(t, err)
+	defer os.Remove(blobPath)
+
+	database.SaveMetaData(file)
+	database.SaveHotlink(file)
+	_, ok := database.GetHotlink(file.HotlinkId)
+	test.IsEqualBool(t, ok, true)
+
+	os.Setenv("GOKAPI_DISABLE_HOTLINKS", "true")
+	defer os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
+
+	CleanUp(false)
+
+	_, ok = database.GetHotlink(file.HotlinkId)
+	test.IsEqualBool(t, ok, false)
+	storedFile, ok := database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, storedFile.HotlinkId, "")
 }

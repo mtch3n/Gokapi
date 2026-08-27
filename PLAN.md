@@ -539,10 +539,15 @@ layer can be added afterwards.
   expiry and decrement the download counter (`ServeFile` with `increaseCounter=true`,
   `Webserver.go:640`), but a confidential-exchange product should not mint extra URLs.
 - *Design:* new env var `GOKAPI_DISABLE_HOTLINKS` (default false upstream, set true in
-  our deployment): `AddHotlink` returns early; `IsAbleHotlink` returns false (which
-  also hides `UrlHotlink` in API output via `FileList.go:117-130` **and** blocks the
-  re-add path in `apiEditFile`, which calls `IsAbleHotlink`/`AddHotlink` on every
-  edit — `Api.go:121-126`). **Mandatory purge, not optional (corrected per Codex):**
+  our deployment): `AddHotlink` returns early; `IsAbleHotlink` returns false, which blocks the re-add path in `apiEditFile`, which calls
+  `IsAbleHotlink`/`AddHotlink` on every edit — `Api.go:121-126`).
+  *Correction found in review:* this plan previously claimed `FileList.go:117-130` hides
+  `UrlHotlink` via `IsAbleHotlink`. That is wrong — `models` cannot import `storage`, and
+  `getHotlinkUrl` never consults it. Once `HotlinkId` is cleared the field falls back to the
+  ordinary download URL keyed on the file's own `Id`, which is the same secret already
+  published as `UrlDownload` and is password- and expiry-checked by `serveFile`. No extra
+  access path survives, but the JSON field is not literally empty, so the acceptance wording
+  below is satisfied in substance rather than literally. **Mandatory purge, not optional (corrected per Codex):**
   the regular `cleanHotlinks()` only deletes hotlinks whose file is already
   unavailable (`FileServing.go:903-912` — it checks `GetFileByHotlink` and removes
   only dead ones), so existing *valid* hotlinks would stay live indefinitely. When
