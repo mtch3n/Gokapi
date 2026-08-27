@@ -505,6 +505,33 @@ layer can be added afterwards.
   two-process double-download smoke test is deferred to the W8/W20 staging
   environment (and is only mandatory before any future scale-out per Q4).
 
+**W23 — Presigned and zip downloads bypass download-limit accounting [decision-independent]**
+- *Why (found while reviewing W2, verified):* W2 made the decrement atomic, but two
+  paths never decrement at all, so the cap they enforce can simply be walked around.
+  `Webserver.go:1066` serves a presigned download with `increaseCounter=false`, and
+  `createAndOutputPresignedUrl` (`Api.go:684`) does not decrement either, so a
+  presigned URL for a one-time file can be fetched repeatedly. `ServeFilesAsZip`
+  (`FileServing.go:708`) contains no reference to `IncreaseDownloadCount` at all, so a
+  file downloaded as part of a zip never consumes its allowance. This is pre-existing
+  upstream behaviour, not something W2 introduced, but it punches a hole in exactly the
+  product promise W2 exists to protect: a "limit 1" link is not actually limited.
+- *Urgency:* presigned URLs are an S3 feature and the deployment is on local storage for
+  now, so this is not currently reachable in production. It becomes live the moment S3
+  or S3Proxy is adopted, which is on the roadmap. The zip path may be reachable sooner —
+  check whether the UI offers multi-file download on local storage.
+- *Design:* decide the intended semantics first, because they are genuinely debatable.
+  Should generating a presigned URL consume the download, or should fetching it? Should
+  a zip of five files consume five allowances or one? Write the answer down before
+  coding; a plausible-looking guess here silently changes what a share means.
+- *Touches:* `internal/webserver/Webserver.go`, `internal/webserver/api/Api.go`,
+  `internal/storage/FileServing.go` (`ServeFilesAsZip`), plus `presign`.
+- *Effort:* M. *Risk:* medium — changes user-visible sharing semantics.
+- *Deps:* W2 (uses the atomic primitive it added). *Upstreamable:* yes.
+- *Build vs. buy/borrow:* reuses W2's atomic decrement; nothing external applies.
+- *Acceptance:* a one-time file fetched twice through a presigned URL is refused the
+  second time; a zip download consumes the agreed number of allowances; unlimited-
+  download files are unaffected on both paths.
+
 **W3 — Server-authoritative rejection of the `isE2E` upload flag (F2) [decision-independent]**
 - *Why:* Prevents mislabelled "end-to-end encrypted" files, ciphertext-garbage
   downloads, and dedup bypass at Level 2 (§1.4).
