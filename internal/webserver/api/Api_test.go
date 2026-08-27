@@ -1001,6 +1001,34 @@ func TestAuthList(t *testing.T) {
 	// Verify Id is redacted, not full secret
 	test.IsEqualString(t, result[0].Id, apiKey.GetRedactedId())
 	test.IsNotEqualString(t, result[0].Id, apiKey.Id)
+
+	// Test deterministic ordering with a second key
+	secondKey := generateNewKey(false, apiKey.UserId, "Second Key", "")
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result2 []apiKeyListItem
+	err = json.Unmarshal(w.Body.Bytes(), &result2)
+	test.IsNil(t, err)
+	// Should have at least two keys now
+	test.IsEqualBool(t, len(result2) >= 2, true)
+	// Verify ordering is stable (keys should be sorted by LastUsed desc, then Id asc)
+	// Since both keys have LastUsed=0, they should be sorted by Id
+	test.IsEqualBool(t, result2[0].PublicId != "", true)
+	// Get the actual keys from database to verify ordering
+	retrievedKey1, ok1 := database.GetApiKey(apiKey.Id)
+	retrievedKey2, ok2 := database.GetApiKey(secondKey.Id)
+	test.IsEqualBool(t, ok1, true)
+	test.IsEqualBool(t, ok2, true)
+	// Verify the order matches the sorting logic (LastUsed desc, Id asc)
+	// Since both have LastUsed=0, compare by Id
+	if retrievedKey1.Id < retrievedKey2.Id {
+		test.IsEqualString(t, result2[0].PublicId, retrievedKey1.PublicId)
+		test.IsEqualString(t, result2[1].PublicId, retrievedKey2.PublicId)
+	} else {
+		test.IsEqualString(t, result2[0].PublicId, retrievedKey2.PublicId)
+		test.IsEqualString(t, result2[1].PublicId, retrievedKey1.PublicId)
+	}
 }
 
 func TestChangeFriendlyName(t *testing.T) {

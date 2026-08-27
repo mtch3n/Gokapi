@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -329,7 +330,8 @@ func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ 
 		userMap[u.Id] = true
 	}
 
-	var result []apiKeyListItem
+	// Filter API keys
+	var filteredKeys []models.ApiKey
 	for _, apiKey := range database.GetAllApiKeys() {
 		// Skip if user doesn't exist
 		if !userMap[apiKey.UserId] {
@@ -347,7 +349,19 @@ func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ 
 		if apiKey.UserId != user.Id && !user.HasPermission(models.UserPermManageApiKeys) {
 			continue
 		}
+		filteredKeys = append(filteredKeys, apiKey)
+	}
 
+	// Sort by LastUsed desc, then by Id asc
+	sort.Slice(filteredKeys, func(i, j int) bool {
+		if filteredKeys[i].LastUsed != filteredKeys[j].LastUsed {
+			return filteredKeys[i].LastUsed > filteredKeys[j].LastUsed
+		}
+		return filteredKeys[i].Id < filteredKeys[j].Id
+	})
+
+	var result []apiKeyListItem
+	for _, apiKey := range filteredKeys {
 		isOwned := apiKey.UserId == user.Id
 		item := apiKeyListItem{
 			Id:              apiKey.GetRedactedId(),
