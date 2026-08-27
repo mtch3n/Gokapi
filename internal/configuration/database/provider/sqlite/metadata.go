@@ -150,16 +150,22 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 	helper.Check(err)
 }
 
-// IncreaseDownloadCount increases the download count of a file atomically
-func (p DatabaseProvider) IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) {
+// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
+// is true, the decrement is conditional on DownloadsRemaining > 0, so the database itself refuses to go
+// below zero; the return value reports whether this call actually consumed a remaining download. A false
+// return means DownloadsRemaining was already 0 and the caller must not serve the file.
+func (p DatabaseProvider) IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool {
 	if decreaseRemainingDownloads {
-		_, err := p.sqliteDb.Exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1,
-                        DownloadsRemaining = DownloadsRemaining - 1 WHERE id = ?`, id)
+		result, err := p.sqliteDb.Exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1,
+                        DownloadsRemaining = DownloadsRemaining - 1 WHERE id = ? AND DownloadsRemaining > 0`, id)
 		helper.Check(err)
-	} else {
-		_, err := p.sqliteDb.Exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1 WHERE id = ?`, id)
+		rowsAffected, err := result.RowsAffected()
 		helper.Check(err)
+		return rowsAffected > 0
 	}
+	_, err := p.sqliteDb.Exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1 WHERE id = ?`, id)
+	helper.Check(err)
+	return true
 }
 
 // GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads

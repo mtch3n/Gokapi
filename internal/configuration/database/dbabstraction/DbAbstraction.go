@@ -74,8 +74,11 @@ type Database interface {
 	SaveMetaData(file models.File)
 	// DeleteMetaData deletes information about a file
 	DeleteMetaData(id string)
-	// IncreaseDownloadCount increases the download count of a file, preventing race conditions
-	IncreaseDownloadCount(id string, decreaseRemainingDownloads bool)
+	// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
+	// is true, DownloadsRemaining is only decremented if it is greater than 0, and the return value reports
+	// whether this call actually consumed a remaining download. If it returns false, the download was already
+	// exhausted by a concurrent caller and must not be served.
+	IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool
 	// GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads
 	GetDownloadsRemaining(id string) int
 

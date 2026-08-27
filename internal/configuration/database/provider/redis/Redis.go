@@ -362,11 +362,27 @@ func (p DatabaseProvider) increaseHashmapIntField(id string, field string) {
 	helper.Check(err)
 }
 
-func (p DatabaseProvider) decreaseHashmapIntField(id string, field string) {
+// decrementHashFieldIfPositive atomically decrements a hashmap integer field by 1, but only if its current
+// value is greater than 0, and unconditionally increments a second field by 1. Both checks and both writes
+// run as a single Lua script, which Redis executes atomically - this is what keeps the operation safe even
+// with multiple Gokapi instances sharing this Redis server. The return value reports whether the decrement
+// was applied.
+func (p DatabaseProvider) decrementHashFieldIfPositive(id, decrementField, incrementField string) bool {
+	const script = `
+local current = tonumber(redis.call('HGET', KEYS[1], ARGV[1]))
+if current == nil or current <= 0 then
+	return 0
+end
+redis.call('HINCRBY', KEYS[1], ARGV[1], -1)
+redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
+return 1
+`
 	conn := p.pool.Get()
 	defer conn.Close()
-	_, err := conn.Do("HINCRBY", p.dbPrefix+id, field, -1)
-	helper.Check(err)
+	result, err := conn.Do("EVAL", script, "1", p.dbPrefix+id, decrementField, incrementField)
+	resultInt, err2 := redigo.Int(result, err)
+	helper.Check(err2)
+	return resultInt == 1
 }
 
 func (p DatabaseProvider) setHashmapField(id string, field string, content any) {

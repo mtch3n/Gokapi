@@ -226,9 +226,12 @@ func DeleteMetaData(id string) {
 	db.DeleteMetaData(id)
 }
 
-// IncreaseDownloadCount increases the download count of a file atomically
-func IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) {
-	db.IncreaseDownloadCount(id, decreaseRemainingDownloads)
+// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
+// is true, DownloadsRemaining is only decremented if it is greater than 0, and the return value reports
+// whether this call actually consumed a remaining download. If it returns false, the caller must not
+// serve the file, as a concurrent caller already consumed the last remaining download.
+func IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool {
+	return db.IncreaseDownloadCount(id, decreaseRemainingDownloads)
 }
 
 // GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads

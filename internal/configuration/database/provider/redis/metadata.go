@@ -87,12 +87,17 @@ func (p DatabaseProvider) DeleteMetaData(id string) {
 	p.deleteKey(prefixMetaData + id)
 }
 
-// IncreaseDownloadCount increases the download count of a file atomically
-func (p DatabaseProvider) IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) {
+// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
+// is true, DownloadsRemaining is only decremented if it is currently greater than 0, via a Lua script that
+// Redis runs as a single atomic operation, so the database itself refuses to go below zero; the return
+// value reports whether this call actually consumed a remaining download. A false return means
+// DownloadsRemaining was already 0 and the caller must not serve the file.
+func (p DatabaseProvider) IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool {
 	if decreaseRemainingDownloads {
-		p.decreaseHashmapIntField(prefixMetaData+id, "DownloadsRemaining")
+		return p.decrementHashFieldIfPositive(prefixMetaData+id, "DownloadsRemaining", "DownloadCount")
 	}
 	p.increaseHashmapIntField(prefixMetaData+id, "DownloadCount")
+	return true
 }
 
 // GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads
