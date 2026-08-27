@@ -758,7 +758,21 @@ master-key app setting which is Level-2-specific]**
   unregistered Workspace user; token recheck logs out a disabled user within the
   recheck interval.
 
-**W10 — Branding via the `custom/` mount [decision-independent]**
+**W10 — Branding via the `custom/` mount [decision-independent] [NEVER UPSTREAMED]**
+- *User direction, 2026-08-27:* theme and UI work will **not** be merged upstream and no
+  pull request will ever be raised for it. It is permanently ours.
+- *Consequence, and it is a good one:* this should therefore live **entirely outside the
+  fork**, in the deployment's `custom/` mount (`~/Work/filedrop/custom/` — `custom.css`,
+  `public.js`, `admin.js`, `favicon.png`, `version.txt`), which the server already serves
+  from `/custom/` and the templates already include. Branding then costs the fork **zero
+  divergence**: no Go change, no template change, nothing to rebase, nothing to carry.
+  That directly helps the upstream-patch tracking problem in W19, since every remaining
+  commit in the fork stays extractable.
+- *Hard rule:* if something genuinely cannot be done through `custom/` and needs a
+  template or Go change, it goes in its own clearly-labelled commit that is never
+  included in any upstream extraction — do not mix it into a commit that is otherwise
+  upstreamable. Prefer changing the requirement over creating that divergence.
+
 - *Why:* Client-facing pages must look like the company, not Gokapi.
 - *Mechanism (verified):* mount `custom/` next to the executable (`/app/custom/` in
   Docker) with `custom.css`, `public.js`, `admin.js`, `favicon.png`, `version.txt`
