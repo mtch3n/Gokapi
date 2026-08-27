@@ -857,3 +857,132 @@ func TestPublicApiFilePasswordCorrect(t *testing.T) {
 		t.Errorf("Expected password cookie pjpLXGJKigM4hjtA6T6sN to be set")
 	}
 }
+
+// TestPublicApiUploadRequestValid tests GET /pubapi/uploadrequest for a valid request
+func TestPublicApiUploadRequestValid(t *testing.T) {
+	t.Parallel()
+
+	// Create a test file request
+	testRequest := models.FileRequest{
+		Id:       "testuploadreq123456",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Test Upload Request",
+		ApiKey:   "testkey123",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreq123456&key=testkey123")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if valid, ok := response["valid"]; !ok || valid != true {
+		t.Errorf("Expected valid true, got %v", valid)
+	}
+	if name, ok := response["name"]; !ok || name != "Test Upload Request" {
+		t.Errorf("Expected name 'Test Upload Request', got %v", name)
+	}
+	if maxFiles, ok := response["maxFiles"]; !ok || int(maxFiles.(float64)) != 10 {
+		t.Errorf("Expected maxFiles 10, got %v", maxFiles)
+	}
+	if _, ok := response["chunkSize"]; !ok {
+		t.Errorf("Missing chunkSize field")
+	}
+}
+
+// TestPublicApiUploadRequestExpired tests GET /pubapi/uploadrequest for an expired request
+func TestPublicApiUploadRequestExpired(t *testing.T) {
+	t.Parallel()
+
+	// Create an expired test file request
+	testRequest := models.FileRequest{
+		Id:       "expireduploadreq1234",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(-1 * time.Hour).Unix(), // Already expired
+		Name:     "Expired Upload Request",
+		ApiKey:   "expiredkey123",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=expireduploadreq1234&key=expiredkey123")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if valid, ok := response["valid"]; !ok || valid != false {
+		t.Errorf("Expected valid false, got %v", valid)
+	}
+	if reason, ok := response["reason"]; !ok || reason != "expired" {
+		t.Errorf("Expected reason 'expired', got %v", reason)
+	}
+}
+
+// TestPublicApiUploadRequestWrongKey tests GET /pubapi/uploadrequest with wrong key
+func TestPublicApiUploadRequestWrongKey(t *testing.T) {
+	t.Parallel()
+
+	// Create a test file request
+	testRequest := models.FileRequest{
+		Id:       "testuploadreqkey1234",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Test Upload Request",
+		ApiKey:   "testkey123",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqkey1234&key=wrongkey")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if error, ok := response["error"]; !ok || error != "not found" {
+		t.Errorf("Expected error 'not found', got %v", error)
+	}
+}
