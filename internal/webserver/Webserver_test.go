@@ -694,8 +694,22 @@ func TestServeWasmE2E(t *testing.T) {
 // TestPublicApiFileUnprotected tests GET /pubapi/file for an unprotected file
 func TestPublicApiFileUnprotected(t *testing.T) {
 	t.Parallel()
+	// Seed a dedicated file with unlimited downloads so that parallel download
+	// tests (which exhaust the single-download seed files) cannot race this one.
+	// Reuses the existing on-disk SHA1 backing file so storage.FileExists passes.
+	database.SaveMetaData(models.File{
+		Id:                 "pubapifileunprot1234",
+		Name:               "smallfile2",
+		Size:               "8 B",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/html",
+		UserId:             5,
+	})
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=Wzol7LyY2QVczXynJtVo")
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=pubapifileunprot1234")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
