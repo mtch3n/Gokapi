@@ -1416,6 +1416,7 @@ func writeFilePwCookie(w http.ResponseWriter, file models.File) {
 		Expires:  time.Now().Add(5 * time.Minute),
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
+		Path:     "/",
 	})
 }
 

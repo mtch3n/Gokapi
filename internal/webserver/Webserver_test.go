@@ -863,6 +863,9 @@ func TestPublicApiFilePasswordCorrect(t *testing.T) {
 			if cookie.HttpOnly != true {
 				t.Errorf("Expected cookie to be HttpOnly")
 			}
+			if cookie.Path != "/" {
+				t.Errorf("Expected cookie Path to be '/', got '%s'", cookie.Path)
+			}
 			break
 		}
 	}
