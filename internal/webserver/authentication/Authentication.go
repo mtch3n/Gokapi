@@ -150,7 +150,7 @@ func isGrantedHeader(r *http.Request) (models.User, bool, error) {
 	if userName == "" {
 		return models.User{}, false, errors.New("header key is not set or empty")
 	}
-	return getOrCreateUser(userName)
+	return getOrCreateUser(userName, "internal", "")
 }
 
 func matchesWithWildcard(pattern, input string) (bool, error) {
@@ -240,6 +240,11 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 	var groups []string
 	var err error
 
+	// Require email_verified claim to be true when present
+	if err := checkEmailVerified(userInfo.ClaimsSent); err != nil {
+		return err
+	}
+
 	if authSettings.OAuthGroupScope != "" {
 		groups, err = extractOauthGroups(userInfo.ClaimsSent, authSettings.OAuthGroupScope)
 		if err != nil {
@@ -247,14 +252,14 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 		}
 	}
 	if isValidOauthUser(userInfo, groups) {
-		user, ok, errCreate := getOrCreateUser(userInfo.Email)
+		user, ok, errCreate := getOrCreateUser(userInfo.Email, "google", userInfo.Subject)
 		if errCreate != nil {
 			return errCreate
 		}
 		if ok {
 			sessionmanager.CreateSession(w, true, authSettings.OAuthRecheckInterval, user.Id)
 			logging.LogValidLogin(userInfo.Email, userInfo.Subject, logging.GetIpAddress(r))
-			http.Redirect(w, r, "admin", http.StatusTemporaryRedirect)
+			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 			return nil
 		}
 	}
@@ -263,20 +268,64 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 	return nil
 }
 
-func getOrCreateUser(username string) (models.User, bool, error) {
+// getOrCreateUser handles provider-aware user binding
+// For OAuth/OIDC: matches by email and enforces provider consistency
+// For internal: matches by username
+func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool, error) {
 	user, ok := database.GetUserByName(username)
 	if ok {
+		// User exists by name/email
+		if provider == "google" {
+			// Attempting to authenticate via Google
+			if user.AuthProvider == "internal" {
+				// Account takeover protection: reject if user was created for internal auth
+				return models.User{}, false, nil
+			}
+			// User is google provider or empty - bind/update if needed
+			if user.OidcSubject == "" && oidcSubject != "" {
+				// First time linking this OIDC subject
+				user.OidcSubject = oidcSubject
+				database.SaveUser(user, false)
+			}
+		}
 		return user, true, nil
-
 	}
 	if authSettings.OnlyRegisteredUsers {
 		return models.User{}, false, nil
 	}
-	newUser, err := users.Create(username)
+	newUser, err := users.Create(username, provider, oidcSubject)
 	if err != nil {
 		return models.User{}, false, err
 	}
 	return newUser, true, nil
+}
+
+// checkEmailVerified extracts and validates the email_verified claim
+func checkEmailVerified(claims OAuthUserClaims) error {
+	var rawClaims json.RawMessage
+	var data map[string]interface{}
+
+	err := claims.Claims(&rawClaims)
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(rawClaims, &data)
+	if err != nil {
+		return err
+	}
+
+	// Check if email_verified claim exists
+	if emailVerified, exists := data["email_verified"]; exists {
+		// If it exists, it must be true
+		if verified, ok := emailVerified.(bool); !ok {
+			// If it's not a bool, consider it an error
+			return errors.New("email_verified claim is not a boolean")
+		} else if !verified {
+			return errors.New("email_verified claim is false")
+		}
+	}
+	// If email_verified doesn't exist, we don't require it (provider may not send it)
+	return nil
 }
 
 func isValidOauthUser(userInfo OAuthUserInfo, groups []string) bool {
@@ -308,6 +357,10 @@ func IsCorrectUsernameAndPassword(username, password, userCsrfToken string) (mod
 	}
 	user, ok := database.GetUserByName(username)
 	if !ok {
+		return models.User{}, false, true
+	}
+	// Reject login if user has no password hash (OAuth-provisioned account)
+	if user.Password == "" {
 		return models.User{}, false, true
 	}
 	isSame, isLegacy := configuration.VerifyPassword(password, user.Password, configuration.Get().Authentication.SaltAdmin)

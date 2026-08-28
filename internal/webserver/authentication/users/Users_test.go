@@ -17,13 +17,13 @@ func TestCreate(t *testing.T) {
 	defer testconfiguration.Delete()
 
 	t.Run("Username too short", func(t *testing.T) {
-		_, err := Create("a")
+		_, err := Create("a", "internal", "")
 		test.IsEqualBool(t, errors.Is(err, ErrorNameToShort), true)
 	})
 
 	t.Run("Successfully create user without default permissions", func(t *testing.T) {
 		userName := "testuser1"
-		user, err := Create(userName)
+		user, err := Create(userName, "internal", "")
 
 		test.IsNil(t, err)
 		test.IsEqualString(t, user.Name, userName)
@@ -35,11 +35,11 @@ func TestCreate(t *testing.T) {
 
 	t.Run("Duplicate user check", func(t *testing.T) {
 		userName := "duplicate"
-		_, err := Create(userName)
+		_, err := Create(userName, "internal", "")
 		test.IsNil(t, err)
 
 		// Try creating the same user again
-		_, err = Create(userName)
+		_, err = Create(userName, "internal", "")
 		test.IsEqualBool(t, errors.Is(err, ErrorUserExists), true)
 	})
 }

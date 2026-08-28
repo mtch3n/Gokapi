@@ -17,7 +17,8 @@ var ErrorNameToShort = errors.New("username too short")
 var ErrorUserExists = errors.New("user already exists")
 
 // Create creates a new user and returns an error if the user already exists or the username is too short
-func Create(name string) (models.User, error) {
+// provider should be "internal" for internal auth or "google" for OAuth. oidcSubject is only used for OAuth.
+func Create(name string, provider string, oidcSubject string) (models.User, error) {
 	if len(name) < minLengthUser {
 		return models.User{}, ErrorNameToShort
 	}
@@ -26,8 +27,10 @@ func Create(name string) (models.User, error) {
 		return models.User{}, ErrorUserExists
 	}
 	newUser := models.User{
-		Name:      name,
-		UserLevel: models.UserLevelUser,
+		Name:          name,
+		UserLevel:     models.UserLevelUser,
+		AuthProvider:  provider,
+		OidcSubject:   oidcSubject,
 	}
 	if configuration.GetEnvironment().PermRequestGrantedByDefault {
 		newUser.GrantPermission(models.UserPermGuestUploads)

@@ -109,6 +109,17 @@ func HandlerCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clear the state cookie after successful validation
+	clearCookie := &http.Cookie{
+		Name:     authentication.CookieOauth,
+		Value:    "",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   configuration.Get().UseSsl,
+	}
+	http.SetCookie(w, clearCookie)
+
 	if isConsentRequired(r) {
 		initLogin(w, r, promptConsent)
 		return
@@ -152,6 +163,7 @@ func setCallbackCookie(w http.ResponseWriter, value string) {
 		MaxAge:   int(time.Hour.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   configuration.Get().UseSsl,
 	}
 	http.SetCookie(w, c)
 }

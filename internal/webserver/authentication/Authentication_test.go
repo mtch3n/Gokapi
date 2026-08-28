@@ -378,7 +378,7 @@ func TestCheckOauthUser(t *testing.T) {
 	info.Email = "random"
 	w, err = getOauthUserOutput(t, info)
 	test.IsNil(t, err)
-	test.ResponseIsRedirect(t, w, "admin", false)
+	test.ResponseIsRedirect(t, w, "/", false)
 
 	info.Email = "test@test-invalid.com"
 	authSettings.OnlyRegisteredUsers = true
@@ -389,7 +389,7 @@ func TestCheckOauthUser(t *testing.T) {
 	info.Email = "random"
 	w, err = getOauthUserOutput(t, info)
 	test.IsNil(t, err)
-	test.ResponseIsRedirect(t, w, "admin", false)
+	test.ResponseIsRedirect(t, w, "/", false)
 
 	authSettings.OnlyRegisteredUsers = false
 	authSettings.OAuthGroups = []string{"otheruser@test"}
