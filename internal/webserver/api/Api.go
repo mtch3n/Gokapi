@@ -1284,6 +1284,14 @@ func apiResetPassword(w http.ResponseWriter, r requestParser, user models.User, 
 		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot reset password of yourself")
 		return
 	}
+	// Refuse to set or generate a password for a user not provisioned for internal auth. An
+	// admin minting a password for an SSO colleague's account would bypass the IdP entirely -
+	// its MFA and deprovisioning - the moment the row has a password hash, since a non-empty
+	// hash used to be the only gate IsCorrectUsernameAndPassword checked.
+	if userToEdit.AuthProvider != models.AuthProviderInternal {
+		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot reset password of a user provisioned for external authentication")
+		return
+	}
 	userToEdit.ResetPassword = true
 	password := ""
 	if request.NewPassword {

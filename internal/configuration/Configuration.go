@@ -44,18 +44,12 @@ func Exists() bool {
 
 // loadFromFile parses the given file and adds salts, if they are invalid
 func loadFromFile(path string) (models.Configuration, error) {
-	file, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return models.Configuration{}, err
 	}
-	decoder := json.NewDecoder(file)
 	settings := models.Configuration{}
-	err = decoder.Decode(&settings)
-	if err != nil {
-		return models.Configuration{}, err
-	}
-	err = file.Close()
-	if err != nil {
+	if err = json.Unmarshal(raw, &settings); err != nil {
 		return models.Configuration{}, err
 	}
 	if len(settings.Authentication.SaltFiles) < 20 {
@@ -68,7 +62,45 @@ func loadFromFile(path string) (models.Configuration, error) {
 			fmt.Println("Warning: Salt for admin password invalid, generating new salt. You will need to reset the admin password.")
 		}
 	}
+	normalizeOnlyRegisteredUsers(&settings, raw)
 	return settings, nil
+}
+
+// normalizeOnlyRegisteredUsers forces OnlyRegisteredUsers to true when hybrid auth (internal
+// method with OAuth enabled alongside it) is on and the config file on disk does not explicitly
+// set the field. The setup wizard already defaults this correctly (see
+// setup.parseAuthentication), but hybrid mode can currently only be turned on by hand-editing
+// config.json, which never goes through the wizard - so a hand-written config with hybrid enabled
+// and no OnlyRegisteredUsers key would otherwise silently default to false and let any Google
+// account on the internet auto-provision a user.
+func normalizeOnlyRegisteredUsers(settings *models.Configuration, raw []byte) {
+	if settings.Authentication.Method != models.AuthenticationInternal || !settings.Authentication.OAuthEnabledAlongsideInternal {
+		return
+	}
+	if isOnlyRegisteredUsersExplicit(raw) {
+		return
+	}
+	settings.Authentication.OnlyRegisteredUsers = true
+}
+
+// isOnlyRegisteredUsersExplicit returns true if the raw config JSON explicitly sets
+// Authentication.OnlyRegisteredUsers, as opposed to the field being absent and merely taking its
+// Go zero value after unmarshalling.
+func isOnlyRegisteredUsersExplicit(raw []byte) bool {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return false
+	}
+	authRaw, ok := top["Authentication"]
+	if !ok {
+		return false
+	}
+	var auth map[string]json.RawMessage
+	if err := json.Unmarshal(authRaw, &auth); err != nil {
+		return false
+	}
+	_, ok = auth["OnlyRegisteredUsers"]
+	return ok
 }
 
 // Load loads the configuration or creates the folder structure and a default configuration

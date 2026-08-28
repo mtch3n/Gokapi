@@ -398,6 +398,14 @@ func IsCorrectUsernameAndPassword(username, password, userCsrfToken string) (mod
 	if !ok {
 		return models.User{}, false, true
 	}
+	// Reject login for any user not provisioned for internal auth. This is the allow-list
+	// counterpart to getOrCreateUser's OAuth allow-list: a row provisioned for Google/OIDC
+	// must never authenticate through the password door, even if it somehow ended up with a
+	// non-empty password hash (e.g. an admin calling apiResetPassword on it before that path
+	// was closed). Checked before the password hash so the reason is unambiguous.
+	if user.AuthProvider != models.AuthProviderInternal {
+		return models.User{}, false, true
+	}
 	// Reject login if user has no password hash (OAuth-provisioned account)
 	if user.Password == "" {
 		return models.User{}, false, true

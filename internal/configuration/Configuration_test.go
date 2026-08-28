@@ -42,6 +42,53 @@ func TestLoad(t *testing.T) {
 	Load()
 }
 
+// TestLoadNormalizesOnlyRegisteredUsersForHybrid verifies MAJOR W17-2b: hybrid auth can currently
+// only be turned on by hand-editing config.json, which never goes through the setup wizard's
+// defaulting logic. Before this fix, a hand-written config with OAuthEnabledAlongsideInternal
+// true and no OnlyRegisteredUsers key at all loaded with OnlyRegisteredUsers left at its Go zero
+// value (false), silently letting any Google account on the internet auto-provision a user.
+func TestLoadNormalizesOnlyRegisteredUsersForHybrid(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.json"
+	raw := `{"Authentication":{"Method":0,"OAuthEnabledAlongsideInternal":true,"OauthProvider":"https://example.com","OAuthClientId":"id","OAuthClientSecret":"secret","OAuthRecheckInterval":1,"Username":"admin","SaltAdmin":"12345678901234567890123","SaltFiles":"12345678901234567890123"}}`
+	err := os.WriteFile(path, []byte(raw), 0600)
+	test.IsNil(t, err)
+
+	settings, err := loadFromFile(path)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, settings.Authentication.OnlyRegisteredUsers, true)
+}
+
+// TestLoadRespectsExplicitOnlyRegisteredUsersForHybrid verifies the normalization added for
+// W17-2b only fills in an absent key - an operator who explicitly wrote
+// "OnlyRegisteredUsers": false into a hybrid config is not overridden.
+func TestLoadRespectsExplicitOnlyRegisteredUsersForHybrid(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.json"
+	raw := `{"Authentication":{"Method":0,"OAuthEnabledAlongsideInternal":true,"OnlyRegisteredUsers":false,"OauthProvider":"https://example.com","OAuthClientId":"id","OAuthClientSecret":"secret","OAuthRecheckInterval":1,"Username":"admin","SaltAdmin":"12345678901234567890123","SaltFiles":"12345678901234567890123"}}`
+	err := os.WriteFile(path, []byte(raw), 0600)
+	test.IsNil(t, err)
+
+	settings, err := loadFromFile(path)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, settings.Authentication.OnlyRegisteredUsers, false)
+}
+
+// TestLoadDoesNotNormalizeNonHybrid verifies the normalization is scoped to hybrid auth only: a
+// plain internal-auth config with no OnlyRegisteredUsers key must keep the field at its ordinary
+// zero value.
+func TestLoadDoesNotNormalizeNonHybrid(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.json"
+	raw := `{"Authentication":{"Method":0,"Username":"admin","SaltAdmin":"12345678901234567890123","SaltFiles":"12345678901234567890123"}}`
+	err := os.WriteFile(path, []byte(raw), 0600)
+	test.IsNil(t, err)
+
+	settings, err := loadFromFile(path)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, settings.Authentication.OnlyRegisteredUsers, false)
+}
+
 func TestLoadFromSetup(t *testing.T) {
 	newConfig := models.Configuration{
 		Authentication: models.AuthenticationConfig{},

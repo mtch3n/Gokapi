@@ -98,6 +98,28 @@ func TestIsCorrectUsernameAndPassword(t *testing.T) {
 	test.IsEqualBool(t, csfrOk, false)
 }
 
+// TestIsCorrectUsernameAndPasswordRejectsNonInternalProvider is the reverse-direction guard for
+// MAJOR W17-2a: before this fix, IsCorrectUsernameAndPassword only checked that the stored
+// password hash was non-empty, never AuthProvider. So a Google-provisioned row that somehow
+// obtained a password hash (e.g. an admin calling apiResetPassword on it before that path was
+// closed) could authenticate through the internal password door, bypassing the IdP's MFA and
+// deprovisioning entirely. This row has a hash that verifies against the correct password, so the
+// only thing that can reject it is the AuthProvider check.
+func TestIsCorrectUsernameAndPasswordRejectsNonInternalProvider(t *testing.T) {
+	Init(modelUserPW)
+	database.SaveUser(models.User{
+		Id:           550,
+		Name:         "googlepw@test.com",
+		UserLevel:    models.UserLevelUser,
+		AuthProvider: models.AuthProviderGoogle,
+		Password:     configuration.HashPassword("correcthorsebattery", false, ""),
+	}, false)
+
+	_, ok, csfrOk := IsCorrectUsernameAndPassword("googlepw@test.com", "correcthorsebattery", csrftoken.Generate(csrftoken.TypeLogin))
+	test.IsEqualBool(t, ok, false)
+	test.IsEqualBool(t, csfrOk, true)
+}
+
 func TestIsAuthenticated(t *testing.T) {
 	testAuthSession(t)
 	testAuthHeader(t)
@@ -288,6 +310,34 @@ func TestGetOrCreateUserAllowList(t *testing.T) {
 	_, found = database.GetUserByName("nevercreated@test.com")
 	test.IsEqualBool(t, found, false)
 	authSettings.OnlyRegisteredUsers = false
+}
+
+// TestGoogleProvisionedUserOidcSucceedsPasswordRejected ties together W17-1 and W17-2a: a user
+// deliberately provisioned with the google AuthProvider (as an admin now can via the
+// authprovider header on /user/create, see users.Create) must authenticate successfully through
+// the OIDC path (getOrCreateUser) while being rejected outright through the password path
+// (IsCorrectUsernameAndPassword), even if the row somehow carries a password hash.
+func TestGoogleProvisionedUserOidcSucceedsPasswordRejected(t *testing.T) {
+	Init(modelOauth)
+	database.SaveUser(models.User{
+		Id:           560,
+		Name:         "provisioned@test.com",
+		UserLevel:    models.UserLevelUser,
+		AuthProvider: models.AuthProviderGoogle,
+		Password:     configuration.HashPassword("shouldnevermatter", false, ""),
+	}, false)
+
+	// OIDC path succeeds and binds the subject.
+	user, ok, err := getOrCreateUser("provisioned@test.com", models.AuthProviderGoogle, "sub-provisioned")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, user.Id, 560)
+
+	// Password path is rejected outright, even with the password that matches the stored hash.
+	Init(modelUserPW)
+	_, ok, csfrOk := IsCorrectUsernameAndPassword("provisioned@test.com", "shouldnevermatter", csrftoken.Generate(csrftoken.TypeLogin))
+	test.IsEqualBool(t, ok, false)
+	test.IsEqualBool(t, csfrOk, true)
 }
 
 func TestWildcardMatch(t *testing.T) {

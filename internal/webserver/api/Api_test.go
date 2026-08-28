@@ -58,6 +58,7 @@ func generateTestData() {
 		Permissions:   models.UserPermissionNone,
 		UserLevel:     models.UserLevelUser,
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}
 	newAdmin := models.User{
 		Id:            idAdmin,
@@ -65,6 +66,7 @@ func generateTestData() {
 		Permissions:   models.UserPermissionAll,
 		UserLevel:     models.UserLevelAdmin,
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}
 	newSuperAdmin := models.User{
 		Id:            idSuperAdmin,
@@ -72,6 +74,7 @@ func generateTestData() {
 		Permissions:   models.UserPermissionAll,
 		UserLevel:     models.UserLevelSuperAdmin,
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}
 	database.SaveUser(newUser, false)
 	database.SaveUser(newAdmin, false)
@@ -784,6 +787,39 @@ func TestUserPasswordReset(t *testing.T) {
 
 	defer test.ExpectPanic(t)
 	apiResetPassword(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
+}
+
+// TestUserPasswordResetRefusesNonInternalProvider verifies MAJOR W17-2a: an admin holding
+// PERM_USERS must not be able to mint a plaintext password for a Google-provisioned user, since
+// that would bypass the IdP entirely (its MFA and deprovisioning) the moment the row has a
+// password hash. Before this fix, apiResetPassword never checked AuthProvider at all.
+func TestUserPasswordResetRefusesNonInternalProvider(t *testing.T) {
+	const apiUrl = "/user/resetPassword"
+	const idGoogleUser = 910
+
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+
+	database.SaveUser(models.User{
+		Id:           idGoogleUser,
+		Name:         "googlereset@test.com",
+		UserLevel:    models.UserLevelUser,
+		AuthProvider: models.AuthProviderGoogle,
+	}, false)
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(idGoogleUser),
+	}, {
+		Name:  "generateNewPassword",
+		Value: "true",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	dbUser, ok := database.GetUser(idGoogleUser)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, dbUser.ResetPassword, false)
+	test.IsEqualString(t, dbUser.Password, "")
 }
 
 func testUserModifyCall(t *testing.T, apiKey string, userId int, permission string, grant bool) {

@@ -163,6 +163,81 @@ func TestLogin(t *testing.T) {
 	})
 }
 
+// TestAdminHybridResetPasswordGate verifies MAJOR-3 W17-2c: the guard in requireLogin that
+// forces a logged-in user into the changePassword flow. Before this fix, the condition was
+// authConfig.Method == models.AuthenticationInternal || (isHybrid && ...) - but isHybrid already
+// implies Method == AuthenticationInternal, so the first disjunct made the whole condition true
+// whenever isHybrid was true regardless of AuthProvider, and a Google-provisioned user in hybrid
+// mode with ResetPassword true was wrongly redirected into changePassword. An internal user with
+// ResetPassword true in the same hybrid config must still be redirected, so the fix is scoped to
+// AuthProvider and not an accidental blanket exemption.
+func TestAdminHybridResetPasswordGate(t *testing.T) {
+	const idGoogleUser = 601
+	const idInternalUser = 602
+
+	database.SaveUser(models.User{
+		Id:            idGoogleUser,
+		Name:          "hybridgoogleuser@test.com",
+		UserLevel:     models.UserLevelUser,
+		AuthProvider:  models.AuthProviderGoogle,
+		ResetPassword: true,
+	}, false)
+	database.SaveSession("hybridGoogleSession", models.Session{
+		RenewAt:    2147483645,
+		ValidUntil: 2147483646,
+		UserId:     idGoogleUser,
+	})
+
+	database.SaveUser(models.User{
+		Id:            idInternalUser,
+		Name:          "hybridinternaluser@test.com",
+		UserLevel:     models.UserLevelUser,
+		AuthProvider:  models.AuthProviderInternal,
+		Password:      "somehash",
+		ResetPassword: true,
+	}, false)
+	database.SaveSession("hybridInternalSession", models.Session{
+		RenewAt:    2147483645,
+		ValidUntil: 2147483646,
+		UserId:     idInternalUser,
+	})
+
+	config := configuration.Get()
+	config.Authentication.Method = models.AuthenticationInternal
+	config.Authentication.OAuthEnabledAlongsideInternal = true
+	config.Authentication.OAuthProvider = "http://test.com"
+	config.Authentication.OAuthClientId = "client"
+	config.Authentication.OAuthClientSecret = "secret"
+	config.Authentication.OAuthRecheckInterval = 1
+	authentication.Init(config.Authentication)
+
+	// A Google-provisioned user must not be forced into changePassword in hybrid mode.
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://localhost:53843/admin",
+		RequiredContent: []string{"Downloads remaining"},
+		ExcludedContent: []string{"Change Password"},
+		IsHtml:          true,
+		Cookies: []test.Cookie{{
+			Name:  "session_token",
+			Value: "hybridGoogleSession",
+		}},
+	})
+
+	// An internal user with ResetPassword must still be redirected in the same hybrid config.
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:         "http://localhost:53843/admin",
+		RedirectUrl: "changePassword",
+		Cookies: []test.Cookie{{
+			Name:  "session_token",
+			Value: "hybridInternalSession",
+		}},
+	})
+
+	configuration.Get().Authentication.Method = models.AuthenticationInternal
+	configuration.Get().Authentication.OAuthEnabledAlongsideInternal = false
+	authentication.Init(configuration.Get().Authentication)
+}
+
 func TestAdminNoAuth(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{

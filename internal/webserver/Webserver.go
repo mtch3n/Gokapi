@@ -347,7 +347,10 @@ func changePassword(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		panic(err)
 	}
-	if !user.ResetPassword {
+	// A user not provisioned for internal auth must never be able to set a password through
+	// this form, even if ResetPassword were somehow true for such a row: a password here would
+	// reopen the internal login door that IsCorrectUsernameAndPassword closes for them.
+	if !user.ResetPassword || user.AuthProvider != models.AuthProviderInternal {
 		redirect(w, r, "admin")
 		return
 	}
@@ -1834,10 +1837,15 @@ func requireLogin(next http.HandlerFunc, isUiCall, isPwChangeView bool) http.Han
 			return
 		}
 		if isLoggedIn {
-			authConfig := configuration.Get().Authentication
-			isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
-			// Force password change for internal auth users only (not OAuth-provisioned users)
-			if user.ResetPassword && isUiCall && (authConfig.Method == models.AuthenticationInternal || (isHybrid && user.AuthProvider != models.AuthProviderGoogle)) {
+			// Force password change for internal auth users only, never for an OAuth-provisioned
+			// user - checking user.AuthProvider directly (rather than the configured
+			// authentication method) is what makes this correct in every mode: internal-only
+			// (every user is AuthProviderInternal), OAuth2-only (every user is
+			// AuthProviderGoogle, see getOrCreateUser), and hybrid (mixed). A prior version of
+			// this condition also allowed on authConfig.Method == models.AuthenticationInternal,
+			// which is true in hybrid mode by definition and made the AuthProvider check
+			// unreachable, forcing OAuth-provisioned users in hybrid mode into changePassword.
+			if user.ResetPassword && isUiCall && user.AuthProvider == models.AuthProviderInternal {
 				if !isPwChangeView {
 					redirect(w, r, "changePassword")
 					return
