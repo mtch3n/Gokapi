@@ -518,10 +518,15 @@ func LogReplace(originalFile, newContent models.File, user models.User) {
 	})
 }
 
-// LogDelete adds a log entry when an upload was deleted. Non-Blocking
-func LogDelete(file models.File, user models.User) {
+// LogDelete adds a log entry when an upload was deleted. Fail-closed like LogDownload: the
+// audit record is fsync'd to durable local storage before this returns, and the caller must not
+// proceed with the deletion (the files must still exist) if this returns a non-nil error -
+// refuse the request instead. This mirrors the pattern in FileServing.go rather than the
+// fire-and-forget appendAuditEntryAsync used for most other edit/log events, since a deletion is
+// irreversible: an entry lost to a local write failure here can never be reconstructed.
+func LogDelete(file models.File, user models.User) error {
 	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, deleted by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
-	appendAuditEntryAsync(AuditEntry{
+	return appendAuditEntry(AuditEntry{
 		Category: categoryEdit,
 		Action:   "file.deleted",
 		Outcome:  OutcomeSuccess,
@@ -542,10 +547,10 @@ func LogFolderCreate(bundle models.FileBundle, user models.User) {
 	})
 }
 
-// LogFolderDelete adds a log entry when a folder was deleted. Non-Blocking
-func LogFolderDelete(bundle models.FileBundle, user models.User) {
+// LogFolderDelete adds a log entry when a folder was deleted. Fail-closed, see LogDelete.
+func LogFolderDelete(bundle models.FileBundle, user models.User) error {
 	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s (%s) and associated files deleted by %s (user #%d)", bundle.Id, bundle.Name, user.Name, user.Id), false)
-	appendAuditEntryAsync(AuditEntry{
+	return appendAuditEntry(AuditEntry{
 		Category: categoryEdit,
 		Action:   "folder.deleted",
 		Outcome:  OutcomeSuccess,

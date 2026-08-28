@@ -1506,17 +1506,21 @@ func TestFolderLockedLeaksNothing(t *testing.T) {
 	}
 }
 
-// TestFolderZipCounterEnforced tests that download counter is enforced on folder zip downloads.
-// A member with DownloadsRemaining=1 should allow one download, then subsequent requests fail.
+// TestFolderZipCounterEnforced tests that the download counter is enforced by the multi-member
+// zip metering loop in pubApiFolderZip. The bundle deliberately has TWO servable members and the
+// request omits ids=, so control cannot take the single-file serveBundleFile shortcut
+// (len(filesToServe) == 1) and must go through the metering loop the counter protects. A
+// previous version of this test used a single-member bundle plus an explicit ids=, which took
+// serveBundleFile and never exercised the metering loop at all.
 func TestFolderZipCounterEnforced(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestFolderCounter_" + helper.GenerateRandomString(8)
 
 	bundle := filebundle.Create(uniqueName, 999)
 
-	fileId := helper.GenerateRandomString(16)
+	limitedId := helper.GenerateRandomString(16)
 	database.SaveMetaData(models.File{
-		Id:                 fileId,
+		Id:                 limitedId,
 		Name:               "limited.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
@@ -1530,9 +1534,26 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 		BundleId:           bundle.Id,
 	})
 
+	unlimitedId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 unlimitedId,
+		Name:               "unlimited.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
 	client := &http.Client{}
 
-	firstReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+fileId, nil)
+	// No ids= parameter: both members are requested, so len(filesToServe) == 2 and control must
+	// go through the multi-member zip path and its metering loop.
+	firstReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
 		t.Errorf("Failed to create first request: %v", err)
 		return
@@ -1548,8 +1569,18 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 	if resp1.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200 for first download, got %d", resp1.StatusCode)
 	}
+	if contentType := resp1.Header.Get("Content-Type"); contentType != "application/zip" {
+		t.Errorf("Expected a zip response for a two-member bundle, got Content-Type %s", contentType)
+	}
+	if remaining := database.GetDownloadsRemaining(limitedId); remaining != 0 {
+		t.Errorf("Expected the metering loop to consume the limited member's allowance, got %d remaining", remaining)
+	}
 
-	secondReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+fileId, nil)
+	// Second request: the limited member's allowance is now exhausted, so the metering loop must
+	// exclude it from the zip rather than fail the whole request - the unlimited member is still
+	// servable, so this must still succeed, and the exhausted member's allowance must not go
+	// negative or be re-consumed.
+	secondReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
 		t.Errorf("Failed to create second request: %v", err)
 		return
@@ -1562,8 +1593,11 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 	}
 	resp2.Body.Close()
 
-	if resp2.StatusCode == http.StatusOK {
-		t.Errorf("Expected status other than 200 for second download (counter exhausted), got %d", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 for second download (unlimited member still servable), got %d", resp2.StatusCode)
+	}
+	if remaining := database.GetDownloadsRemaining(limitedId); remaining != 0 {
+		t.Errorf("Exhausted member's allowance must not go negative or be re-consumed, got %d remaining", remaining)
 	}
 }
 
@@ -1665,18 +1699,23 @@ func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
 	}
 	defer resp3.Body.Close()
 
-	// Assert Content-Type is application/zip
-	if contentType := resp3.Header.Get("Content-Type"); contentType != "application/zip" {
-		t.Errorf("Expected Content-Type application/zip, got %s", contentType)
+	// With the file-request member correctly excluded, bundle1 has exactly one servable member
+	// (file1.txt), so the handler must serve it directly as a raw file rather than a zip. The
+	// previous version of this test asserted the opposite - that the response was a zip, which
+	// can only happen if the excluded file-request member was actually included - i.e. it
+	// asserted the vulnerable behaviour instead of the fix.
+	if contentType := resp3.Header.Get("Content-Type"); contentType != "text/plain" {
+		t.Errorf("Expected a raw single-file response with Content-Type text/plain, got %s", contentType)
 	}
 
-	// Additionally verify response starts with zip magic bytes (PK)
-	zipMagic := make([]byte, 2)
-	if _, err := resp3.Body.Read(zipMagic); err != nil {
-		t.Errorf("Failed to read response body: %v", err)
-		return
+	// The Content-Disposition filename must name the single remaining servable member
+	// (file1.txt), and must never reference the excluded file-request member: this is what
+	// proves the file-request member's bytes were not served.
+	disposition := resp3.Header.Get("Content-Disposition")
+	if !strings.Contains(disposition, `filename="file1.txt"`) {
+		t.Errorf("Expected the single remaining member (file1.txt) to be served, got Content-Disposition %q", disposition)
 	}
-	if !(zipMagic[0] == 'P' && zipMagic[1] == 'K') {
-		t.Errorf("Expected zip magic bytes (PK), got %v", zipMagic)
+	if strings.Contains(disposition, "file_request_upload.txt") {
+		t.Errorf("File-request member must not be served, but Content-Disposition referenced it: %q", disposition)
 	}
 }

@@ -15,6 +15,11 @@ var cleanupOnce sync.Once
 
 const ttl = 5 * time.Minute
 
+// maxTokens bounds the tokens map so that a flood of requests hitting redirectToError (e.g.
+// unauthenticated bad-id probes against /pubapi/*, none of which previously went through any
+// rate limiter) cannot grow it without bound between the hourly cleanup passes.
+const maxTokens = 10000
+
 const WidthDefault = "20rem"
 const WidthWide = "30rem"
 const WidthVeryWide = "65%"
@@ -110,6 +115,23 @@ func RedirectToOAuthErrorPage(w http.ResponseWriter, r *http.Request, errorMessa
 func redirectToError(w http.ResponseWriter, r *http.Request, displayedError DisplayedError) {
 	token := helper.GenerateRandomString(30)
 	mutex.Lock()
+	if len(tokens) >= maxTokens {
+		// Bound memory under a flood of bad-id probes: opportunistically drop expired entries
+		// first, and if that is not enough, evict one arbitrary entry rather than let the map
+		// grow without bound. Go's map iteration order is randomised, so this is not a
+		// predictable or targetable eviction order.
+		for id, existing := range tokens {
+			if existing.IsExpired() {
+				delete(tokens, id)
+			}
+		}
+		if len(tokens) >= maxTokens {
+			for id := range tokens {
+				delete(tokens, id)
+				break
+			}
+		}
+	}
 	tokens[token] = displayedError
 	mutex.Unlock()
 
@@ -149,7 +171,10 @@ func cleanup(periodic bool) {
 	}
 	mutex.Unlock()
 	if periodic {
-		time.Sleep(time.Hour)
+		// Matches ttl rather than the previous hourly interval: an hour-long window between
+		// cleanups let a lot more expired entries accumulate under sustained bad-id probing than
+		// the 5-minute ttl implies.
+		time.Sleep(ttl)
 		go cleanup(true)
 	}
 

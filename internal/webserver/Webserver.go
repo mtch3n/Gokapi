@@ -697,9 +697,26 @@ func showHotlink(w http.ResponseWriter, r *http.Request) {
 }
 
 // Checks if a file is associated with the GET parameter from the current URL
+// respondPubApiNotFound rate limits and writes a generic 404 JSON body. Used by every
+// /pubapi/* handler when a well-formed id/key does not resolve to an existing entity, so that
+// probing for valid ids on these unauthenticated public endpoints is throttled the same way
+// ratelimiter.WaitOnFailedId already throttles bad ids on the non-pubapi download door (see
+// redirectOnIncorrectId). The id/key-missing-or-too-short case is rate limited separately, inside
+// queryUrl itself.
+func respondPubApiNotFound(w http.ResponseWriter, r *http.Request) {
+	ratelimiter.WaitOnFailedId(r)
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+}
+
 func queryUrl(w http.ResponseWriter, r *http.Request, keyword string, errorType int) string {
 	keys, ok := r.URL.Query()[keyword]
 	if !ok || len(keys[0]) < environment.MinLengthId {
+		// A missing or too-short id/key is the cheapest possible probe against every /pubapi/*
+		// endpoint (and the few other callers of queryUrl): no valid-looking id is even needed.
+		// Rate limit it here so it is covered everywhere queryUrl is used, rather than requiring
+		// every call site to remember to do it individually.
+		ratelimiter.WaitOnFailedId(r)
 		errorHandling.RedirectGenericErrorPage(w, r, errorType)
 		return ""
 	}
@@ -1204,8 +1221,7 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 
 	file, ok := storage.GetFile(keyId)
 	if !ok || file.IsFileRequest() {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		respondPubApiNotFound(w, r)
 		return
 	}
 
@@ -1261,8 +1277,7 @@ func pubApiFilePassword(w http.ResponseWriter, r *http.Request) {
 
 	file, ok := storage.GetFile(keyId)
 	if !ok || file.IsFileRequest() {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		respondPubApiNotFound(w, r)
 		return
 	}
 
@@ -1319,8 +1334,7 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 
 	request, ok := filerequest.Get(requestId)
 	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		respondPubApiNotFound(w, r)
 		return
 	}
 
@@ -1333,8 +1347,7 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Validate the API key using constant-time comparison
 	if subtle.ConstantTimeCompare([]byte(request.ApiKey), []byte(apiKey)) != 1 {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		respondPubApiNotFound(w, r)
 		return
 	}
 
@@ -1390,8 +1403,7 @@ func pubApiFolder(w http.ResponseWriter, r *http.Request) {
 
 	bundle, ok := filebundle.Get(folderId)
 	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		respondPubApiNotFound(w, r)
 		return
 	}
 
@@ -1465,8 +1477,7 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 
 	bundle, ok := filebundle.Get(folderId)
 	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		respondPubApiNotFound(w, r)
 		return
 	}
 
@@ -1552,8 +1563,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 
 	bundle, ok := filebundle.Get(folderId)
 	if !ok {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		respondPubApiNotFound(w, r)
 		return
 	}
 

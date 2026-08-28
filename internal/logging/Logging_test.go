@@ -120,6 +120,15 @@ func TestLogDownloadFailClosed(t *testing.T) {
 	err = LogUpload(file, models.User{Id: 1, Name: "someuser"}, models.FileRequest{}, r, false)
 	test.IsNotNil(t, err)
 
+	// LogDelete and LogFolderDelete used to be fire-and-forget (appendAuditEntryAsync), so a
+	// local write failure here was invisible to the caller and a folder/file was deleted with
+	// no durable audit record of it. They are now fail-closed like the rest of this test.
+	err = LogDelete(file, models.User{Id: 1, Name: "someuser"})
+	test.IsNotNil(t, err)
+
+	err = LogFolderDelete(models.FileBundle{Id: "failClosedBundleId", Name: "failClosedBundleName"}, models.User{Id: 1, Name: "someuser"})
+	test.IsNotNil(t, err)
+
 	// Give the fire-and-forget human-readable log.txt writes (spawned regardless of the audit
 	// outcome) time to land before the temp dir is removed.
 	time.Sleep(300 * time.Millisecond)

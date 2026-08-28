@@ -41,4 +41,7 @@ const (
 	UnsupportedFile
 	// ResourceCanNotBeEdited is returned when a resource cannot be edited
 	ResourceCanNotBeEdited
+	// AuditWriteFailed is returned when an action was refused because its audit record could
+	// not be committed durably - see logging.LogDelete and logging.LogFolderDelete
+	AuditWriteFailed
 )

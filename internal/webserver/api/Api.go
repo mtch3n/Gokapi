@@ -476,7 +476,14 @@ func apiDeleteFile(w http.ResponseWriter, r requestParser, user models.User, _ m
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this file")
 		return
 	}
-	logging.LogDelete(file, user)
+	// Fail closed: commit the audit record before anything is deleted, mirroring the download
+	// path in FileServing.go. If the write fails, refuse the deletion instead of removing the
+	// file with no durable record of it.
+	if err := logging.LogDelete(file, user); err != nil {
+		fmt.Println("audit: refusing to delete, could not record audit event:", err)
+		sendError(w, http.StatusServiceUnavailable, errorcodes.AuditWriteFailed, "Service temporarily unavailable, please try again.")
+		return
+	}
 	if request.DelaySeconds == 0 {
 		_ = storage.DeleteFile(request.Id, true)
 	} else {
@@ -579,14 +586,24 @@ func apiFolderDelete(w http.ResponseWriter, r requestParser, user models.User, _
 		return
 	}
 
-	// Log deletion of each member file before deletion
+	// Fail closed: commit an audit record for every member file and for the folder itself
+	// before anything is deleted. Audit writes previously raced the deletion on a background
+	// goroutine (appendAuditEntryAsync), so a write failure returned {"Result":"OK"} with the
+	// files already gone. If any write fails here, abort without deleting anything, mirroring
+	// the download path in FileServing.go.
 	memberFiles := filebundle.GetFiles(bundle)
 	for _, file := range memberFiles {
-		logging.LogDelete(file, user)
+		if err := logging.LogDelete(file, user); err != nil {
+			fmt.Println("audit: refusing to delete folder, could not record audit event:", err)
+			sendError(w, http.StatusServiceUnavailable, errorcodes.AuditWriteFailed, "Service temporarily unavailable, please try again.")
+			return
+		}
 	}
-
-	// Log folder-level deletion
-	logging.LogFolderDelete(bundle, user)
+	if err := logging.LogFolderDelete(bundle, user); err != nil {
+		fmt.Println("audit: refusing to delete folder, could not record audit event:", err)
+		sendError(w, http.StatusServiceUnavailable, errorcodes.AuditWriteFailed, "Service temporarily unavailable, please try again.")
+		return
+	}
 
 	filebundle.Delete(bundle)
 
