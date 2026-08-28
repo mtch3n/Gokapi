@@ -690,6 +690,34 @@ func TestDatabaseProvider_Upgrade(t *testing.T) {
 
 }
 
+// TestDatabaseProvider_UpgradeV17Idempotent reproduces a crash between the two ALTER TABLE
+// statements (or between them and the version bump, which only happens once the whole ladder in
+// Upgrade has run): the next boot re-runs the v17 step against a Users table that already has
+// one or both of the columns. Before the fix this panicked with "duplicate column name" - a
+// bricked database on every subsequent boot, the same failure mode the earlier Postgres bug had.
+// createNewDatabase already writes the current schema (including AuthProvider and OidcSubject),
+// so calling Upgrade with a stale currentDbVersion of 16 against that schema reproduces exactly
+// this: the columns already exist, but the version says the step has not run yet.
+func TestDatabaseProvider_UpgradeV17Idempotent(t *testing.T) {
+	instance, err := New(models.DbConnection{
+		HostUrl: "./test/newfolder/gokapi_v17idempotent.sqlite",
+		Type:    0, // dbabstraction.TypeSqlite
+	})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	test.IsEqualBool(t, instance.columnExists("Users", "AuthProvider"), true)
+	test.IsEqualBool(t, instance.columnExists("Users", "OidcSubject"), true)
+	test.IsEqualBool(t, instance.columnExists("Sessions", "IsOauth"), true)
+	test.IsEqualBool(t, instance.columnExists("Users", "NonExistentColumn"), false)
+
+	// Must not panic: this is the crash-recovery replay of the v17 and v18 steps.
+	instance.Upgrade(16)
+
+	// Re-running it again (a second replay) must also be safe.
+	instance.Upgrade(16)
+}
+
 func TestRawSql(t *testing.T) {
 	dbInstance.Close()
 	dbInstance.sqliteDb = nil

@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 17
+const DatabaseSchemeVersion = 18
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -127,18 +127,63 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		helper.Check(err)
 	}
 	// < v2.4.0
+	// Each ADD COLUMN is guarded individually rather than run as one bare, unconditional
+	// statement: SQLite has no "ADD COLUMN IF NOT EXISTS", and Upgrade re-runs every step below
+	// the stored version on every boot. Without the guard, a process that died between the two
+	// ALTER TABLE statements (or between either of them and the version bump at the end of
+	// Upgrade, which only happens once the whole ladder has run) would panic with "duplicate
+	// column name" on the next boot, on every boot after that - the same bricked-database failure
+	// mode as the earlier Postgres migration bug, just for SQLite instead. The guard makes the
+	// step safe to resume from any point without a transaction.
 	if currentDbVersion < 17 {
-		err := p.rawSqlite(`ALTER TABLE Users ADD COLUMN "AuthProvider" TEXT NOT NULL DEFAULT 'internal';
-		ALTER TABLE Users ADD COLUMN "OidcSubject" TEXT NOT NULL DEFAULT '';`)
-		helper.Check(err)
+		if !p.columnExists("Users", "AuthProvider") {
+			err := p.rawSqlite(`ALTER TABLE Users ADD COLUMN "AuthProvider" TEXT NOT NULL DEFAULT 'internal';`)
+			helper.Check(err)
+		}
+		if !p.columnExists("Users", "OidcSubject") {
+			err := p.rawSqlite(`ALTER TABLE Users ADD COLUMN "OidcSubject" TEXT NOT NULL DEFAULT '';`)
+			helper.Check(err)
+		}
 		// Defence in depth on top of the DEFAULT above: any row written through the Go layer
 		// with an explicit column list (see SaveUser) bypasses the column DEFAULT entirely, so a
 		// row saved between the ADD COLUMN above and this line - or any row that reaches this
 		// migration already carrying an empty AuthProvider for some other reason - is backfilled
-		// explicitly rather than relying on the DEFAULT alone.
-		err = p.rawSqlite(`UPDATE Users SET AuthProvider = 'internal' WHERE AuthProvider = '' OR AuthProvider IS NULL;`)
+		// explicitly rather than relying on the DEFAULT alone. Safe to re-run: matches nothing
+		// once every row already has a non-empty AuthProvider.
+		err := p.rawSqlite(`UPDATE Users SET AuthProvider = 'internal' WHERE AuthProvider = '' OR AuthProvider IS NULL;`)
 		helper.Check(err)
 	}
+	// < v2.4.1
+	// Persists which auth method created a session, so a renewal recreates the same kind of
+	// session (see sessionmanager.useSession) instead of inferring it from the current global
+	// auth method - which is wrong in hybrid mode. Same idempotency guard as the v17 step above.
+	if currentDbVersion < 18 {
+		if !p.columnExists("Sessions", "IsOauth") {
+			err := p.rawSqlite(`ALTER TABLE Sessions ADD COLUMN "IsOauth" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+	}
+}
+
+// columnExists returns true if the given table has a column with the given name. Used to make
+// an ALTER TABLE ADD COLUMN step idempotent, since SQLite has no ADD COLUMN IF NOT EXISTS.
+func (p DatabaseProvider) columnExists(table, column string) bool {
+	rows, err := p.sqliteDb.Query(fmt.Sprintf(`PRAGMA table_info("%s");`, table))
+	helper.Check(err)
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		err = rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk)
+		helper.Check(err)
+		if strings.EqualFold(name, column) {
+			return true
+		}
+	}
+	helper.Check(rows.Err())
+	return false
 }
 
 // GetDbVersion gets the version number of the database
@@ -263,6 +308,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"RenewAt"	INTEGER NOT NULL,
 			"ValidUntil"	INTEGER NOT NULL,
 			"UserId"	INTEGER NOT NULL,
+			"IsOauth"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("Id")
 		) WITHOUT ROWID;
 		CREATE TABLE "Users" (

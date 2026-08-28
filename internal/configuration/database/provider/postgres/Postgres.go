@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 17
+const DatabaseSchemeVersion = 18
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -147,6 +147,14 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		// with an explicit column list (see SaveUser) bypasses the column DEFAULT entirely, so
 		// backfill any row that reaches this migration with an empty AuthProvider explicitly.
 		_, err = p.exec(`UPDATE Users SET AuthProvider = 'internal' WHERE AuthProvider = '' OR AuthProvider IS NULL;`)
+		helper.Check(err)
+	}
+	// < v2.4.1
+	// Persists which auth method created a session, so a renewal recreates the same kind of
+	// session (see sessionmanager.useSession) instead of inferring it from the current global
+	// auth method - which is wrong in hybrid mode. IF NOT EXISTS makes this idempotent already.
+	if currentDbVersion < 18 {
+		_, err := p.exec(`ALTER TABLE Sessions ADD COLUMN IF NOT EXISTS IsOauth BOOLEAN NOT NULL DEFAULT false;`)
 		helper.Check(err)
 	}
 }
@@ -280,6 +288,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			RenewAt	BIGINT NOT NULL,
 			ValidUntil	BIGINT NOT NULL,
 			UserId	INTEGER NOT NULL,
+			IsOauth	BOOLEAN NOT NULL DEFAULT false,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Users (

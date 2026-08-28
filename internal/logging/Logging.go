@@ -305,6 +305,22 @@ func LogInvalidLogin(username, ip string) {
 	})
 }
 
+// LogOauthTakeoverRejected adds a log entry to indicate that an OAuth login was rejected because
+// the target account was not provisioned for OAuth (or its OIDC subject no longer matches),
+// i.e. a rejected account-takeover attempt rather than an ordinary wrong password. Kept distinct
+// from LogInvalidLogin so this signal is not lost in routine failed-login noise. Non-blocking
+func LogOauthTakeoverRejected(username, ip string) {
+	createLogEntry(categoryAuth, fmt.Sprintf("Rejected OAuth login for %s by IP %s: account not provisioned for this provider", username, ip), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "login.takeover_rejected",
+		Outcome:  OutcomeDenied,
+		Ip:       ip,
+		Actor:    AuditActor{Email: username},
+		Error:    "oauth login rejected: account not provisioned for this authentication provider",
+	})
+}
+
 // LogValidLogin adds a log entry to indicate that a login was successful. Non-blocking
 // oidcSubject is the OIDC "sub" claim for OAuth2 logins, empty otherwise: this is the only
 // point in the request lifecycle where Gokapi still has it, so it is recorded here or not at

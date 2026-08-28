@@ -205,6 +205,39 @@ func TestSessionDurationDays(t *testing.T) {
 	test.IsEqualBool(t, isEqual, true)
 }
 
+// TestOAuthSessionNotLaunderedOnRenewal reproduces the hybrid-mode bug: isGrantedSession used to
+// pass isOauth computed from the CURRENT global auth method (authSettings.Method ==
+// AuthenticationOAuth2), which is always false in hybrid mode (Method stays
+// AuthenticationInternal) even for a session the OAuth callback created with isOauth true. On
+// renewal that recreated the session as a 7-day password session, so deprovisioning a user in
+// Google would never end their session. The caller below deliberately passes isOauth=false, the
+// exact value isGrantedSession would compute in hybrid mode, to prove renewal now reads
+// session.IsOauth instead and keeps the OAuth recheck interval.
+func TestOAuthSessionNotLaunderedOnRenewal(t *testing.T) {
+	database.SaveSession("oauthNeedsRenewal", models.Session{
+		RenewAt:    0,
+		ValidUntil: 2147483646,
+		UserId:     7,
+		IsOauth:    true,
+	})
+	w, r, _, _ := getRecorder([]test.Cookie{{
+		Name:  "session_token",
+		Value: "oauthNeedsRenewal"},
+	})
+	_, ok := IsValidSession(w, r, false, 2)
+	test.IsEqualBool(t, ok, true)
+	cookies := w.Result().Cookies()
+	test.IsEqualInt(t, len(cookies), 1)
+	renewed, ok := database.GetSession(cookies[0].Value)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, renewed.IsOauth, true)
+	// Renewed using the 2-hour OAuthRecheckInterval passed above, not the 7-day password
+	// session default - otherwise the OAuth session was laundered into a long-lived one.
+	isEqual := time.Now().Add(2*time.Hour).Unix()-renewed.ValidUntil < 10 &&
+		time.Now().Add(2*time.Hour).Unix()-renewed.ValidUntil > -10
+	test.IsEqualBool(t, isEqual, true)
+}
+
 func TestLogoutSession(t *testing.T) {
 	user, ok := IsValidSession(getRecorder([]test.Cookie{{
 		Name:  "session_token",

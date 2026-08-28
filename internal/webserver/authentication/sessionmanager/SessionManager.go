@@ -42,13 +42,18 @@ func IsValidSession(w http.ResponseWriter, r *http.Request, isOauth bool, OAuthR
 // if it has been used for more than an hour to limit session hijacking
 // Returns true if session is still valid
 // Returns false if session is invalid (and deletes it)
+// The isOauth passed in by the caller reflects only the current global auth method, which is
+// wrong for a hybrid instance: renewal instead uses session.IsOauth, the value recorded when
+// this specific session was created, so an OAuth session stays an OAuth session (short-lived,
+// rechecked against the provider) across every renewal instead of being laundered into a
+// long-lived password session the first time it is renewed. See models.Session.IsOauth.
 func useSession(w http.ResponseWriter, id string, session models.Session, isOauth bool, OAuthRecheckInterval int) bool {
 	if session.ValidUntil < time.Now().Unix() {
 		database.DeleteSession(id)
 		return false
 	}
 	if session.RenewAt < time.Now().Unix() {
-		CreateSession(w, isOauth, OAuthRecheckInterval, session.UserId)
+		CreateSession(w, session.IsOauth, OAuthRecheckInterval, session.UserId)
 		database.DeleteSession(id)
 	}
 	go database.UpdateUserLastOnline(session.UserId)
@@ -68,17 +73,26 @@ func CreateSession(w http.ResponseWriter, isOauth bool, OAuthRecheckInterval int
 		RenewAt:    time.Now().Add(12 * time.Hour).Unix(),
 		ValidUntil: timeExpiry.Unix(),
 		UserId:     userId,
+		IsOauth:    isOauth,
 	})
 	writeSessionCookie(w, sessionString, timeExpiry)
 }
 
-// LogoutSession logs out user and deletes session
-func LogoutSession(w http.ResponseWriter, r *http.Request) {
+// LogoutSession logs out user and deletes session.
+// Returns true if the session that was logged out had been created by the OAuth callback (see
+// models.Session.IsOauth), so the caller can force re-consent on the next login rather than
+// allowing a silent prompt=none reauthentication - see authentication.Logout.
+func LogoutSession(w http.ResponseWriter, r *http.Request) bool {
+	wasOauth := false
 	cookie, err := r.Cookie("session_token")
 	if err == nil {
+		if session, ok := database.GetSession(cookie.Value); ok {
+			wasOauth = session.IsOauth
+		}
 		database.DeleteSession(cookie.Value)
 	}
 	writeSessionCookie(w, "", time.Now())
+	return wasOauth
 }
 
 // Writes session cookie to browser

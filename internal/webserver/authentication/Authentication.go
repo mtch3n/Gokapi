@@ -253,13 +253,21 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 	}
 	if isValidOauthUser(userInfo, groups) {
 		user, ok, errCreate := getOrCreateUser(userInfo.Email, models.AuthProviderGoogle, userInfo.Subject)
-		if errCreate != nil {
+		if errCreate != nil && !errors.Is(errCreate, errTakeoverRejected) {
 			return errCreate
 		}
 		if ok {
 			sessionmanager.CreateSession(w, true, authSettings.OAuthRecheckInterval, user.Id)
 			logging.LogValidLogin(userInfo.Email, userInfo.Subject, logging.GetIpAddress(r))
 			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			return nil
+		}
+		if errors.Is(errCreate, errTakeoverRejected) {
+			// Distinct from an ordinary failed login: a Google login was presented for an
+			// account that was not provisioned for OAuth (or whose OIDC subject no longer
+			// matches), i.e. a rejected account-takeover attempt rather than a wrong password.
+			logging.LogOauthTakeoverRejected(userInfo.Email, logging.GetIpAddress(r))
+			errorHandling.RedirectGenericErrorPage(w, r, errorHandling.TypeOAuthNotAuthorised)
 			return nil
 		}
 	}
@@ -278,6 +286,13 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 // OIDC but never logged in yet) or must match exactly on every later login; a mismatch (e.g. a
 // corporate email address reassigned to a different person in Google) is rejected too.
 // For internal/header auth: matches by username only, unchanged.
+//
+// errTakeoverRejected is returned (never as a hard failure the caller propagates as an HTTP
+// error - CheckOauthUserAndRedirect treats it the same as any other "not authorized" outcome)
+// specifically so the caller can log the rejection distinctly from an ordinary failed login, see
+// logging.LogOauthTakeoverRejected.
+var errTakeoverRejected = errors.New("oauth login rejected: account was not provisioned for this authentication provider")
+
 func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool, error) {
 	user, ok := database.GetUserByName(username)
 	if ok {
@@ -286,7 +301,7 @@ func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool,
 				// Not a row deliberately provisioned for OIDC: reject regardless of whether
 				// AuthProvider is empty, "internal", or anything else. This is the account
 				// takeover guard.
-				return models.User{}, false, nil
+				return models.User{}, false, errTakeoverRejected
 			}
 			if user.OidcSubject == "" {
 				// First-time binding on a row that was deliberately provisioned for OIDC.
@@ -295,7 +310,7 @@ func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool,
 			} else if user.OidcSubject != oidcSubject {
 				// A different subject is presented for the same email - e.g. a reassigned
 				// corporate mailbox - must not inherit the previous owner's account.
-				return models.User{}, false, nil
+				return models.User{}, false, errTakeoverRejected
 			}
 		}
 		return user, true, nil
@@ -310,7 +325,12 @@ func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool,
 	return newUser, true, nil
 }
 
-// checkEmailVerified extracts and validates the email_verified claim
+// checkEmailVerified extracts and validates the email_verified claim.
+// An absent claim is treated as verified only for a Google issuer, which always sends this
+// claim in practice, so absence should not occur there. For every other OIDC issuer, the claim
+// is optional per spec, so a provider that omits it is treated as UNVERIFIED rather than
+// silently trusted - and the omission is logged distinctly so it does not read as a wrong
+// password or a rejected takeover attempt in the log.
 func checkEmailVerified(claims OAuthUserClaims) error {
 	var rawClaims json.RawMessage
 	var data map[string]interface{}
@@ -324,18 +344,27 @@ func checkEmailVerified(claims OAuthUserClaims) error {
 		return err
 	}
 
-	// Check if email_verified claim exists
-	if emailVerified, exists := data["email_verified"]; exists {
-		// If it exists, it must be true
-		if verified, ok := emailVerified.(bool); !ok {
-			// If it's not a bool, consider it an error
-			return errors.New("email_verified claim is not a boolean")
-		} else if !verified {
-			return errors.New("email_verified claim is false")
+	emailVerified, exists := data["email_verified"]
+	if !exists {
+		if isGoogleProvider() {
+			return nil
 		}
+		log.Println("oauth: email_verified claim absent for a non-Google issuer, treating login as unverified")
+		return errors.New("email_verified claim is missing")
 	}
-	// If email_verified doesn't exist, we don't require it (provider may not send it)
+	verified, ok := emailVerified.(bool)
+	if !ok {
+		return errors.New("email_verified claim is not a boolean")
+	}
+	if !verified {
+		return errors.New("email_verified claim is false")
+	}
 	return nil
+}
+
+// isGoogleProvider returns true if the configured OIDC provider is Google.
+func isGoogleProvider() bool {
+	return strings.Contains(authSettings.OAuthProvider, "accounts.google.com")
 }
 
 func isValidOauthUser(userInfo OAuthUserInfo, groups []string) bool {
@@ -387,10 +416,16 @@ func IsCorrectUsernameAndPassword(username, password, userCsrfToken string) (mod
 // Logout logs the user out and removes the session
 func Logout(w http.ResponseWriter, r *http.Request) {
 	isHybrid := authSettings.Method == models.AuthenticationInternal && authSettings.OAuthEnabledAlongsideInternal
+	wasOauthSession := false
 	if authSettings.Method == models.AuthenticationInternal || authSettings.Method == models.AuthenticationOAuth2 || isHybrid {
-		sessionmanager.LogoutSession(w, r)
+		wasOauthSession = sessionmanager.LogoutSession(w, r)
 	}
-	if authSettings.Method == models.AuthenticationOAuth2 && !isHybrid {
+	// Force re-consent whenever the session just logged out was itself created by the OAuth
+	// callback (models.Session.IsOauth), in addition to the pre-existing unconditional case for
+	// plain OAuth2 mode. Before this, hybrid mode never forced consent - even for a session the
+	// OAuth callback created - so on a shared workstation, logout did not visibly end the
+	// session: the next /oauth-login used prompt=none and silently reauthenticated.
+	if (authSettings.Method == models.AuthenticationOAuth2 && !isHybrid) || wasOauthSession {
 		http.Redirect(w, r, "login?consent=true", http.StatusTemporaryRedirect)
 	} else {
 		http.Redirect(w, r, "login", http.StatusTemporaryRedirect)

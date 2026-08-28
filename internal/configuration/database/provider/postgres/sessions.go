@@ -14,13 +14,14 @@ type schemaSessions struct {
 	RenewAt    int64
 	ValidUntil int64
 	UserId     int
+	IsOauth    bool
 }
 
 // GetSession returns the session with the given ID or false if not a valid ID
 func (p DatabaseProvider) GetSession(id string) (models.Session, bool) {
 	var rowResult schemaSessions
-	row := p.queryRow("SELECT Id, RenewAt, ValidUntil, UserId FROM Sessions WHERE Id = $1", id)
-	err := row.Scan(&rowResult.Id, &rowResult.RenewAt, &rowResult.ValidUntil, &rowResult.UserId)
+	row := p.queryRow("SELECT Id, RenewAt, ValidUntil, UserId, IsOauth FROM Sessions WHERE Id = $1", id)
+	err := row.Scan(&rowResult.Id, &rowResult.RenewAt, &rowResult.ValidUntil, &rowResult.UserId, &rowResult.IsOauth)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.Session{}, false
@@ -32,6 +33,7 @@ func (p DatabaseProvider) GetSession(id string) (models.Session, bool) {
 		RenewAt:    rowResult.RenewAt,
 		ValidUntil: rowResult.ValidUntil,
 		UserId:     rowResult.UserId,
+		IsOauth:    rowResult.IsOauth,
 	}
 	return result, true
 }
@@ -43,12 +45,13 @@ func (p DatabaseProvider) SaveSession(id string, session models.Session) {
 		RenewAt:    session.RenewAt,
 		ValidUntil: session.ValidUntil,
 		UserId:     session.UserId,
+		IsOauth:    session.IsOauth,
 	}
 
-	_, err := p.exec(`INSERT INTO Sessions (Id, RenewAt, ValidUntil, UserId) VALUES ($1, $2, $3, $4)
+	_, err := p.exec(`INSERT INTO Sessions (Id, RenewAt, ValidUntil, UserId, IsOauth) VALUES ($1, $2, $3, $4, $5)
 					ON CONFLICT (Id) DO UPDATE SET RenewAt = EXCLUDED.RenewAt,
-						ValidUntil = EXCLUDED.ValidUntil, UserId = EXCLUDED.UserId`,
-		newData.Id, newData.RenewAt, newData.ValidUntil, newData.UserId)
+						ValidUntil = EXCLUDED.ValidUntil, UserId = EXCLUDED.UserId, IsOauth = EXCLUDED.IsOauth`,
+		newData.Id, newData.RenewAt, newData.ValidUntil, newData.UserId, newData.IsOauth)
 	helper.Check(err)
 }
 

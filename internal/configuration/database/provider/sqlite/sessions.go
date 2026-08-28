@@ -14,13 +14,14 @@ type schemaSessions struct {
 	RenewAt    int64
 	ValidUntil int64
 	UserId     int
+	IsOauth    int
 }
 
 // GetSession returns the session with the given ID or false if not a valid ID
 func (p DatabaseProvider) GetSession(id string) (models.Session, bool) {
 	var rowResult schemaSessions
 	row := p.sqliteDb.QueryRow("SELECT * FROM Sessions WHERE Id = ?", id)
-	err := row.Scan(&rowResult.Id, &rowResult.RenewAt, &rowResult.ValidUntil, &rowResult.UserId)
+	err := row.Scan(&rowResult.Id, &rowResult.RenewAt, &rowResult.ValidUntil, &rowResult.UserId, &rowResult.IsOauth)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.Session{}, false
@@ -32,21 +33,27 @@ func (p DatabaseProvider) GetSession(id string) (models.Session, bool) {
 		RenewAt:    rowResult.RenewAt,
 		ValidUntil: rowResult.ValidUntil,
 		UserId:     rowResult.UserId,
+		IsOauth:    rowResult.IsOauth == 1,
 	}
 	return result, true
 }
 
 // SaveSession stores the given session. After the expiry passed, it will be deleted automatically
 func (p DatabaseProvider) SaveSession(id string, session models.Session) {
+	isOauth := 0
+	if session.IsOauth {
+		isOauth = 1
+	}
 	newData := schemaSessions{
 		Id:         id,
 		RenewAt:    session.RenewAt,
 		ValidUntil: session.ValidUntil,
 		UserId:     session.UserId,
+		IsOauth:    isOauth,
 	}
 
-	_, err := p.sqliteDb.Exec("INSERT OR REPLACE INTO Sessions (Id, RenewAt, ValidUntil, UserId) VALUES (?, ?, ?, ?)",
-		newData.Id, newData.RenewAt, newData.ValidUntil, newData.UserId)
+	_, err := p.sqliteDb.Exec("INSERT OR REPLACE INTO Sessions (Id, RenewAt, ValidUntil, UserId, IsOauth) VALUES (?, ?, ?, ?, ?)",
+		newData.Id, newData.RenewAt, newData.ValidUntil, newData.UserId, newData.IsOauth)
 	helper.Check(err)
 }
 

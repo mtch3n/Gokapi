@@ -249,12 +249,12 @@ func TestGetOrCreateUserAllowList(t *testing.T) {
 
 	database.SaveUser(models.User{Name: "blankprovider@test.com", UserLevel: models.UserLevelUser, AuthProvider: ""}, true)
 	_, ok, err := getOrCreateUser("blankprovider@test.com", models.AuthProviderGoogle, "sub-blank")
-	test.IsNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, errTakeoverRejected), true)
 	test.IsEqualBool(t, ok, false)
 
 	database.SaveUser(models.User{Name: "internalprovider@test.com", UserLevel: models.UserLevelSuperAdmin, AuthProvider: models.AuthProviderInternal}, true)
 	_, ok, err = getOrCreateUser("internalprovider@test.com", models.AuthProviderGoogle, "sub-internal")
-	test.IsNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, errTakeoverRejected), true)
 	test.IsEqualBool(t, ok, false)
 
 	database.SaveUser(models.User{Name: "googleprovider@test.com", UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderGoogle}, true)
@@ -277,7 +277,7 @@ func TestGetOrCreateUserAllowList(t *testing.T) {
 	// Rejected: same email, a DIFFERENT subject now presented - e.g. a corporate mailbox
 	// reassigned to someone else in Google - must not inherit the previous owner's account.
 	_, ok, err = getOrCreateUser("googleprovider@test.com", models.AuthProviderGoogle, "sub-different")
-	test.IsNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, errTakeoverRejected), true)
 	test.IsEqualBool(t, ok, false)
 
 	// Auto-provisioning of a brand-new email must be refused once OnlyRegisteredUsers is true.
@@ -390,6 +390,52 @@ func TestLogout(t *testing.T) {
 	_, ok = sessionmanager.IsValidSession(w, r, false, 0)
 	test.IsEqualBool(t, ok, false)
 	test.ResponseIsRedirect(t, w, "login?consent=true", false)
+}
+
+// TestLogoutHybridForcesConsentForOauthSession reproduces the hybrid-mode logout bug: consent
+// was only forced when Method == AuthenticationOAuth2 && !isHybrid, so hybrid mode never forced
+// it - not even for a session the OAuth callback itself created. On a shared workstation, logout
+// therefore did not visibly end the session: the next /oauth-login used prompt=none and silently
+// reauthenticated. A hybrid session that was NOT created by OAuth must still log out plainly.
+func TestLogoutHybridForcesConsentForOauthSession(t *testing.T) {
+	modelHybrid := models.AuthenticationConfig{
+		Method:                        models.AuthenticationInternal,
+		SaltAdmin:                     testconfiguration.SaltAdmin,
+		SaltFiles:                     "1234",
+		Username:                      "test",
+		OAuthEnabledAlongsideInternal: true,
+		OAuthProvider:                 "test",
+		OAuthClientId:                 "test",
+		OAuthClientSecret:             "test",
+		OAuthRecheckInterval:          1,
+	}
+	Init(modelHybrid)
+
+	database.SaveSession("hybridOauthSession", models.Session{
+		RenewAt:    2147483645,
+		ValidUntil: 2147483646,
+		UserId:     7,
+		IsOauth:    true,
+	})
+	w, r, _, _ := getRecorder([]test.Cookie{{
+		Name:  "session_token",
+		Value: "hybridOauthSession"},
+	})
+	Logout(w, r)
+	test.ResponseIsRedirect(t, w, "login?consent=true", false)
+
+	database.SaveSession("hybridPasswordSession", models.Session{
+		RenewAt:    2147483645,
+		ValidUntil: 2147483646,
+		UserId:     7,
+		IsOauth:    false,
+	})
+	w, r, _, _ = getRecorder([]test.Cookie{{
+		Name:  "session_token",
+		Value: "hybridPasswordSession"},
+	})
+	Logout(w, r)
+	test.ResponseIsRedirect(t, w, "login", false)
 }
 
 type testInfo struct {
