@@ -14,4 +14,5 @@ type UploadParameters struct {
 	Password            string
 	ExternalUrl         string
 	FileRequestId       string
+	BundleId            string
 }

@@ -303,6 +303,7 @@ func createNewMetaData(hash string, fileHeader chunking.FileHeader, userId int, 
 		PasswordHash:       configuration.HashPassword(params.Password, false, ""),
 		UserId:             userId,
 		UploadRequestId:    params.FileRequestId,
+		BundleId:           params.BundleId,
 	}
 	if params.IsEndToEndEncrypted {
 		file.Encryption = models.EncryptionInfo{IsEndToEndEncrypted: true, IsEncrypted: true}
@@ -881,6 +882,7 @@ func CleanUp(periodic bool) {
 	purgeHotlinksIfDisabled()
 	cleanInvalidApiKeys()
 	cleanInvalidFileRequests()
+	cleanInvalidBundles()
 	database.RunGarbageCollection()
 
 	if periodic {
@@ -937,6 +939,26 @@ func cleanInvalidFileRequests() {
 			database.DeleteFileRequest(fileRequest)
 		}
 
+	}
+}
+
+// cleanInvalidBundles removes bundles that have zero non-pending members and are older than 24 hours
+func cleanInvalidBundles() {
+	for _, bundle := range database.GetAllFileBundles() {
+		if !bundle.IsExpired() {
+			continue
+		}
+		files := database.GetAllMetadata()
+		hasValidMember := false
+		for _, file := range files {
+			if file.BundleId == bundle.Id && !file.IsPendingForDeletion() {
+				hasValidMember = true
+				break
+			}
+		}
+		if !hasValidMember {
+			database.DeleteFileBundle(bundle)
+		}
 	}
 }
 

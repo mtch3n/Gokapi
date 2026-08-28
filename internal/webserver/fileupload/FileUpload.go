@@ -151,7 +151,7 @@ var ErrE2ENotConfigured = errors.New("end-to-end encryption is not enabled on th
 // CreateUploadConfig populates a new models.UploadParameters struct.
 // It returns ErrE2ENotConfigured if isEnd2End is set while the server's
 // encryption level is not encryption.EndToEndEncryption.
-func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string) (models.UploadParameters, error) {
+func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string, bundleId string) (models.UploadParameters, error) {
 	settings := configuration.Get()
 	if isEnd2End && settings.Encryption.Level != encryption.EndToEndEncryption {
 		return models.UploadParameters{}, ErrE2ENotConfigured
@@ -169,6 +169,7 @@ func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlim
 		IsEndToEndEncrypted: isEnd2End,
 		RealSize:            realSize,
 		FileRequestId:       fileRequestId,
+		BundleId:            bundleId,
 	}, nil
 }
 
@@ -176,7 +177,7 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	fileRequestId := values.Get("fileRequestId")
 	if fileRequestId != "" {
 		return CreateUploadConfig(0, 0, "",
-			true, true, false, 0, fileRequestId)
+			true, true, false, 0, fileRequestId, "")
 	}
 	allowedDownloads := values.Get("allowedDownloads")
 	expiryDays := values.Get("expiryDays")
@@ -210,7 +211,7 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 			return models.UploadParameters{}, err
 		}
 	}
-	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, password, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "")
+	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, password, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "", "")
 }
 
 type formOrHeader interface {

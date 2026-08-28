@@ -621,6 +621,17 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 	if !ok {
 		panic("invalid parameter passed")
 	}
+	if request.BundleId != "" {
+		bundle, exists := database.GetFileBundle(request.BundleId)
+		if !exists {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "bundle not found")
+			return
+		}
+		if bundle.UserId != user.Id {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "bundle does not belong to user")
+			return
+		}
+	}
 	uploadParams, err := fileupload.CreateUploadConfig(request.AllowedDownloads,
 		request.ExpiryDays,
 		request.Password,
@@ -628,7 +639,8 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 		request.UnlimitedDownloads,
 		request.IsE2E,
 		request.FileSize,
-		"")
+		"",
+		request.BundleId)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
 		return
@@ -691,7 +703,7 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 	}
 	uploadParams, err := fileupload.CreateUploadConfig(0,
 		0, "", true, true,
-		false, request.FileSize, fileRequest.Id)
+		false, request.FileSize, fileRequest.Id, "")
 	if err != nil {
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
 		return
@@ -920,6 +932,7 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 		request.UnlimitedDownloads,
 		false, // is not being used by storage.DuplicateFile
 		0,     // is not being used by storage.DuplicateFile
+		"",
 		"")
 	if err != nil {
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())

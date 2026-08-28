@@ -719,6 +719,7 @@ type paramChunkComplete struct {
 	AllowedDownloads   int    `header:"allowedDownloads"`
 	ExpiryDays         int    `header:"expiryDays"`
 	Password           string `header:"password"`
+	BundleId           string `header:"bundleid"`
 	IsE2E              bool   `header:"isE2E" unpublished:"true"` // not published in API documentation
 	IsNonBlocking      bool   `header:"nonblocking"`
 	UnlimitedDownloads bool

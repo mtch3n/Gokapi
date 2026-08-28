@@ -510,6 +510,15 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "bundleid",
+            "in": "header",
+            "description": "The bundle ID to add this file to. If empty, the file will not be added to any bundle.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {

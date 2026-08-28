@@ -1063,6 +1063,16 @@ func (p *paramChunkComplete) ParseRequest(r *http.Request) error {
 		p.Password = r.Header.Get("password")
 	}
 
+	// RequestParser header value "bundleid", required: false
+	exists, err = checkHeaderExists(r, "bundleid", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["bundleid"] = exists
+	if exists {
+		p.BundleId = r.Header.Get("bundleid")
+	}
+
 	// RequestParser header value "isE2E", required: false
 	exists, err = checkHeaderExists(r, "isE2E", false, false)
 	if err != nil {
