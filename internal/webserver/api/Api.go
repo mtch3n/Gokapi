@@ -1456,7 +1456,11 @@ func apiURequestSave(w http.ResponseWriter, r requestParser, user models.User, _
 	} else {
 		logging.LogEditFileRequest(uploadRequest, user)
 	}
-	result, err := json.Marshal(uploadRequest)
+	response := map[string]interface{}{
+		"Result":      "OK",
+		"FileRequest": uploadRequest,
+	}
+	result, err := json.Marshal(response)
 	helper.Check(err)
 	_, _ = w.Write(result)
 }
