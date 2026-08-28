@@ -123,6 +123,7 @@ func Start() {
 	mux.HandleFunc("/logs", requireLogin(showLogs, true, false))
 	mux.HandleFunc("/logout", doLogout)
 	mux.HandleFunc("/publicUpload", showPublicUpload)
+	mux.HandleFunc("/pubapi/config", pubApiConfig)
 	mux.HandleFunc("/pubapi/file", pubApiFileMetadata)
 	mux.HandleFunc("/pubapi/filepassword", pubApiFilePassword)
 	mux.HandleFunc("/pubapi/folder", pubApiFolder)
@@ -1702,6 +1703,51 @@ func writeFolderPwCookie(w http.ResponseWriter, bundle models.FileBundle) {
 		SameSite: http.SameSiteStrictMode,
 		Path:     "/",
 	})
+}
+
+// Handling of /pubapi/config
+// Public, unauthenticated endpoint that returns non-sensitive configuration values as JSON.
+// Used by standalone client SPAs to determine server behavior and capabilities.
+func pubApiConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+
+	config := configuration.Get()
+	env := configuration.GetEnvironment()
+
+	// Determine auth methods
+	isInternal := config.Authentication.Method == models.AuthenticationInternal
+	isOAuth := config.Authentication.Method == models.AuthenticationOAuth2
+
+	// Determine if hotlinks are enabled globally
+	// Hotlinks are disabled if: DisableHotlinks flag is set OR encryption is full server-side
+	hotlinksEnabled := !env.DisableHotlinks &&
+		config.Encryption.Level != encryption.FullEncryptionStored &&
+		config.Encryption.Level != encryption.FullEncryptionInput
+
+	response := map[string]interface{}{
+		"publicName": config.PublicName,
+		"auth": map[string]interface{}{
+			"internal":       isInternal,
+			"oauth":          isOAuth,
+			"oauthProvider":  "", // Not exposed at this time
+		},
+		"features": map[string]interface{}{
+			"folders":         true,
+			"fileRequests":    true,
+			"e2eEncryption":   config.Encryption.Level == encryption.EndToEndEncryption,
+			"hotlinks":        hotlinksEnabled,
+		},
+		"limits": map[string]interface{}{
+			"maxFileSizeMB":      config.MaxFileSizeMB,
+			"chunkSizeMB":        config.ChunkSize,
+			"maxParallelUploads": config.MaxParallelUploads,
+			"minPasswordLength":  env.MinLengthPassword,
+		},
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // respondAuditWriteFailed refuses a request whose audit record could not be committed to

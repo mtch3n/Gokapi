@@ -1152,3 +1152,136 @@ func TestPublicApiFolderNotFound(t *testing.T) {
 		t.Errorf("Expected error 'not found', got %v", error)
 	}
 }
+
+// TestPublicApiConfig tests GET /pubapi/config for non-sensitive configuration values
+func TestPublicApiConfig(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/config")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	// Verify the response contains the expected top-level fields
+	if _, ok := response["publicName"]; !ok {
+		t.Errorf("Missing publicName field")
+	}
+
+	// Verify auth section exists with boolean fields
+	if auth, ok := response["auth"].(map[string]interface{}); !ok {
+		t.Errorf("Missing or invalid auth field")
+	} else {
+		if _, ok := auth["internal"]; !ok {
+			t.Errorf("Missing internal field in auth")
+		}
+		if _, ok := auth["oauth"]; !ok {
+			t.Errorf("Missing oauth field in auth")
+		}
+		if _, ok := auth["oauthProvider"]; !ok {
+			t.Errorf("Missing oauthProvider field in auth")
+		}
+	}
+
+	// Verify features section exists with boolean fields
+	if features, ok := response["features"].(map[string]interface{}); !ok {
+		t.Errorf("Missing or invalid features field")
+	} else {
+		if _, ok := features["folders"]; !ok {
+			t.Errorf("Missing folders field in features")
+		}
+		if _, ok := features["fileRequests"]; !ok {
+			t.Errorf("Missing fileRequests field in features")
+		}
+		if _, ok := features["e2eEncryption"]; !ok {
+			t.Errorf("Missing e2eEncryption field in features")
+		}
+		if _, ok := features["hotlinks"]; !ok {
+			t.Errorf("Missing hotlinks field in features")
+		}
+	}
+
+	// Verify limits section exists with numeric fields
+	if limits, ok := response["limits"].(map[string]interface{}); !ok {
+		t.Errorf("Missing or invalid limits field")
+	} else {
+		if _, ok := limits["maxFileSizeMB"]; !ok {
+			t.Errorf("Missing maxFileSizeMB field in limits")
+		}
+		if _, ok := limits["chunkSizeMB"]; !ok {
+			t.Errorf("Missing chunkSizeMB field in limits")
+		}
+		if _, ok := limits["maxParallelUploads"]; !ok {
+			t.Errorf("Missing maxParallelUploads field in limits")
+		}
+		if _, ok := limits["minPasswordLength"]; !ok {
+			t.Errorf("Missing minPasswordLength field in limits")
+		}
+	}
+}
+
+// TestPublicApiConfigNoSensitiveFields verifies that sensitive configuration is not exposed
+func TestPublicApiConfigNoSensitiveFields(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/config")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+		return
+	}
+
+	// Convert to JSON string to check it
+	respBytes, err := json.Marshal(response)
+	if err != nil {
+		t.Errorf("Failed to marshal response: %v", err)
+		return
+	}
+	respStr := strings.ToLower(string(respBytes))
+
+	// Check for sensitive terms that should NOT be in the response
+	sensitiveTerms := []string{"clientid", "secret", "bucket"}
+	for _, term := range sensitiveTerms {
+		if strings.Contains(respStr, term) {
+			t.Errorf("Response should not contain sensitive term: %s", term)
+		}
+	}
+}
+
+// TestPublicApiConfigUnauthenticated verifies that the endpoint does not require authentication
+func TestPublicApiConfigUnauthenticated(t *testing.T) {
+	t.Parallel()
+	// Create client without any authentication
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/config")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Should succeed without authentication
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 for unauthenticated request, got %d", resp.StatusCode)
+	}
+}
