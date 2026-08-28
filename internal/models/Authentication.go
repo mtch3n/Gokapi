@@ -17,6 +17,14 @@ type AuthenticationConfig struct {
 	OAuthGroups                   []string `json:"OAuthGroups"`
 	OnlyRegisteredUsers           bool     `json:"OnlyRegisteredUsers"`
 	OAuthEnabledAlongsideInternal bool     `json:"OAuthEnabledAlongsideInternal"`
+	// AllowHybridSelfRegistration is a dangerous, deliberately-not-always-serialized opt-in
+	// (note the omitempty) that lets an operator override the normally-forced
+	// OnlyRegisteredUsers=true in hybrid mode (internal auth with OAuth enabled alongside it).
+	// Setting this to true means ANY account from the configured OAuth provider can
+	// self-provision a user in this Gokapi instance. Only enable this if that is genuinely
+	// intended, for example when OAuthGroups or a provider-side allow-list already restricts who
+	// can authenticate.
+	AllowHybridSelfRegistration bool `json:"AllowHybridSelfRegistration,omitempty"`
 }
 
 const (

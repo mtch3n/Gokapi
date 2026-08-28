@@ -62,45 +62,27 @@ func loadFromFile(path string) (models.Configuration, error) {
 			fmt.Println("Warning: Salt for admin password invalid, generating new salt. You will need to reset the admin password.")
 		}
 	}
-	normalizeOnlyRegisteredUsers(&settings, raw)
+	normalizeOnlyRegisteredUsers(&settings)
 	return settings, nil
 }
 
-// normalizeOnlyRegisteredUsers forces OnlyRegisteredUsers to true when hybrid auth (internal
-// method with OAuth enabled alongside it) is on and the config file on disk does not explicitly
-// set the field. The setup wizard already defaults this correctly (see
-// setup.parseAuthentication), but hybrid mode can currently only be turned on by hand-editing
-// config.json, which never goes through the wizard - so a hand-written config with hybrid enabled
-// and no OnlyRegisteredUsers key would otherwise silently default to false and let any Google
-// account on the internet auto-provision a user.
-func normalizeOnlyRegisteredUsers(settings *models.Configuration, raw []byte) {
+// normalizeOnlyRegisteredUsers unconditionally forces OnlyRegisteredUsers to true whenever hybrid
+// auth (internal method with OAuth enabled alongside it) is on. The setup wizard already defaults
+// this the same way (see setup.parseAuthentication), but hybrid mode can currently only be turned
+// on by hand-editing config.json, which never goes through the wizard. Every config.json Gokapi
+// has ever written already contains an explicit "OnlyRegisteredUsers" key (models.Configuration
+// has no omitempty on that field), so a "was the key present" check can never distinguish a
+// hand-edited hybrid config from a normal one - it must always be forced instead. An operator who
+// truly wants self-registration for any Google account must use a distinct, deliberately
+// dangerous opt-in (see AllowHybridSelfRegistration).
+func normalizeOnlyRegisteredUsers(settings *models.Configuration) {
 	if settings.Authentication.Method != models.AuthenticationInternal || !settings.Authentication.OAuthEnabledAlongsideInternal {
 		return
 	}
-	if isOnlyRegisteredUsersExplicit(raw) {
+	if settings.Authentication.AllowHybridSelfRegistration {
 		return
 	}
 	settings.Authentication.OnlyRegisteredUsers = true
-}
-
-// isOnlyRegisteredUsersExplicit returns true if the raw config JSON explicitly sets
-// Authentication.OnlyRegisteredUsers, as opposed to the field being absent and merely taking its
-// Go zero value after unmarshalling.
-func isOnlyRegisteredUsersExplicit(raw []byte) bool {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &top); err != nil {
-		return false
-	}
-	authRaw, ok := top["Authentication"]
-	if !ok {
-		return false
-	}
-	var auth map[string]json.RawMessage
-	if err := json.Unmarshal(authRaw, &auth); err != nil {
-		return false
-	}
-	_, ok = auth["OnlyRegisteredUsers"]
-	return ok
 }
 
 // Load loads the configuration or creates the folder structure and a default configuration

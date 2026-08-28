@@ -42,16 +42,47 @@ func TestLoad(t *testing.T) {
 	Load()
 }
 
-// TestLoadNormalizesOnlyRegisteredUsersForHybrid verifies MAJOR W17-2b: hybrid auth can currently
-// only be turned on by hand-editing config.json, which never goes through the setup wizard's
-// defaulting logic. Before this fix, a hand-written config with OAuthEnabledAlongsideInternal
-// true and no OnlyRegisteredUsers key at all loaded with OnlyRegisteredUsers left at its Go zero
-// value (false), silently letting any Google account on the internet auto-provision a user.
+// hybridFixtureConfig returns a models.Configuration whose shape matches exactly what save()
+// writes to disk in production: the whole struct marshalled with json.MarshalIndent, the same
+// call ToJson() makes. Crucially this means the returned JSON always contains an explicit
+// "OnlyRegisteredUsers" key, because models.AuthenticationConfig.OnlyRegisteredUsers has no
+// omitempty tag - there is no such thing as a real config.json missing that key. Tests must build
+// fixtures this way instead of hand-writing JSON in a shape no deployment has ever produced.
+func hybridFixtureConfig() models.Configuration {
+	return models.Configuration{
+		Authentication: models.AuthenticationConfig{
+			Method:                        models.AuthenticationInternal,
+			SaltAdmin:                     "12345678901234567890123",
+			SaltFiles:                     "12345678901234567890123",
+			Username:                      "admin",
+			OAuthEnabledAlongsideInternal: true,
+			OAuthProvider:                 "https://example.com",
+			OAuthClientId:                 "id",
+			OAuthClientSecret:             "secret",
+			OAuthRecheckInterval:          1,
+		},
+		ConfigVersion: configupgrade.CurrentConfigVersion,
+		DataDir:       "test",
+		DatabaseUrl:   "sqlite://./test/gokapi.sqlite",
+	}
+}
+
+// TestLoadNormalizesOnlyRegisteredUsersForHybrid verifies BLOCKER W17-3-1: real config.json files
+// always carry an explicit "OnlyRegisteredUsers" key (see hybridFixtureConfig), so a check for
+// "was the key present" can never distinguish a hand-edited hybrid config from an ordinary one.
+// The forcing must be unconditional on Method+OAuthEnabledAlongsideInternal, not gated on key
+// presence. Before this fix, a fixture built from the real save() shape - which always writes
+// "OnlyRegisteredUsers":false when the field is unset - loaded with OnlyRegisteredUsers still
+// false, silently letting any Google account on the internet auto-provision a user.
 func TestLoadNormalizesOnlyRegisteredUsersForHybrid(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.json"
-	raw := `{"Authentication":{"Method":0,"OAuthEnabledAlongsideInternal":true,"OauthProvider":"https://example.com","OAuthClientId":"id","OAuthClientSecret":"secret","OAuthRecheckInterval":1,"Username":"admin","SaltAdmin":"12345678901234567890123","SaltFiles":"12345678901234567890123"}}`
-	err := os.WriteFile(path, []byte(raw), 0600)
+	cfg := hybridFixtureConfig()
+	// OnlyRegisteredUsers is left at its Go zero value (false), exactly like an operator who
+	// hand-edited only OAuthEnabledAlongsideInternal into an existing, previously-saved config.
+	raw := cfg.ToJson()
+	test.IsEqualBool(t, strings.Contains(string(raw), `"OnlyRegisteredUsers": false`), true)
+	err := os.WriteFile(path, raw, 0600)
 	test.IsNil(t, err)
 
 	settings, err := loadFromFile(path)
@@ -59,29 +90,35 @@ func TestLoadNormalizesOnlyRegisteredUsersForHybrid(t *testing.T) {
 	test.IsEqualBool(t, settings.Authentication.OnlyRegisteredUsers, true)
 }
 
-// TestLoadRespectsExplicitOnlyRegisteredUsersForHybrid verifies the normalization added for
-// W17-2b only fills in an absent key - an operator who explicitly wrote
-// "OnlyRegisteredUsers": false into a hybrid config is not overridden.
-func TestLoadRespectsExplicitOnlyRegisteredUsersForHybrid(t *testing.T) {
+// TestLoadHybridSelfRegistrationOptIn verifies the replacement escape hatch: because forcing is
+// now unconditional, an operator who genuinely wants hybrid self-registration must set the
+// distinct, dangerous AllowHybridSelfRegistration key (which is omitempty, so it is never present
+// by accident). With that opt-in set, OnlyRegisteredUsers is left as the operator wrote it.
+func TestLoadHybridSelfRegistrationOptIn(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.json"
-	raw := `{"Authentication":{"Method":0,"OAuthEnabledAlongsideInternal":true,"OnlyRegisteredUsers":false,"OauthProvider":"https://example.com","OAuthClientId":"id","OAuthClientSecret":"secret","OAuthRecheckInterval":1,"Username":"admin","SaltAdmin":"12345678901234567890123","SaltFiles":"12345678901234567890123"}}`
-	err := os.WriteFile(path, []byte(raw), 0600)
+	cfg := hybridFixtureConfig()
+	cfg.Authentication.AllowHybridSelfRegistration = true
+	raw := cfg.ToJson()
+	err := os.WriteFile(path, raw, 0600)
 	test.IsNil(t, err)
 
 	settings, err := loadFromFile(path)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, settings.Authentication.OnlyRegisteredUsers, false)
+	test.IsEqualBool(t, settings.Authentication.AllowHybridSelfRegistration, true)
 }
 
 // TestLoadDoesNotNormalizeNonHybrid verifies the normalization is scoped to hybrid auth only: a
-// plain internal-auth config with no OnlyRegisteredUsers key must keep the field at its ordinary
-// zero value.
+// plain internal-auth config built from the real save() shape, with OAuth not enabled alongside
+// it, must keep OnlyRegisteredUsers at its ordinary zero value.
 func TestLoadDoesNotNormalizeNonHybrid(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.json"
-	raw := `{"Authentication":{"Method":0,"Username":"admin","SaltAdmin":"12345678901234567890123","SaltFiles":"12345678901234567890123"}}`
-	err := os.WriteFile(path, []byte(raw), 0600)
+	cfg := hybridFixtureConfig()
+	cfg.Authentication.OAuthEnabledAlongsideInternal = false
+	raw := cfg.ToJson()
+	err := os.WriteFile(path, raw, 0600)
 	test.IsNil(t, err)
 
 	settings, err := loadFromFile(path)
