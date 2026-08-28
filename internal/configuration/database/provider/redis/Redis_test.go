@@ -499,6 +499,34 @@ func TestSession(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 }
 
+// TestUpgradeV10DeletesLegacySessionsMissingIsOauth exercises the v10 ladder step directly by
+// calling Upgrade(9), not Upgrade(19) like TestDatabaseProvider_Upgrade does. Upgrade(19) is
+// above every guard in the ladder, so it does not actually run any step - it only proves Upgrade
+// does not panic. This test simulates a session hash written before models.Session.IsOauth
+// existed, which has no is_oauth field at all, and confirms that Upgrade(9) wipes it rather than
+// leaving it to be read back with IsOauth false by redigo.ScanStruct.
+func TestUpgradeV10DeletesLegacySessionsMissingIsOauth(t *testing.T) {
+	instance, err := New(config)
+	test.IsNil(t, err)
+	dbInstance = instance
+
+	renewAt := time.Now().Add(1 * time.Hour).Unix()
+	validUntil := time.Now().Add(2 * time.Hour).Unix()
+	dbInstance.setHashMap(dbInstance.buildArgs(prefixSessions+"legacy").
+		Add("renew_at", renewAt).
+		Add("valid_until", validUntil).
+		Add("user_id", 7))
+
+	legacySession, ok := dbInstance.GetSession("legacy")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, legacySession.IsOauth, false)
+
+	dbInstance.Upgrade(9)
+
+	_, ok = dbInstance.GetSession("legacy")
+	test.IsEqualBool(t, ok, false)
+}
+
 func TestMetaData(t *testing.T) {
 	files := dbInstance.GetAllMetadata()
 	test.IsEqualInt(t, len(files), 0)

@@ -21,7 +21,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 9
+const DatabaseSchemeVersion = 10
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -176,6 +176,19 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 				p.SaveUser(user, false)
 			}
 		}
+	}
+	// < v2.4.1
+	// Persists which auth method created a session, so a renewal recreates the same kind of
+	// session (see sessionmanager.useSession) instead of inferring it from the current global
+	// auth method - which is wrong in hybrid mode. Redis has no ADD COLUMN with a DEFAULT: a
+	// session hash written before IsOauth existed simply lacks that field, and
+	// redigo.ScanStruct returns the zero value (false) for it. Without wiping sessions here, a
+	// pre-v10 OAuth session would silently renew as a password session from now on, skipping the
+	// OAuthRecheckInterval that is supposed to re-verify its group membership on every renewal.
+	// The last DeleteAllSessions in this ladder was at v8, so any session created between v8 and
+	// v10 would otherwise straddle this schema change with no valid IsOauth value.
+	if currentDbVersion < 10 {
+		p.DeleteAllSessions()
 	}
 }
 
