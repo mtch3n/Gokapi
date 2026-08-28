@@ -83,6 +83,36 @@ func TestAddDownload(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(string(content), "2.2.2.2"), false)
 }
 
+// TestLogUserCreationIncludesAuthProvider verifies MINOR-3: the audit detail for user.created
+// must include AuthProvider, so that provisioning a user for OAuth/OIDC (e.g. authprovider:
+// google via user/create) is distinguishable in the audit log from an ordinary internal-auth user
+// creation. Before this fix, the detail only carried the target user's name and id, so an
+// attacker@gmail.com provisioned with authprovider google looked identical in the log to any
+// other new user.
+func TestLogUserCreationIncludesAuthProvider(t *testing.T) {
+	dir := t.TempDir()
+	Init(dir)
+
+	googleUser := models.User{Id: 42, Name: "attacker@gmail.com", AuthProvider: models.AuthProviderGoogle}
+	editor := models.User{Id: 1, Name: "admin"}
+	LogUserCreation(googleUser, editor)
+
+	// appendAuditEntryAsync writes on a goroutine; give it time to land.
+	time.Sleep(500 * time.Millisecond)
+
+	entries, _ := GetAuditEntriesSince(0, 100)
+	found := false
+	for _, entry := range entries {
+		if entry.Action != "user.created" {
+			continue
+		}
+		found = true
+		test.IsEqualBool(t, strings.Contains(entry.Detail, "attacker@gmail.com"), true)
+		test.IsEqualBool(t, strings.Contains(entry.Detail, models.AuthProviderGoogle), true)
+	}
+	test.IsEqualBool(t, found, true)
+}
+
 func TestLogDownloadDenied(t *testing.T) {
 	Init("test")
 	file := models.File{Id: "deniedTestId", Name: "deniedTestName"}

@@ -83,6 +83,17 @@ func Migrate(configOld, configNew models.DbConnection) {
 	}
 	users := dbOld.GetAllUsers()
 	for _, user := range users {
+		// A source below schema v9/v17 (e.g. an old Redis instance) can yield users with an empty
+		// AuthProvider, since GetNew below only calls New() and never runs the destination's
+		// Upgrade(), so the v9/v17 AuthProvider backfill never runs on the copied rows. SaveUser's
+		// explicit column list bypasses the SQL DEFAULT, so an empty AuthProvider would be written
+		// as '' rather than 'internal', and since AuthProvider is now checked as an allow-list on
+		// both the OAuth and header-auth login doors, an empty provider is accepted by neither -
+		// locking out every migrated user, including the super admin, with no recovery path.
+		// Normalize here so migration can never produce an unusable AuthProvider.
+		if user.AuthProvider == "" {
+			user.AuthProvider = models.AuthProviderInternal
+		}
 		dbNew.SaveUser(user, false)
 		dbNew.SaveEnd2EndInfo(dbOld.GetEnd2EndInfo(user.Id), user.Id)
 	}

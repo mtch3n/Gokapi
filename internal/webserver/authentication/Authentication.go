@@ -312,6 +312,14 @@ func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool,
 				// corporate mailbox - must not inherit the previous owner's account.
 				return models.User{}, false, errTakeoverRejected
 			}
+		} else if user.AuthProvider != provider {
+			// The reverse of the OAuth allow-list above: this is the header-auth door
+			// (provider == models.AuthProviderInternal, the only other caller of
+			// getOrCreateUser). A row deliberately provisioned for Google (e.g. via the
+			// authprovider header on user/create) must not authenticate through the reverse
+			// proxy header door just because the header presents a matching username - the
+			// header door is not an OIDC subject check, so nothing else here would catch it.
+			return models.User{}, false, errTakeoverRejected
 		}
 		return user, true, nil
 	}
@@ -383,7 +391,7 @@ func isValidOauthUser(userInfo OAuthUserInfo, groups []string) bool {
 
 // isGrantedSession returns true if the user holds a valid internal session cookie
 func isGrantedSession(w http.ResponseWriter, r *http.Request) (models.User, bool) {
-	return sessionmanager.IsValidSession(w, r, authSettings.Method == models.AuthenticationOAuth2, authSettings.OAuthRecheckInterval)
+	return sessionmanager.IsValidSession(w, r, authSettings.OAuthRecheckInterval)
 }
 
 // IsCorrectUsernameAndPassword checks if a provided username and password is correct

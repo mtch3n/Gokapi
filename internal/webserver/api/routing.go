@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
@@ -571,13 +572,29 @@ type paramUserCreate struct {
 // admin can deliberately provision an OIDC user through the API: user/create must not silently
 // accept an arbitrary string here, since AuthProvider gates both the password and OIDC login
 // paths (see authentication.IsCorrectUsernameAndPassword and authentication.getOrCreateUser).
+//
+// The google provider is additionally rejected unless OAuth is actually configured (hybrid mode
+// enabled, or Method is OAuth2). Without this, an admin (or a script run before OAuth is set up,
+// or left over after OAuth is disabled again) could create a row that can log in through neither
+// door - and that row becomes a live, silently self-registering SSO account the moment an admin
+// enables hybrid mode later, since it already carries AuthProvider "google" and there is no
+// review step in between.
 func (p *paramUserCreate) ProcessParameter(_ *http.Request) error {
 	if p.authProviderRaw == "" {
 		p.AuthProvider = models.AuthProviderInternal
 		return nil
 	}
 	switch p.authProviderRaw {
-	case models.AuthProviderInternal, models.AuthProviderGoogle:
+	case models.AuthProviderInternal:
+		p.AuthProvider = p.authProviderRaw
+		return nil
+	case models.AuthProviderGoogle:
+		authConfig := configuration.Get().Authentication
+		isOauthConfigured := authConfig.Method == models.AuthenticationOAuth2 ||
+			(authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal)
+		if !isOauthConfigured {
+			return errors.New("authprovider google requires OAuth to be configured")
+		}
 		p.AuthProvider = p.authProviderRaw
 		return nil
 	default:

@@ -426,6 +426,37 @@ func TestAuditChainBatchedWriteAllOrNothingOnFailure(t *testing.T) {
 	}
 }
 
+// TestAuditTruncateFailureFailsClosed verifies MINOR-8: if undoing a partial write by truncating
+// the audit log back to its pre-batch size itself fails, the chain must be marked unusable so no
+// further entries can be appended - failing closed - rather than silently leaving a complete,
+// validly hash-chained line on disk for a batch that appendAuditEntries is about to report as an
+// error, while auditNextSeq/auditPrevHash are never advanced for it (the caller returns before
+// reaching the lines that do so). Without this, the next successful append would reuse that same
+// Seq and PrevHash, and every entry appended after it would compute a hash chain that no longer
+// matches what is actually on disk - every later read reporting the whole tail as tampered, with
+// no operator signal and no way to recover.
+//
+// An already-closed *os.File is used to make Truncate fail deterministically (os rejects any
+// operation on a closed file with ErrClosed), rather than depending on OS-specific disk-full or
+// quota behaviour to make both the write and the subsequent truncate fail together.
+func TestAuditTruncateFailureFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+	defer func() { auditChainUnusable = false }()
+	test.IsEqualBool(t, auditChainUnusable, false)
+
+	f, err := os.CreateTemp(dir, "already-closed")
+	test.IsNil(t, err)
+	test.IsNil(t, f.Close())
+
+	failCloseIfTruncateFails(f, 0)
+	test.IsEqualBool(t, auditChainUnusable, true)
+
+	// The chain must now refuse to accept further entries until a human resolves it.
+	err = appendAuditEntry(AuditEntry{Category: categoryEdit, Action: "shouldberejected", Outcome: OutcomeSuccess})
+	test.IsNotNil(t, err)
+}
+
 func readAuditEntries(t *testing.T, dir string) []AuditEntry {
 	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
 	test.IsNil(t, err)

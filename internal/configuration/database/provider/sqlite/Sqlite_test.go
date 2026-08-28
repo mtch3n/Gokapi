@@ -718,6 +718,37 @@ func TestDatabaseProvider_UpgradeV17Idempotent(t *testing.T) {
 	instance.Upgrade(16)
 }
 
+// TestDatabaseProvider_UpgradeV18WipesSessions verifies MINOR-5: a session created before the
+// v18 IsOauth column existed has no valid value for it, and the column's DEFAULT (0/false) has no
+// way to know whether that session was actually created by the OAuth callback. Without wiping
+// sessions in the v18 step, such a session would silently renew as a password session from then
+// on, skipping the OAuth recheck interval that is supposed to re-verify group membership on every
+// renewal. The v18 step must call DeleteAllSessions so no session straddles the schema change.
+func TestDatabaseProvider_UpgradeV18WipesSessions(t *testing.T) {
+	instance, err := New(models.DbConnection{
+		HostUrl: "./test/newfolder/gokapi_v18wipessessions.sqlite",
+		Type:    0, // dbabstraction.TypeSqlite
+	})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	instance.SaveSession("presessionv18", models.Session{
+		RenewAt:    time.Now().Add(1 * time.Hour).Unix(),
+		ValidUntil: time.Now().Add(2 * time.Hour).Unix(),
+		IsOauth:    true,
+	})
+	_, ok := instance.GetSession("presessionv18")
+	test.IsEqualBool(t, ok, true)
+
+	// Replay the v18 step against a database whose schema is already current (createNewDatabase
+	// writes the current schema) but whose stored version claims v17 has not run yet - the same
+	// crash-recovery shape as TestDatabaseProvider_UpgradeV17Idempotent above.
+	instance.Upgrade(17)
+
+	_, ok = instance.GetSession("presessionv18")
+	test.IsEqualBool(t, ok, false)
+}
+
 func TestRawSql(t *testing.T) {
 	dbInstance.Close()
 	dbInstance.sqliteDb = nil

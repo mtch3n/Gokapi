@@ -156,6 +156,12 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	if currentDbVersion < 18 {
 		_, err := p.exec(`ALTER TABLE Sessions ADD COLUMN IF NOT EXISTS IsOauth BOOLEAN NOT NULL DEFAULT false;`)
 		helper.Check(err)
+		// Every session that already existed before this column was added defaults to IsOauth =
+		// false regardless of how it was actually created, since the DEFAULT above has no way to
+		// know. Without wiping sessions here, a pre-v18 OAuth session would silently renew as a
+		// password session from now on - skipping the OAuth recheck interval that is supposed to
+		// re-verify its group membership on every renewal.
+		p.DeleteAllSessions()
 	}
 }
 

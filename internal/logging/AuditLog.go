@@ -379,17 +379,36 @@ func appendAuditEntries(entries []AuditEntry) error {
 	}
 
 	if _, err = file.Write(buf.Bytes()); err != nil {
-		_ = file.Truncate(originalSize)
+		failCloseIfTruncateFails(file, originalSize)
 		return fmt.Errorf("audit: could not write audit entries: %w", err)
 	}
 	if err = file.Sync(); err != nil {
-		_ = file.Truncate(originalSize)
+		failCloseIfTruncateFails(file, originalSize)
 		return fmt.Errorf("audit: could not fsync audit log: %w", err)
 	}
 
 	auditNextSeq = seq
 	auditPrevHash = prevHash
 	return nil
+}
+
+// failCloseIfTruncateFails attempts to undo a partial write by truncating the audit log back to
+// its size before this batch. If the truncate itself fails, a complete, validly hash-chained JSON
+// line can be left on disk for an entry this function's caller is about to report as an error -
+// while auditNextSeq/auditPrevHash are never advanced for it, since the caller returns before
+// reaching the two lines above that do so. The next successful append would then reuse that same
+// Seq and PrevHash, so every entry appended after it would compute a hash chain that no longer
+// matches what is actually on disk, and every later read would report the whole tail as tampered
+// with no way to recover. Fail closed instead: mark the chain unusable so appendAuditEntries
+// refuses to append anything further until a human resolves it, the same posture already taken
+// for corruption detected on startup (see the auditChainUnusable assignment in
+// recoverAuditChainState).
+func failCloseIfTruncateFails(file *os.File, originalSize int64) {
+	if err := file.Truncate(originalSize); err != nil {
+		fmt.Printf("audit: could not truncate a partial write from the audit log at %s (%v); refusing to append "+
+			"to it until this is resolved manually\n", auditLogPath, err)
+		auditChainUnusable = true
+	}
 }
 
 // appendAuditEntryAsync is used for audit-relevant events that are not on a "serve bytes" or

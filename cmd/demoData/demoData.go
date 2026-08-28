@@ -99,6 +99,7 @@ func addUsers() {
 		LastOnline:    time.Now().Add(time.Duration(rand.Intn(24*60)) * -time.Minute).Unix(),
 		Password:      "fewfeefefwefweffwe",
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}, {
 		Id:            2,
 		Name:          "Bob Uploader",
@@ -107,6 +108,7 @@ func addUsers() {
 		LastOnline:    time.Now().Add(time.Duration(rand.Intn(24*60)) * -time.Minute).Unix(),
 		Password:      "fewfeefefwefweffwe",
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}, {
 		Id:            3,
 		Name:          "Charlie Viewer",
@@ -115,6 +117,7 @@ func addUsers() {
 		LastOnline:    time.Now().Add(time.Duration(rand.Intn(24*60)) * -time.Minute).Unix(),
 		Password:      "fewfeefefwefweffwe",
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}, {
 		Id:            4,
 		Name:          "Dora Developer",
@@ -123,6 +126,7 @@ func addUsers() {
 		LastOnline:    time.Now().Add(time.Duration(rand.Intn(24*60)) * -time.Minute).Unix(),
 		Password:      "fewfeefefwefweffwe",
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}}
 	for _, user := range users {
 		database.SaveUser(user, false)

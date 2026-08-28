@@ -26,9 +26,9 @@ func TestMain(m *testing.M) {
 	os.Exit(exitVal)
 }
 
-func getRecorder(cookies []test.Cookie) (*httptest.ResponseRecorder, *http.Request, bool, int) {
+func getRecorder(cookies []test.Cookie) (*httptest.ResponseRecorder, *http.Request, int) {
 	w, r := test.GetRecorder("GET", "/", cookies, nil, nil)
-	return w, r, false, 1
+	return w, r, 1
 }
 
 func TestIsValidSession(t *testing.T) {
@@ -60,11 +60,11 @@ func TestIsValidSession(t *testing.T) {
 	}))
 	test.IsEqualBool(t, ok, false)
 	test.IsEqualInt(t, user.Id, 7)
-	w, r, _, _ := getRecorder([]test.Cookie{{
+	w, r, _ := getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: "needsRenewal"},
 	})
-	user, ok = IsValidSession(w, r, false, 1)
+	user, ok = IsValidSession(w, r, 1)
 	cookies := w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
 	test.IsEqualString(t, cookies[0].Name, "session_token")
@@ -74,7 +74,7 @@ func TestIsValidSession(t *testing.T) {
 }
 
 func TestCreateSession(t *testing.T) {
-	w, _, _, _ := getRecorder(nil)
+	w, _, _ := getRecorder(nil)
 	CreateSession(w, false, 1, 5)
 	cookies := w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
@@ -89,7 +89,7 @@ func TestCreateSession(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, user.Id, 5)
 
-	w, _, _, _ = getRecorder(nil)
+	w, _, _ = getRecorder(nil)
 	CreateSession(w, true, 20, 50)
 	cookies = w.Result().Cookies()
 	newOauthSession := cookies[0].Value
@@ -127,7 +127,7 @@ func withServerUrl(t *testing.T, https bool) func() {
 
 func TestCookieSecureAttribute(t *testing.T) {
 	test.IsEqualBool(t, configuration.UsesHttps(), false)
-	w, _, _, _ := getRecorder(nil)
+	w, _, _ := getRecorder(nil)
 	CreateSession(w, false, 1, 5)
 	cookies := w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
@@ -135,7 +135,7 @@ func TestCookieSecureAttribute(t *testing.T) {
 	test.IsEqualBool(t, cookies[0].HttpOnly, true)
 	test.IsEqual(t, cookies[0].SameSite, http.SameSiteLaxMode)
 
-	w, r, _, _ := getRecorder(nil)
+	w, r, _ := getRecorder(nil)
 	LogoutSession(w, r)
 	cookies = w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
@@ -145,7 +145,7 @@ func TestCookieSecureAttribute(t *testing.T) {
 	defer restore()
 	test.IsEqualBool(t, configuration.UsesHttps(), true)
 
-	w, _, _, _ = getRecorder(nil)
+	w, _, _ = getRecorder(nil)
 	CreateSession(w, false, 1, 5)
 	cookies = w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
@@ -153,7 +153,7 @@ func TestCookieSecureAttribute(t *testing.T) {
 	test.IsEqualBool(t, cookies[0].HttpOnly, true)
 	test.IsEqual(t, cookies[0].SameSite, http.SameSiteLaxMode)
 
-	w, r, _, _ = getRecorder(nil)
+	w, r, _ = getRecorder(nil)
 	LogoutSession(w, r)
 	cookies = w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
@@ -161,7 +161,7 @@ func TestCookieSecureAttribute(t *testing.T) {
 }
 
 func TestSessionDurationDays(t *testing.T) {
-	w, _, _, _ := getRecorder(nil)
+	w, _, _ := getRecorder(nil)
 	CreateSession(w, false, 1, 5)
 	cookies := w.Result().Cookies()
 	session, ok := database.GetSession(cookies[0].Value)
@@ -174,7 +174,7 @@ func TestSessionDurationDays(t *testing.T) {
 	test.IsNil(t, err)
 	defer os.Unsetenv("GOKAPI_SESSION_DURATION_DAYS")
 
-	w, _, _, _ = getRecorder(nil)
+	w, _, _ = getRecorder(nil)
 	CreateSession(w, false, 1, 5)
 	cookies = w.Result().Cookies()
 	session, ok = database.GetSession(cookies[0].Value)
@@ -190,11 +190,11 @@ func TestSessionDurationDays(t *testing.T) {
 		ValidUntil: 2147483646,
 		UserId:     7,
 	})
-	w, r, _, _ := getRecorder([]test.Cookie{{
+	w, r, _ := getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: "needsRenewalWithCustomDuration"},
 	})
-	_, ok = IsValidSession(w, r, false, 1)
+	_, ok = IsValidSession(w, r, 1)
 	test.IsEqualBool(t, ok, true)
 	cookies = w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
@@ -210,9 +210,11 @@ func TestSessionDurationDays(t *testing.T) {
 // AuthenticationOAuth2), which is always false in hybrid mode (Method stays
 // AuthenticationInternal) even for a session the OAuth callback created with isOauth true. On
 // renewal that recreated the session as a 7-day password session, so deprovisioning a user in
-// Google would never end their session. The caller below deliberately passes isOauth=false, the
-// exact value isGrantedSession would compute in hybrid mode, to prove renewal now reads
-// session.IsOauth instead and keeps the OAuth recheck interval.
+// Google would never end their session. IsValidSession/useSession no longer take an isOauth
+// parameter at all (it shadowed session.IsOauth and was never actually used - the exact shape of
+// the bug above), so this test proves renewal reads session.IsOauth, the value recorded when the
+// session was created, and keeps the OAuth recheck interval rather than the 7-day password
+// default.
 func TestOAuthSessionNotLaunderedOnRenewal(t *testing.T) {
 	database.SaveSession("oauthNeedsRenewal", models.Session{
 		RenewAt:    0,
@@ -220,11 +222,11 @@ func TestOAuthSessionNotLaunderedOnRenewal(t *testing.T) {
 		UserId:     7,
 		IsOauth:    true,
 	})
-	w, r, _, _ := getRecorder([]test.Cookie{{
+	w, r, _ := getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: "oauthNeedsRenewal"},
 	})
-	_, ok := IsValidSession(w, r, false, 2)
+	_, ok := IsValidSession(w, r, 2)
 	test.IsEqualBool(t, ok, true)
 	cookies := w.Result().Cookies()
 	test.IsEqualInt(t, len(cookies), 1)
@@ -245,7 +247,7 @@ func TestLogoutSession(t *testing.T) {
 	}))
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, user.Id, 5)
-	w, r, _, _ := getRecorder([]test.Cookie{{
+	w, r, _ := getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: newSession},
 	})

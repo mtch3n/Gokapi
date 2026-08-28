@@ -499,6 +499,37 @@ func TestMigration(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 }
 
+// TestMigrationNormalizesEmptyAuthProvider verifies MAJOR-2: migrating from a source below
+// schema v9/v17 can yield a user with an empty AuthProvider, since Migrate's destination is only
+// ever New()'d, never Upgrade()'d, so the v9/v17 AuthProvider backfill never runs on the copied
+// rows. SaveUser's explicit column list bypasses the SQL DEFAULT, so without normalization the
+// destination would end up with an AuthProvider of ” - which is accepted by neither the OAuth
+// nor the header-auth login door - locking the user out with no recovery path. Migrate must
+// normalize an empty AuthProvider to "internal" for every copied user.
+func TestMigrationNormalizesEmptyAuthProvider(t *testing.T) {
+	configOld := models.DbConnection{
+		HostUrl: "./test/gokapi_authprovider_src.sqlite",
+		Type:    0, // dbabstraction.TypeSqlite
+	}
+	configNew := models.DbConnection{
+		RedisPrefix: "testmigrateauthprovider_",
+		HostUrl:     "127.0.0.1:26379",
+		Type:        1, // dbabstraction.TypeRedis
+	}
+	dbOld, err := dbabstraction.GetNew(configOld)
+	test.IsNil(t, err)
+	dbOld.SaveUser(models.User{Name: "legacyuser", AuthProvider: ""}, true)
+	dbOld.Close()
+
+	Migrate(configOld, configNew)
+
+	dbNew, err := dbabstraction.GetNew(configNew)
+	test.IsNil(t, err)
+	migratedUser, ok := dbNew.GetUserByName("legacyuser")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, migratedUser.AuthProvider, models.AuthProviderInternal)
+}
+
 func TestRedactUrl(t *testing.T) {
 	// A Postgres DSN carries the password, so it must never be logged verbatim
 	redacted := RedactUrl("postgres://user:hunter2@db.example.com:5432/gokapi?sslmode=require")

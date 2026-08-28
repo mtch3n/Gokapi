@@ -162,6 +162,14 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			err := p.rawSqlite(`ALTER TABLE Sessions ADD COLUMN "IsOauth" INTEGER NOT NULL DEFAULT 0;`)
 			helper.Check(err)
 		}
+		// Every session that already existed before this column was added defaults to IsOauth =
+		// false regardless of how it was actually created, since the DEFAULT above has no way to
+		// know. Without wiping sessions here, a pre-v18 OAuth session would silently renew as a
+		// password session from now on - skipping the OAuth recheck interval that is supposed to
+		// re-verify its group membership on every renewal. The last DeleteAllSessions in this
+		// ladder was at v15, so any session created between v15 and v18 would otherwise straddle
+		// this schema change with no valid IsOauth value.
+		p.DeleteAllSessions()
 	}
 }
 

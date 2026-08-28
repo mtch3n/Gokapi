@@ -364,6 +364,32 @@ func TestSessions(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 }
 
+// TestUpgradeV18WipesSessions verifies MINOR-5: a session created before the v18 IsOauth column
+// existed has no valid value for it, and the column's DEFAULT (false) has no way to know whether
+// that session was actually created by the OAuth callback. Without wiping sessions in the v18
+// step, such a session would silently renew as a password session from then on, skipping the
+// OAuth recheck interval that is supposed to re-verify group membership on every renewal. The v18
+// step must call DeleteAllSessions so no session straddles the schema change.
+func TestUpgradeV18WipesSessions(t *testing.T) {
+	testConfig(t)
+
+	dbInstance.SaveSession("presessionv18", models.Session{
+		RenewAt:    time.Now().Add(1 * time.Hour).Unix(),
+		ValidUntil: time.Now().Add(2 * time.Hour).Unix(),
+		IsOauth:    true,
+	})
+	_, ok := dbInstance.GetSession("presessionv18")
+	test.IsEqualBool(t, ok, true)
+
+	// The schema is already current (New() creates it that way), but replay the v18 step as if
+	// the stored version claimed v17 had not run yet - the crash-recovery shape the ladder is
+	// designed to tolerate (see the v17/IF NOT EXISTS guards above in Upgrade).
+	dbInstance.Upgrade(17)
+
+	_, ok = dbInstance.GetSession("presessionv18")
+	test.IsEqualBool(t, ok, false)
+}
+
 func TestUsers(t *testing.T) {
 	testConfig(t)
 	user := models.User{

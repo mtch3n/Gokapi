@@ -417,12 +417,26 @@ func TestUserCreate(t *testing.T) {
 // password login path stays closed for that account (see IsCorrectUsernameAndPassword). Before
 // this fix, apiCreateUser hardcoded models.AuthProviderInternal, so this header had no effect and
 // the created user's AuthProvider would be "internal" instead of "google".
+//
+// OAuth must actually be configured for the google provider to be accepted (see MINOR-2 /
+// TestUserCreateGoogleAuthProviderRejectedWithoutOauth below), so this test enables hybrid mode
+// on the shared test configuration for its duration and restores it afterwards.
 func TestUserCreateWithAuthProvider(t *testing.T) {
 	const apiUrl = "/user/create"
 	const headerUsername = "username"
 	const headerAuthProvider = "authprovider"
 
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+
+	authConfig := &configuration.Get().Authentication
+	originalOauthEnabled := authConfig.OAuthEnabledAlongsideInternal
+	originalOauthProvider := authConfig.OAuthProvider
+	authConfig.OAuthEnabledAlongsideInternal = true
+	authConfig.OAuthProvider = "https://example.com"
+	defer func() {
+		authConfig.OAuthEnabledAlongsideInternal = originalOauthEnabled
+		authConfig.OAuthProvider = originalOauthProvider
+	}()
 
 	uniqueUsername := "TestUserCreateGoogle_" + helper.GenerateRandomString(8)
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
@@ -487,6 +501,37 @@ func TestUserCreateInvalidAuthProvider(t *testing.T) {
 	}, {
 		Name:  "authprovider",
 		Value: "not-a-real-provider",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	_, ok := database.GetUserByName(strings.ToLower(uniqueUsername))
+	test.IsEqualBool(t, ok, false)
+}
+
+// TestUserCreateGoogleAuthProviderRejectedWithoutOauth verifies MINOR-2: authprovider: google
+// must be rejected when OAuth is not configured at all (Method is internal, hybrid not enabled).
+// Without this, an admin (or a script run before OAuth is set up) could create a row that can log
+// in through neither door, and that row becomes a live, silently self-registering SSO account the
+// moment an admin enables hybrid mode later - it already carries AuthProvider "google" with no
+// review step in between. The shared test configuration has OAuth disabled by default (see
+// testconfiguration.configTestFile), so this test runs against that default state.
+func TestUserCreateGoogleAuthProviderRejectedWithoutOauth(t *testing.T) {
+	const apiUrl = "/user/create"
+
+	authConfig := &configuration.Get().Authentication
+	test.IsEqualInt(t, authConfig.Method, models.AuthenticationInternal)
+	test.IsEqualBool(t, authConfig.OAuthEnabledAlongsideInternal, false)
+
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+
+	uniqueUsername := "TestUserCreateGoogleNoOauth_" + helper.GenerateRandomString(8)
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  "username",
+		Value: uniqueUsername,
+	}, {
+		Name:  "authprovider",
+		Value: "google",
 	}})
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 400)

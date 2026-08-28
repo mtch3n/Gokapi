@@ -20,7 +20,7 @@ const lengthSessionId = 60
 // IsValidSession checks if the user is submitting a valid session token
 // If a valid session is found, useSession will be called
 // Returns true if authenticated, otherwise false
-func IsValidSession(w http.ResponseWriter, r *http.Request, isOauth bool, OAuthRecheckInterval int) (models.User, bool) {
+func IsValidSession(w http.ResponseWriter, r *http.Request, OAuthRecheckInterval int) (models.User, bool) {
 	cookie, err := r.Cookie("session_token")
 	if err == nil {
 		sessionString := cookie.Value
@@ -31,7 +31,7 @@ func IsValidSession(w http.ResponseWriter, r *http.Request, isOauth bool, OAuthR
 				if !userExists {
 					return user, false
 				}
-				return user, useSession(w, sessionString, session, isOauth, OAuthRecheckInterval)
+				return user, useSession(w, sessionString, session, OAuthRecheckInterval)
 			}
 		}
 	}
@@ -42,12 +42,15 @@ func IsValidSession(w http.ResponseWriter, r *http.Request, isOauth bool, OAuthR
 // if it has been used for more than an hour to limit session hijacking
 // Returns true if session is still valid
 // Returns false if session is invalid (and deletes it)
-// The isOauth passed in by the caller reflects only the current global auth method, which is
-// wrong for a hybrid instance: renewal instead uses session.IsOauth, the value recorded when
-// this specific session was created, so an OAuth session stays an OAuth session (short-lived,
-// rechecked against the provider) across every renewal instead of being laundered into a
-// long-lived password session the first time it is renewed. See models.Session.IsOauth.
-func useSession(w http.ResponseWriter, id string, session models.Session, isOauth bool, OAuthRecheckInterval int) bool {
+// Renewal uses session.IsOauth, the value recorded when this specific session was created,
+// rather than anything passed in by the caller: the caller only ever knows the CURRENT global
+// auth method, which is wrong for a hybrid instance (a session the OAuth callback created stays
+// AuthenticationInternal for the lifetime of the instance). Using session.IsOauth keeps an OAuth
+// session an OAuth session (short-lived, rechecked against the provider) across every renewal
+// instead of laundering it into a long-lived password session the first time it is renewed. See
+// models.Session.IsOauth. This function used to also take an isOauth parameter that shadowed
+// session.IsOauth and was never actually used - the exact shape of that bug - so it was removed.
+func useSession(w http.ResponseWriter, id string, session models.Session, OAuthRecheckInterval int) bool {
 	if session.ValidUntil < time.Now().Unix() {
 		database.DeleteSession(id)
 		return false

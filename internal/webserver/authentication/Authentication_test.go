@@ -312,6 +312,31 @@ func TestGetOrCreateUserAllowList(t *testing.T) {
 	authSettings.OnlyRegisteredUsers = false
 }
 
+// TestGetOrCreateUserRejectsGoogleProvisionedThroughHeaderDoor verifies MINOR-7: the header-auth
+// door (isGrantedHeader always calls getOrCreateUser with provider == models.AuthProviderInternal)
+// must not authenticate a row that was deliberately provisioned for Google, just because a
+// reverse proxy presents a matching username. Before this fix, the allow-list check only ran when
+// provider == models.AuthProviderGoogle, so a google-provisioned row sailed straight through the
+// `return user, true, nil` at the end unchecked when called with the internal provider - the
+// reverse of the account-takeover gap TestGetOrCreateUserAllowList already covers for the OAuth
+// door.
+func TestGetOrCreateUserRejectsGoogleProvisionedThroughHeaderDoor(t *testing.T) {
+	Init(modelHeader)
+
+	database.SaveUser(models.User{Name: "headerdoorgoogle@test.com", UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderGoogle}, true)
+
+	_, ok, err := getOrCreateUser("headerdoorgoogle@test.com", models.AuthProviderInternal, "")
+	test.IsEqualBool(t, errors.Is(err, errTakeoverRejected), true)
+	test.IsEqualBool(t, ok, false)
+
+	// An ordinary internal-auth row must still authenticate through the header door.
+	database.SaveUser(models.User{Name: "headerdoorinternal@test.com", UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderInternal}, true)
+	user, ok, err := getOrCreateUser("headerdoorinternal@test.com", models.AuthProviderInternal, "")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, user.Name, "headerdoorinternal@test.com")
+}
+
 // TestGoogleProvisionedUserOidcSucceedsPasswordRejected ties together W17-1 and W17-2a: a user
 // deliberately provisioned with the google AuthProvider (as an admin now can via the
 // authprovider header on /user/create, see users.Create) must authenticate successfully through
@@ -407,37 +432,37 @@ func TestWildcardMatch(t *testing.T) {
 	}
 }
 
-func getRecorder(cookies []test.Cookie) (*httptest.ResponseRecorder, *http.Request, bool, int) {
+func getRecorder(cookies []test.Cookie) (*httptest.ResponseRecorder, *http.Request) {
 	w, r := test.GetRecorder("GET", "/", cookies, nil, nil)
-	return w, r, false, 1
+	return w, r
 }
 
 func TestLogout(t *testing.T) {
 	Init(modelUserPW)
-	w, r, _, _ := getRecorder([]test.Cookie{{
+	w, r := getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: "logoutsession"},
 	})
-	_, ok := sessionmanager.IsValidSession(w, r, false, 0)
+	_, ok := sessionmanager.IsValidSession(w, r, 0)
 	test.IsEqualBool(t, ok, true)
 	Logout(w, r)
 	_, ok = database.GetSession("logoutsession")
 	test.IsEqualBool(t, ok, false)
-	_, ok = sessionmanager.IsValidSession(w, r, false, 0)
+	_, ok = sessionmanager.IsValidSession(w, r, 0)
 	test.IsEqualBool(t, ok, false)
 	test.ResponseIsRedirect(t, w, "login", false)
 
 	Init(modelOauth)
-	w, r, _, _ = getRecorder([]test.Cookie{{
+	w, r = getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: "logoutsession2"},
 	})
-	_, ok = sessionmanager.IsValidSession(w, r, false, 0)
+	_, ok = sessionmanager.IsValidSession(w, r, 0)
 	test.IsEqualBool(t, ok, true)
 	Logout(w, r)
 	_, ok = database.GetSession("logoutsession")
 	test.IsEqualBool(t, ok, false)
-	_, ok = sessionmanager.IsValidSession(w, r, false, 0)
+	_, ok = sessionmanager.IsValidSession(w, r, 0)
 	test.IsEqualBool(t, ok, false)
 	test.ResponseIsRedirect(t, w, "login?consent=true", false)
 }
@@ -467,7 +492,7 @@ func TestLogoutHybridForcesConsentForOauthSession(t *testing.T) {
 		UserId:     7,
 		IsOauth:    true,
 	})
-	w, r, _, _ := getRecorder([]test.Cookie{{
+	w, r := getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: "hybridOauthSession"},
 	})
@@ -480,7 +505,7 @@ func TestLogoutHybridForcesConsentForOauthSession(t *testing.T) {
 		UserId:     7,
 		IsOauth:    false,
 	})
-	w, r, _, _ = getRecorder([]test.Cookie{{
+	w, r = getRecorder([]test.Cookie{{
 		Name:  "session_token",
 		Value: "hybridPasswordSession"},
 	})

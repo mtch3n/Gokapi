@@ -279,7 +279,10 @@ func LogUserEdit(modifiedUser, userEditor models.User) {
 	})
 }
 
-// LogUserCreation adds a log entry to indicate that a user was created. Non-blocking
+// LogUserCreation adds a log entry to indicate that a user was created. Non-blocking. The audit
+// detail includes AuthProvider so that provisioning a user for OAuth/OIDC (e.g. an admin, or a
+// script, calling user/create with authprovider: google) is distinguishable in the audit log from
+// an ordinary internal-auth user creation.
 func LogUserCreation(modifiedUser, userEditor models.User) {
 	createLogEntry(categoryAuth, fmt.Sprintf("%s (#%d) was created by %s (user #%d)",
 		modifiedUser.Name, modifiedUser.Id, userEditor.Name, userEditor.Id), false)
@@ -288,7 +291,7 @@ func LogUserCreation(modifiedUser, userEditor models.User) {
 		Action:   "user.created",
 		Outcome:  OutcomeSuccess,
 		Actor:    AuditActor{UserId: userEditor.Id, Email: userEditor.Name},
-		Detail:   fmt.Sprintf("target user %s (#%d)", modifiedUser.Name, modifiedUser.Id),
+		Detail:   fmt.Sprintf("target user %s (#%d), authprovider %s", modifiedUser.Name, modifiedUser.Id, modifiedUser.AuthProvider),
 	})
 }
 
