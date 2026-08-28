@@ -1212,11 +1212,14 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 
 	// Build the response, hiding filename if password-protected and not authenticated
 	name := file.Name
+	contentType := file.ContentType
 	if file.PasswordHash != "" && !isValidPwCookie(r, file) {
 		name = ""
+		contentType = ""
 	}
 
 	response := map[string]interface{}{
+		"id":                       keyId,
 		"name":                     name,
 		"size":                     file.Size,
 		"requiresPassword":         file.PasswordHash != "",
@@ -1224,6 +1227,7 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 		"downloadsRemaining":       downloadsRemaining,
 		"isE2E":                    file.Encryption.IsEndToEndEncrypted,
 		"requiresClientDecryption": file.RequiresClientDecryption(),
+		"contentType":              contentType,
 	}
 
 	w.WriteHeader(http.StatusOK)

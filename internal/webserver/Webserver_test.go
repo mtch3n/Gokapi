@@ -726,6 +726,9 @@ func TestPublicApiFileUnprotected(t *testing.T) {
 	}
 
 	// Verify the response contains the expected fields
+	if id, ok := response["id"]; !ok || id != "pubapifileunprot1234" {
+		t.Errorf("Expected id 'pubapifileunprot1234', got %v", id)
+	}
 	if name, ok := response["name"]; !ok || name != "smallfile2" {
 		t.Errorf("Expected name 'smallfile2', got %v", name)
 	}
@@ -740,6 +743,9 @@ func TestPublicApiFileUnprotected(t *testing.T) {
 	}
 	if _, ok := response["downloadsRemaining"]; !ok {
 		t.Errorf("Missing downloadsRemaining field")
+	}
+	if contentType, ok := response["contentType"]; !ok || contentType != "text/html" {
+		t.Errorf("Expected contentType 'text/html', got %v", contentType)
 	}
 }
 
@@ -764,11 +770,17 @@ func TestPublicApiFilePasswordProtected(t *testing.T) {
 	}
 
 	// Verify that filename is hidden for password-protected files
+	if id, ok := response["id"]; !ok || id != "jpLXGJKigM4hjtA6T6sN" {
+		t.Errorf("Expected id 'jpLXGJKigM4hjtA6T6sN', got %v", id)
+	}
 	if name, ok := response["name"]; !ok || name != "" {
 		t.Errorf("Expected name to be empty for password-protected file, got %v", name)
 	}
 	if requiresPw, ok := response["requiresPassword"]; !ok || requiresPw != true {
 		t.Errorf("Expected requiresPassword true, got %v", requiresPw)
+	}
+	if contentType, ok := response["contentType"]; !ok || contentType != "" {
+		t.Errorf("Expected contentType to be empty for password-protected file, got %v", contentType)
 	}
 }
 
@@ -826,6 +838,9 @@ func TestPublicApiFilePasswordProtectedWithCookie(t *testing.T) {
 	// Verify that filename is revealed when a valid cookie is present
 	if name, ok := response["name"]; !ok || name == "" {
 		t.Errorf("Expected name to be revealed for password-protected file with valid cookie, got %v", name)
+	}
+	if contentType, ok := response["contentType"]; !ok || contentType == "" {
+		t.Errorf("Expected contentType to be revealed for password-protected file with valid cookie, got %v", contentType)
 	}
 }
 
