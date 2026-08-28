@@ -484,7 +484,7 @@ func (p *paramAuthCreate) ParseRequest(r *http.Request) error {
 	var exists bool
 	p.foundHeaders = make(map[string]bool)
 
-	// RequestParser header value "friendlyName", required: false
+	// RequestParser header value "friendlyName", required: false, has base64support
 	exists, err = checkHeaderExists(r, "friendlyName", false, true)
 	if err != nil {
 		return err
@@ -492,6 +492,13 @@ func (p *paramAuthCreate) ParseRequest(r *http.Request) error {
 	p.foundHeaders["friendlyName"] = exists
 	if exists {
 		p.FriendlyName = r.Header.Get("friendlyName")
+		if strings.HasPrefix(p.FriendlyName, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.FriendlyName, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.FriendlyName = string(decoded)
+		}
 	}
 
 	// RequestParser header value "basicPermissions", required: false
@@ -532,7 +539,7 @@ func (p *paramAuthFriendlyName) ParseRequest(r *http.Request) error {
 		p.KeyId = r.Header.Get("targetKey")
 	}
 
-	// RequestParser header value "friendlyName", required: true
+	// RequestParser header value "friendlyName", required: true, has base64support
 	exists, err = checkHeaderExists(r, "friendlyName", true, true)
 	if err != nil {
 		return err
@@ -540,6 +547,13 @@ func (p *paramAuthFriendlyName) ParseRequest(r *http.Request) error {
 	p.foundHeaders["friendlyName"] = exists
 	if exists {
 		p.FriendlyName = r.Header.Get("friendlyName")
+		if strings.HasPrefix(p.FriendlyName, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.FriendlyName, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.FriendlyName = string(decoded)
+		}
 	}
 
 	return p.ProcessParameter(r)
@@ -627,7 +641,7 @@ func (p *paramUserCreate) ParseRequest(r *http.Request) error {
 	var exists bool
 	p.foundHeaders = make(map[string]bool)
 
-	// RequestParser header value "username", required: true
+	// RequestParser header value "username", required: true, has base64support
 	exists, err = checkHeaderExists(r, "username", true, true)
 	if err != nil {
 		return err
@@ -635,6 +649,13 @@ func (p *paramUserCreate) ParseRequest(r *http.Request) error {
 	p.foundHeaders["username"] = exists
 	if exists {
 		p.Username = r.Header.Get("username")
+		if strings.HasPrefix(p.Username, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Username, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Username = string(decoded)
+		}
 	}
 
 	// RequestParser header value "authprovider", required: false

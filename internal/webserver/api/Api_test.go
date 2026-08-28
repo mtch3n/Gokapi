@@ -411,6 +411,60 @@ func TestUserCreate(t *testing.T) {
 	apiCreateUser(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
+// TestUserCreateNonAsciiRoundTrips verifies that a username containing non-ASCII characters,
+// sent the way the frontend encoder (encodeHeader in frontend/src/lib/api.ts) sends it - as
+// "base64:" followed by standard base64 - is decoded server side before it is stored, rather than
+// being stored as the literal "base64:..." string. Before paramUserCreate.Username carried
+// supportBase64, routingParsing.go never decoded this header, so the literal base64 text was
+// lowercased and saved, corrupting the name and making the original unrecoverable even by
+// decoding it afterwards. The name must also survive being read back through the user list.
+func TestUserCreateNonAsciiRoundTrips(t *testing.T) {
+	const apiUrl = "/user/create"
+	const headerUsername = "username"
+
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+
+	uniqueNameUtf8 := "TestUserCreate_UTF8_" + helper.GenerateRandomString(6) + "_éàü"
+	encodedName := "base64:" + base64.StdEncoding.EncodeToString([]byte(uniqueNameUtf8))
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerUsername,
+		Value: encodedName,
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var result models.User
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqual(t, result.Name, strings.ToLower(uniqueNameUtf8))
+	test.IsEqualBool(t, strings.HasPrefix(result.Name, "base64:"), false)
+
+	dbUser, ok := database.GetUserByName(strings.ToLower(uniqueNameUtf8))
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, dbUser.Name, strings.ToLower(uniqueNameUtf8))
+
+	// Round trip through the user list too
+	w, r = getRecorder("/user/list", apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	type userListItem struct {
+		Id   int `json:"id"`
+		Name string
+	}
+	var list []userListItem
+	err = json.Unmarshal(w.Body.Bytes(), &list)
+	test.IsNil(t, err)
+	found := false
+	for _, item := range list {
+		if item.Id == dbUser.Id {
+			test.IsEqual(t, item.Name, strings.ToLower(uniqueNameUtf8))
+			found = true
+		}
+	}
+	test.IsEqualBool(t, found, true)
+}
+
 // TestUserCreateWithAuthProvider verifies BLOCKER W17: an admin can deliberately provision an
 // OIDC user through the create-user API by passing the authprovider header. A user created with
 // the google provider must have AuthProvider set to google and no password hash, so the internal
@@ -948,6 +1002,35 @@ func TestNewApiKey(t *testing.T) {
 	apiCreateApiKey(nil, &paramUserCreate{}, models.User{Id: 7}, apiKey)
 }
 
+// TestNewApiKeyNonAsciiFriendlyName verifies that a friendlyName containing non-ASCII characters,
+// sent base64-encoded the way the frontend encoder sends it, is decoded before being stored.
+// Before paramAuthCreate.FriendlyName carried supportBase64, the literal "base64:..." string was
+// stored as the key's friendly name.
+func TestNewApiKeyNonAsciiFriendlyName(t *testing.T) {
+	const apiUrl = "/auth/create"
+	const headerFriendlyName = "friendlyName"
+
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermApiMod)
+
+	friendlyNameUtf8 := "TestNewApiKey_UTF8_éàü"
+	encodedName := "base64:" + base64.StdEncoding.EncodeToString([]byte(friendlyNameUtf8))
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerFriendlyName,
+		Value: encodedName,
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response models.ApiKeyOutput
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	test.IsNil(t, err)
+	retrievedKey, ok := database.GetApiKey(response.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, retrievedKey.FriendlyName, friendlyNameUtf8)
+	test.IsEqualBool(t, strings.HasPrefix(retrievedKey.FriendlyName, "base64:"), false)
+}
+
 func TestIsValidApiKey(t *testing.T) {
 	user, apiKey, isValid := isValidApiKey("", false, models.ApiPermNone)
 	test.IsEqualBool(t, isValid, false)
@@ -1343,6 +1426,34 @@ func TestChangeFriendlyName(t *testing.T) {
 
 	defer test.ExpectPanic(t)
 	apiChangeFriendlyName(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
+}
+
+// TestChangeFriendlyNameNonAscii verifies that renaming an API key with a non-ASCII friendlyName,
+// sent base64-encoded the way the frontend encoder sends it, decodes it before storing. Before
+// paramAuthFriendlyName.FriendlyName carried supportBase64, the literal "base64:..." string was
+// stored as the key's friendly name.
+func TestChangeFriendlyNameNonAscii(t *testing.T) {
+	const apiUrl = "/auth/friendlyname"
+	const headerApiKeyModify = "targetKey"
+	const headerNewName = "friendlyName"
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermApiMod)
+
+	newNameUtf8 := "TestChangeFriendlyName_UTF8_éàü"
+	encodedName := "base64:" + base64.StdEncoding.EncodeToString([]byte(newNameUtf8))
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerApiKeyModify,
+		Value: apiKey.Id,
+	}, {
+		Name:  headerNewName,
+		Value: encodedName,
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	key, ok := database.GetApiKey(apiKey.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, key.FriendlyName, newNameUtf8)
+	test.IsEqualBool(t, strings.HasPrefix(key.FriendlyName, "base64:"), false)
 }
 
 func TestApikeyModify(t *testing.T) {

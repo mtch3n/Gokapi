@@ -512,7 +512,7 @@ type paramFilesRestore struct {
 func (p *paramFilesRestore) ProcessParameter(_ *http.Request) error { return nil }
 
 type paramAuthCreate struct {
-	FriendlyName     string `header:"friendlyName"`
+	FriendlyName     string `header:"friendlyName" supportBase64:"true"`
 	BasicPermissions bool   `header:"basicPermissions"`
 	foundHeaders     map[string]bool
 }
@@ -521,7 +521,7 @@ func (p *paramAuthCreate) ProcessParameter(_ *http.Request) error { return nil }
 
 type paramAuthFriendlyName struct {
 	KeyId        string `header:"targetKey" required:"true"`
-	FriendlyName string `header:"friendlyName" required:"true"`
+	FriendlyName string `header:"friendlyName" required:"true" supportBase64:"true"`
 	foundHeaders map[string]bool
 }
 
@@ -561,7 +561,7 @@ type paramAuthDelete struct {
 func (p *paramAuthDelete) ProcessParameter(_ *http.Request) error { return nil }
 
 type paramUserCreate struct {
-	Username        string `header:"username" required:"true"`
+	Username        string `header:"username" required:"true" supportBase64:"true"`
 	authProviderRaw string `header:"authprovider"`
 	AuthProvider    string
 	foundHeaders    map[string]bool
