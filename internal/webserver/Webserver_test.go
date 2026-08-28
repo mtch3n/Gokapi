@@ -1303,7 +1303,7 @@ func TestFolderPasswordCrossMemberRejected(t *testing.T) {
 	hash2 := configuration.HashPassword(password2, false, "")
 
 	database.SaveMetaData(models.File{
-		Id:                 helper.GenerateRandomString(16),
+		Id:                 "zzzzzzzzzzzzzzzz",
 		Name:               "file1.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
@@ -1318,7 +1318,7 @@ func TestFolderPasswordCrossMemberRejected(t *testing.T) {
 	})
 
 	database.SaveMetaData(models.File{
-		Id:                 helper.GenerateRandomString(16),
+		Id:                 "aaaaaaaaaaaaaaaa",
 		Name:               "file2.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
@@ -1665,8 +1665,18 @@ func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
 	}
 	defer resp3.Body.Close()
 
-	var zipResponse map[string]interface{}
-	if err := json.NewDecoder(resp3.Body).Decode(&zipResponse); err == nil {
-		t.Errorf("Expected non-JSON error response for folderzip with file request")
+	// Assert Content-Type is application/zip
+	if contentType := resp3.Header.Get("Content-Type"); contentType != "application/zip" {
+		t.Errorf("Expected Content-Type application/zip, got %s", contentType)
+	}
+
+	// Additionally verify response starts with zip magic bytes (PK)
+	zipMagic := make([]byte, 2)
+	if _, err := resp3.Body.Read(zipMagic); err != nil {
+		t.Errorf("Failed to read response body: %v", err)
+		return
+	}
+	if !(zipMagic[0] == 'P' && zipMagic[1] == 'K') {
+		t.Errorf("Expected zip magic bytes (PK), got %v", zipMagic)
 	}
 }

@@ -17,9 +17,9 @@ switched on without migrating or re-canonicalising anything written before that 
   - PrevHash links every entry to the hash of the one before it (the empty string for the
     first entry ever written).
   - Hash field placement and the verification rule (this is what a verifier, e.g. W16, should
-    implement): Hash is declared last in AuditEntry and has no `omitempty`, so it is always
-    the final "hash":"<64 hex chars>"} in the stored line. Both writing and verifying work
-    directly on those bytes, never on a second call to encoding/json:
+    implement): Hash is declared with no `omitempty` (unlike Verified which follows it), so
+    it is always present and the final "hash":"<64 hex chars>"} in the stored line. Both
+    writing and verifying work directly on those bytes, never on a second call to encoding/json:
       - To write: marshal the entry once with Hash == "" (giving a line ending in
         "hash":""}), compute SHA-256(PrevHash || thatLine), and splice the resulting hex
         string into the empty hash value directly in the byte slice. See
@@ -421,7 +421,7 @@ func GetAuditEntriesSince(fromSeq uint64, limit int) ([]AuditEntry, uint64) {
 
 	var entries []AuditEntry
 	var maxSeq uint64 = 0
-	var runningHash = "" // Track hash as we read, starting from empty (genesis constant)
+	var runningHash = ""           // Track hash as we read, starting from empty (genesis constant)
 	var predecessorVerified = true // The genesis state is considered verified
 
 	for scanner.Scan() {

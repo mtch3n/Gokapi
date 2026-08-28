@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 16
+const DatabaseSchemeVersion = 17
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -136,6 +136,12 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			creationdate	BIGINT NOT NULL,
 			PRIMARY KEY(id)
 		);`)
+		helper.Check(err)
+	}
+	// < v2.4.0 (hybrid auth support)
+	if currentDbVersion < 17 {
+		_, err := p.exec(`ALTER TABLE Users ADD COLUMN IF NOT EXISTS AuthProvider TEXT NOT NULL DEFAULT 'internal';
+		ALTER TABLE Users ADD COLUMN IF NOT EXISTS OidcSubject TEXT NOT NULL DEFAULT '';`)
 		helper.Check(err)
 	}
 }
@@ -279,6 +285,8 @@ func (p DatabaseProvider) createNewDatabase() error {
 			Userlevel	INTEGER NOT NULL,
 			LastOnline	BIGINT NOT NULL DEFAULT 0,
 			ResetPassword	INTEGER NOT NULL DEFAULT 0,
+			AuthProvider	TEXT NOT NULL DEFAULT 'internal',
+			OidcSubject	TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS UploadRequests (

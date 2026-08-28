@@ -405,7 +405,7 @@ func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	newUser, err := users.Create(request.Username)
+	newUser, err := users.Create(request.Username, "internal", "")
 	if err != nil {
 		switch {
 		case errors.Is(err, users.ErrorNameToShort):
@@ -523,7 +523,7 @@ func apiFolderCreate(w http.ResponseWriter, r requestParser, user models.User, _
 	logging.LogFolderCreate(bundle, user)
 
 	type FolderCreateResponse struct {
-		Result     string           `json:"Result"`
+		Result     string            `json:"Result"`
 		FileBundle models.FileBundle `json:"FileBundle"`
 	}
 	response := FolderCreateResponse{

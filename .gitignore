@@ -19,3 +19,4 @@ custom/
 *.secret
 gokapi-cli
 gokapi-cli.json
+internal/webserver/api/test/

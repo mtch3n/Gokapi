@@ -1777,23 +1777,22 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Determine if hotlinks are enabled globally
-	// Hotlinks are disabled if: DisableHotlinks flag is set OR encryption is full server-side
-	hotlinksEnabled := !env.DisableHotlinks &&
-		config.Encryption.Level != encryption.FullEncryptionStored &&
-		config.Encryption.Level != encryption.FullEncryptionInput
+	// Hotlinks are disabled if: DisableHotlinks flag is set (env-level gate)
+	// File-level gates (RequiresClientDecryption, password, content type) are checked per-file by storage.IsAbleHotlink
+	hotlinksEnabled := !env.DisableHotlinks
 
 	response := map[string]interface{}{
 		"publicName": config.PublicName,
 		"auth": map[string]interface{}{
-			"internal":       isInternal,
-			"oauth":          isOAuth,
-			"oauthProvider":  oauthProviderLabel,
+			"internal":      isInternal,
+			"oauth":         isOAuth,
+			"oauthProvider": oauthProviderLabel,
 		},
 		"features": map[string]interface{}{
-			"folders":         true,
-			"fileRequests":    true,
-			"e2eEncryption":   config.Encryption.Level == encryption.EndToEndEncryption,
-			"hotlinks":        hotlinksEnabled,
+			"folders":       true,
+			"fileRequests":  true,
+			"e2eEncryption": config.Encryption.Level == encryption.EndToEndEncryption,
+			"hotlinks":      hotlinksEnabled,
 		},
 		"limits": map[string]interface{}{
 			"maxFileSizeMB":      config.MaxFileSizeMB,

@@ -2424,8 +2424,8 @@ func TestFolderCreate(t *testing.T) {
 	var response struct {
 		Result     string
 		FileBundle struct {
-			Id   string
-			Name string
+			Id     string
+			Name   string
 			UserId int
 		}
 	}
@@ -2668,4 +2668,8 @@ func TestChunkCompleteBundleOwnershipRejected(t *testing.T) {
 		{Name: "bundleid", Value: bundleUser.Id}}, nil)
 	Process(w2, r2)
 	test.IsEqualInt(t, w2.Code, 400)
+	// Positive control: assert the error is NOT the ownership error
+	if strings.Contains(w2.Body.String(), "bundle does not belong to user") {
+		t.Errorf("Positive control should not fail with ownership error when using correct bundle owner")
+	}
 }

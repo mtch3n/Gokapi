@@ -9,7 +9,7 @@ import (
 	"github.com/forceu/gokapi/internal/models"
 )
 
-const userColumns = "Id, Name, Password, Permissions, Userlevel, LastOnline, ResetPassword"
+const userColumns = "Id, Name, Password, Permissions, Userlevel, LastOnline, ResetPassword, AuthProvider, OidcSubject"
 
 type schemaUser struct {
 	Id            int
@@ -19,6 +19,8 @@ type schemaUser struct {
 	UserLevel     models.UserRank
 	LastOnline    int64
 	ResetPassword int
+	AuthProvider  string
+	OidcSubject   string
 }
 
 func (s schemaUser) ToUser() models.User {
@@ -34,6 +36,8 @@ func (s schemaUser) ToUser() models.User {
 		LastOnline:    s.LastOnline,
 		Password:      pw,
 		ResetPassword: s.ResetPassword == 1,
+		AuthProvider:  s.AuthProvider,
+		OidcSubject:   s.OidcSubject,
 	}
 }
 
@@ -45,7 +49,7 @@ func (p DatabaseProvider) GetAllUsers() []models.User {
 	defer rows.Close()
 	for rows.Next() {
 		row := schemaUser{}
-		err = rows.Scan(&row.Id, &row.Name, &row.Password, &row.Permissions, &row.UserLevel, &row.LastOnline, &row.ResetPassword)
+		err = rows.Scan(&row.Id, &row.Name, &row.Password, &row.Permissions, &row.UserLevel, &row.LastOnline, &row.ResetPassword, &row.AuthProvider, &row.OidcSubject)
 		helper.Check(err)
 		result = append(result, row.ToUser())
 	}
@@ -61,7 +65,7 @@ func (p DatabaseProvider) getUserWithConstraint(isName bool, searchValue any) (m
 	}
 	row := p.queryRow(query, searchValue)
 	err := row.Scan(&rowResult.Id, &rowResult.Name, &rowResult.Password, &rowResult.Permissions,
-		&rowResult.UserLevel, &rowResult.LastOnline, &rowResult.ResetPassword)
+		&rowResult.UserLevel, &rowResult.LastOnline, &rowResult.ResetPassword, &rowResult.AuthProvider, &rowResult.OidcSubject)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.User{}, false
@@ -90,18 +94,19 @@ func (p DatabaseProvider) SaveUser(user models.User, isNewUser bool) {
 		resetpw = 1
 	}
 	if isNewUser {
-		_, err := p.exec(`INSERT INTO Users (Name, Password, Permissions, Userlevel, LastOnline, ResetPassword)
-						VALUES ($1, $2, $3, $4, $5, $6)`,
-			user.Name, user.Password, user.Permissions, user.UserLevel, user.LastOnline, resetpw)
+		_, err := p.exec(`INSERT INTO Users (Name, Password, Permissions, Userlevel, LastOnline, ResetPassword, AuthProvider, OidcSubject)
+						VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			user.Name, user.Password, user.Permissions, user.UserLevel, user.LastOnline, resetpw, user.AuthProvider, user.OidcSubject)
 		helper.Check(err)
 		return
 	}
-	_, err := p.exec(`INSERT INTO Users (Id, Name, Password, Permissions, Userlevel, LastOnline, ResetPassword)
-					VALUES ($1, $2, $3, $4, $5, $6, $7)
+	_, err := p.exec(`INSERT INTO Users (Id, Name, Password, Permissions, Userlevel, LastOnline, ResetPassword, AuthProvider, OidcSubject)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 					ON CONFLICT (Id) DO UPDATE SET Name = EXCLUDED.Name, Password = EXCLUDED.Password,
 						Permissions = EXCLUDED.Permissions, Userlevel = EXCLUDED.Userlevel,
-						LastOnline = EXCLUDED.LastOnline, ResetPassword = EXCLUDED.ResetPassword`,
-		user.Id, user.Name, user.Password, user.Permissions, user.UserLevel, user.LastOnline, resetpw)
+						LastOnline = EXCLUDED.LastOnline, ResetPassword = EXCLUDED.ResetPassword,
+						AuthProvider = EXCLUDED.AuthProvider, OidcSubject = EXCLUDED.OidcSubject`,
+		user.Id, user.Name, user.Password, user.Permissions, user.UserLevel, user.LastOnline, resetpw, user.AuthProvider, user.OidcSubject)
 	helper.Check(err)
 	p.syncUserIdSequence()
 }
