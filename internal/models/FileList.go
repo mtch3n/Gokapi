@@ -21,6 +21,7 @@ type File struct {
 	ContentType             string         `json:"ContentType" redis:"ContentType"`               // The MIME type for the file
 	AwsBucket               string         `json:"AwsBucket" redis:"AwsBucket"`                   // If the file is stored in the cloud, this is the bucket that is being used
 	UploadRequestId         string         `json:"FileRequestId" redis:"FileRequestId"`           // If the file belongs to a file request, this is the ID of the file request
+	BundleId                string         `json:"BundleId" redis:"BundleId"`                     // If the file belongs to a bundle, this is the ID of the bundle
 	ExpireAt                int64          `json:"ExpireAt" redis:"ExpireAt"`                     // UTC timestamp of file expiry
 	PendingDeletion         int64          `json:"PendingDeletion" redis:"PendingDeletion"`       // UTC timestamp when the file will be deleted, if pending. Otherwise 0
 	SizeBytes               int64          `json:"SizeBytes" redis:"SizeBytes"`                   // Filesize in bytes
@@ -45,6 +46,7 @@ type FileApiOutput struct {
 	UrlDownload                  string `json:"UrlDownload"`                  // The public download URL for the file
 	UrlHotlink                   string `json:"UrlHotlink"`                   // The public hotlink URL for the file
 	FileRequestId                string `json:"FileRequestId"`                // The ID of the file request
+	BundleId                     string `json:"BundleId"`                     // The ID of the bundle
 	UploadDate                   int64  `json:"UploadDate"`                   // UTC timestamp of upload time
 	ExpireAt                     int64  `json:"ExpireAt"`                     // UTC timestamp of file expiry
 	SizeBytes                    int64  `json:"SizeBytes"`                    // Filesize in bytes

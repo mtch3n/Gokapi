@@ -115,6 +115,15 @@ type Database interface {
 	// DeleteFileRequest deletes a file request with the given ID
 	DeleteFileRequest(request models.FileRequest)
 
+	// GetFileBundle returns the FileBundle or false if not found
+	GetFileBundle(id string) (models.FileBundle, bool)
+	// GetAllFileBundles returns an array with all file bundles, ordered by creation date
+	GetAllFileBundles() []models.FileBundle
+	// SaveFileBundle stores the file bundle in the database
+	SaveFileBundle(bundle models.FileBundle)
+	// DeleteFileBundle deletes a file bundle with the given ID
+	DeleteFileBundle(bundle models.FileBundle)
+
 	// GetStatTraffic returns the total traffic from statistics
 	GetStatTraffic() uint64
 	// SaveStatTraffic stores the total traffic

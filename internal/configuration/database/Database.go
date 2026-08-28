@@ -366,6 +366,28 @@ func DeleteFileRequest(request models.FileRequest) {
 	db.DeleteFileRequest(request)
 }
 
+// File Bundles
+
+// GetFileBundle returns the FileBundle or false if not found
+func GetFileBundle(id string) (models.FileBundle, bool) {
+	return db.GetFileBundle(id)
+}
+
+// GetAllFileBundles returns an array with all file bundles, ordered by creation date
+func GetAllFileBundles() []models.FileBundle {
+	return db.GetAllFileBundles()
+}
+
+// SaveFileBundle stores the file bundle in the database
+func SaveFileBundle(bundle models.FileBundle) {
+	db.SaveFileBundle(bundle)
+}
+
+// DeleteFileBundle deletes a file bundle with the given ID
+func DeleteFileBundle(bundle models.FileBundle) {
+	db.DeleteFileBundle(bundle)
+}
+
 // Statistics
 
 // GetStatTraffic returns the total traffic from statistics

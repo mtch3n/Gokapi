@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 15
+const DatabaseSchemeVersion = 16
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -113,6 +113,18 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	// < v2.2.5
 	if currentDbVersion < 15 {
 		p.DeleteAllSessions()
+	}
+	// < v2.3.0
+	if currentDbVersion < 16 {
+		err := p.rawSqlite(`ALTER TABLE FileMetaData ADD COLUMN "BundleId" TEXT NOT NULL DEFAULT '';
+		CREATE TABLE "FileBundles" (
+			"id"	TEXT NOT NULL UNIQUE,
+			"name"	TEXT NOT NULL,
+			"userid"	INTEGER NOT NULL,
+			"creationdate"	INTEGER NOT NULL,
+			PRIMARY KEY("id")
+		);`)
+		helper.Check(err)
 	}
 }
 
@@ -225,6 +237,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"UploadDate"	INTEGER NOT NULL,
 			"PendingDeletion"	INTEGER NOT NULL,
 			"UploadRequestId"	TEXT NOT NULL,
+			"BundleId"	TEXT NOT NULL,
 			PRIMARY KEY("Id")
 		);
 		CREATE TABLE "Hotlinks" (
@@ -266,7 +279,14 @@ func (p DatabaseProvider) createNewDatabase() error {
 				"type"	INTEGER NOT NULL UNIQUE,
 				"value"	INTEGER,
 				PRIMARY KEY("id" AUTOINCREMENT)
-			);`
+			);
+		CREATE TABLE "FileBundles" (
+			"id"	TEXT NOT NULL UNIQUE,
+			"name"	TEXT NOT NULL,
+			"userid"	INTEGER NOT NULL,
+			"creationdate"	INTEGER NOT NULL,
+			PRIMARY KEY("id")
+		);`
 	err := p.rawSqlite(sqlStmt)
 	if err != nil {
 		return err

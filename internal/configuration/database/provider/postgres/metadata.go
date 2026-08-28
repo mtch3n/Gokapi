@@ -12,7 +12,7 @@ import (
 
 const metaDataColumns = `Id, Name, Size, SHA1, ExpireAt, SizeBytes, DownloadsRemaining, DownloadCount,
 	PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption, UnlimitedDownloads, UnlimitedTime,
-	UserId, UploadDate, PendingDeletion, UploadRequestId`
+	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId`
 
 type schemaMetaData struct {
 	Id                 string
@@ -34,6 +34,7 @@ type schemaMetaData struct {
 	UploadDate         int64
 	PendingDeletion    int64
 	UploadRequestId    string
+	BundleId           string
 }
 
 func (rowData schemaMetaData) ToFileModel() (models.File, error) {
@@ -57,6 +58,7 @@ func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 		UploadDate:         rowData.UploadDate,
 		PendingDeletion:    rowData.PendingDeletion,
 		UploadRequestId:    rowData.UploadRequestId,
+		BundleId:           rowData.BundleId,
 	}
 
 	buf := bytes.NewBuffer(rowData.Encryption)
@@ -70,7 +72,7 @@ func scanMetaData(scan func(dest ...any) error, rowData *schemaMetaData) error {
 		&rowData.DownloadsRemaining, &rowData.DownloadCount, &rowData.PasswordHash, &rowData.HotlinkId,
 		&rowData.ContentType, &rowData.AwsBucket, &rowData.Encryption, &rowData.UnlimitedDownloads,
 		&rowData.UnlimitedTime, &rowData.UserId, &rowData.UploadDate, &rowData.PendingDeletion,
-		&rowData.UploadRequestId)
+		&rowData.UploadRequestId, &rowData.BundleId)
 }
 
 // GetAllMetadata returns a map of all available files
@@ -130,6 +132,7 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 		UploadDate:         file.UploadDate,
 		PendingDeletion:    file.PendingDeletion,
 		UploadRequestId:    file.UploadRequestId,
+		BundleId:           file.BundleId,
 	}
 
 	if file.UnlimitedDownloads {
@@ -147,8 +150,8 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 
 	_, err = p.exec(`INSERT INTO FileMetaData (Id, Name, Size, SHA1, ExpireAt, SizeBytes,
 					DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
-					UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+					UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 					ON CONFLICT (Id) DO UPDATE SET Name = EXCLUDED.Name, Size = EXCLUDED.Size, SHA1 = EXCLUDED.SHA1,
 						ExpireAt = EXCLUDED.ExpireAt, SizeBytes = EXCLUDED.SizeBytes,
 						DownloadsRemaining = EXCLUDED.DownloadsRemaining, DownloadCount = EXCLUDED.DownloadCount,
@@ -157,11 +160,11 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 						Encryption = EXCLUDED.Encryption, UnlimitedDownloads = EXCLUDED.UnlimitedDownloads,
 						UnlimitedTime = EXCLUDED.UnlimitedTime, UserId = EXCLUDED.UserId,
 						UploadDate = EXCLUDED.UploadDate, PendingDeletion = EXCLUDED.PendingDeletion,
-						UploadRequestId = EXCLUDED.UploadRequestId`,
+						UploadRequestId = EXCLUDED.UploadRequestId, BundleId = EXCLUDED.BundleId`,
 		newData.Id, newData.Name, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
 		newData.DownloadsRemaining, newData.DownloadCount, newData.PasswordHash, newData.HotlinkId, newData.ContentType,
 		newData.AwsBucket, newData.Encryption, newData.UnlimitedDownloads, newData.UnlimitedTime, newData.UserId,
-		newData.UploadDate, newData.PendingDeletion, newData.UploadRequestId)
+		newData.UploadDate, newData.PendingDeletion, newData.UploadRequestId, newData.BundleId)
 	helper.Check(err)
 }
 

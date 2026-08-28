@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 15
+const DatabaseSchemeVersion = 16
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -125,6 +125,18 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			currentDbVersion, DatabaseSchemeVersion)
 		osExit(1)
 		return
+	}
+	// < v2.3.0
+	if currentDbVersion < 16 {
+		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN "BundleId" TEXT NOT NULL DEFAULT '';
+		CREATE TABLE FileBundles (
+			id	TEXT NOT NULL UNIQUE,
+			name	TEXT NOT NULL,
+			userid	INTEGER NOT NULL,
+			creationdate	BIGINT NOT NULL,
+			PRIMARY KEY(id)
+		);`)
+		helper.Check(err)
 	}
 }
 
@@ -244,6 +256,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			UploadDate	BIGINT NOT NULL,
 			PendingDeletion	BIGINT NOT NULL,
 			UploadRequestId	TEXT NOT NULL,
+			BundleId	TEXT NOT NULL,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Hotlinks (
@@ -290,6 +303,13 @@ func (p DatabaseProvider) createNewDatabase() error {
 			Id	INTEGER NOT NULL,
 			Version	INTEGER NOT NULL,
 			PRIMARY KEY(Id)
+		);
+		CREATE TABLE IF NOT EXISTS FileBundles (
+			id	TEXT NOT NULL UNIQUE,
+			name	TEXT NOT NULL,
+			userid	INTEGER NOT NULL,
+			creationdate	BIGINT NOT NULL,
+			PRIMARY KEY(id)
 		);`
 	err := p.rawPostgres(sqlStmt)
 	if err != nil {
