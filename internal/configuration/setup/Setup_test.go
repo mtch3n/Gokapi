@@ -164,6 +164,38 @@ func TestToConfiguration(t *testing.T) {
 	test.IsEqualString(t, output.RedirectUrl, "https://github.com/Forceu/Gokapi/")
 }
 
+// TestHybridOnlyRegisteredUsersDefault reproduces the reconfiguration path for hybrid auth
+// (Method == AuthenticationInternal with OAuthEnabledAlongsideInternal == true). Before the fix,
+// OnlyRegisteredUsers was only ever assigned in the OAuth2 and Header branches of the switch in
+// toConfiguration, so hybrid mode kept whatever value it started with - which is the Go zero
+// value, false, for a hybrid config that predates this field. That let any Google account on the
+// internet auto-provision a Gokapi user. The fix defaults OnlyRegisteredUsers to true whenever
+// the submitted config is hybrid.
+func TestHybridOnlyRegisteredUsersDefault(t *testing.T) {
+	isInitialSetup = false
+	testconfiguration.Create(false)
+	configuration.Load()
+	configuration.ConnectDatabase()
+
+	existing := configuration.Get().Authentication
+	existing.OAuthEnabledAlongsideInternal = true
+	existing.OnlyRegisteredUsers = false
+	configuration.Get().Authentication = existing
+
+	input := createInputInternalAuth()
+	formObjects, err := input.toFormObject()
+	test.IsNil(t, err)
+	output, _, _, _, err := toConfiguration(&formObjects)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, output.Authentication.Method, models.AuthenticationInternal)
+	test.IsEqualBool(t, output.Authentication.OAuthEnabledAlongsideInternal, true)
+	test.IsEqualBool(t, output.Authentication.OnlyRegisteredUsers, true)
+
+	database.Close()
+	testconfiguration.Delete()
+	isInitialSetup = true
+}
+
 func TestVerifyPortNumber(t *testing.T) {
 	test.IsEqualInt(t, verifyPortNumber(2134), 2134)
 	test.IsEqualInt(t, verifyPortNumber(-1), environment.DefaultPort)

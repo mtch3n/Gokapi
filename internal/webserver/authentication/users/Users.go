@@ -27,10 +27,10 @@ func Create(name string, provider string, oidcSubject string) (models.User, erro
 		return models.User{}, ErrorUserExists
 	}
 	newUser := models.User{
-		Name:          name,
-		UserLevel:     models.UserLevelUser,
-		AuthProvider:  provider,
-		OidcSubject:   oidcSubject,
+		Name:         name,
+		UserLevel:    models.UserLevelUser,
+		AuthProvider: provider,
+		OidcSubject:  oidcSubject,
 	}
 	if configuration.GetEnvironment().PermRequestGrantedByDefault {
 		newUser.GrantPermission(models.UserPermGuestUploads)

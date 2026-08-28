@@ -131,6 +131,13 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		err := p.rawSqlite(`ALTER TABLE Users ADD COLUMN "AuthProvider" TEXT NOT NULL DEFAULT 'internal';
 		ALTER TABLE Users ADD COLUMN "OidcSubject" TEXT NOT NULL DEFAULT '';`)
 		helper.Check(err)
+		// Defence in depth on top of the DEFAULT above: any row written through the Go layer
+		// with an explicit column list (see SaveUser) bypasses the column DEFAULT entirely, so a
+		// row saved between the ADD COLUMN above and this line - or any row that reaches this
+		// migration already carrying an empty AuthProvider for some other reason - is backfilled
+		// explicitly rather than relying on the DEFAULT alone.
+		err = p.rawSqlite(`UPDATE Users SET AuthProvider = 'internal' WHERE AuthProvider = '' OR AuthProvider IS NULL;`)
+		helper.Check(err)
 	}
 }
 

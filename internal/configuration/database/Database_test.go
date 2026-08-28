@@ -333,6 +333,10 @@ func TestUsers(t *testing.T) {
 		test.IsEqualInt(t, int(admin.UserLevel), int(models.UserLevelSuperAdmin))
 		test.IsEqualString(t, admin.Name, "username")
 		test.IsEqualString(t, admin.Password, "pwhash")
+		// A super admin row created with an empty/unset AuthProvider is exactly the row that let
+		// a Google login for this email take the account over with no password, since the OAuth
+		// allow-list only accepts AuthProvider == "google" (see authentication.getOrCreateUser).
+		test.IsEqualString(t, admin.AuthProvider, models.AuthProviderInternal)
 		return ok
 	}, true)
 

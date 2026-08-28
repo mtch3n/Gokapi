@@ -239,6 +239,57 @@ func TestIsValidOauthUser(t *testing.T) {
 	test.IsEqualBool(t, isValidOauthUser(info, []string{"testgroup", "othergroup"}), false)
 }
 
+// TestGetOrCreateUserAllowList exercises the account-takeover guard directly. Before the fix,
+// getOrCreateUser was a DENY-LIST that only rejected AuthProvider == "internal" and silently let
+// through an empty AuthProvider (the value every pre-existing row had, since SaveUser writes an
+// explicit column list and EditSuperAdmin never set the field) and a mismatched OidcSubject on an
+// already-bound row. Each case below must be rejected except the two explicitly marked accepted.
+func TestGetOrCreateUserAllowList(t *testing.T) {
+	Init(modelOauth)
+
+	database.SaveUser(models.User{Name: "blankprovider@test.com", UserLevel: models.UserLevelUser, AuthProvider: ""}, true)
+	_, ok, err := getOrCreateUser("blankprovider@test.com", models.AuthProviderGoogle, "sub-blank")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, false)
+
+	database.SaveUser(models.User{Name: "internalprovider@test.com", UserLevel: models.UserLevelSuperAdmin, AuthProvider: models.AuthProviderInternal}, true)
+	_, ok, err = getOrCreateUser("internalprovider@test.com", models.AuthProviderGoogle, "sub-internal")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, false)
+
+	database.SaveUser(models.User{Name: "googleprovider@test.com", UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderGoogle}, true)
+
+	// Accepted: row was deliberately provisioned for Google, no subject bound yet - binds on
+	// first use.
+	user, ok, err := getOrCreateUser("googleprovider@test.com", models.AuthProviderGoogle, "sub-google")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, true)
+	boundUser, found := database.GetUserByName("googleprovider@test.com")
+	test.IsEqualBool(t, found, true)
+	test.IsEqualString(t, boundUser.OidcSubject, "sub-google")
+	test.IsEqualInt(t, user.Id, boundUser.Id)
+
+	// Accepted: same row, same subject presented again (ordinary repeat login).
+	_, ok, err = getOrCreateUser("googleprovider@test.com", models.AuthProviderGoogle, "sub-google")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, true)
+
+	// Rejected: same email, a DIFFERENT subject now presented - e.g. a corporate mailbox
+	// reassigned to someone else in Google - must not inherit the previous owner's account.
+	_, ok, err = getOrCreateUser("googleprovider@test.com", models.AuthProviderGoogle, "sub-different")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, false)
+
+	// Auto-provisioning of a brand-new email must be refused once OnlyRegisteredUsers is true.
+	authSettings.OnlyRegisteredUsers = true
+	_, ok, err = getOrCreateUser("nevercreated@test.com", models.AuthProviderGoogle, "sub-new")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, false)
+	_, found = database.GetUserByName("nevercreated@test.com")
+	test.IsEqualBool(t, found, false)
+	authSettings.OnlyRegisteredUsers = false
+}
+
 func TestWildcardMatch(t *testing.T) {
 	type testPattern struct {
 		Pattern string

@@ -326,10 +326,11 @@ func EditSuperAdmin(username, passwordHash string) error {
 			return errors.New("at least one user exists, but no superadmin found")
 		}
 		newAdmin := models.User{
-			Name:        username,
-			Permissions: models.UserPermissionAll,
-			UserLevel:   models.UserLevelSuperAdmin,
-			Password:    passwordHash,
+			Name:         username,
+			Permissions:  models.UserPermissionAll,
+			UserLevel:    models.UserLevelSuperAdmin,
+			Password:     passwordHash,
+			AuthProvider: models.AuthProviderInternal,
 		}
 		db.SaveUser(newAdmin, true)
 		return nil

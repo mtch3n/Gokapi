@@ -21,7 +21,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 8
+const DatabaseSchemeVersion = 9
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -161,6 +161,21 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	// < v2.2.5
 	if currentDbVersion < 8 {
 		p.DeleteAllSessions()
+	}
+	// < v2.4.0 (hybrid auth support)
+	// Redis has no ADD COLUMN with a DEFAULT: a user hash written before AuthProvider existed
+	// simply lacks that field, and redigo.ScanStruct returns the zero value (empty string) for
+	// it - the exact value that the account-takeover allow-list in
+	// webserver/authentication.getOrCreateUser treats as "not provisioned for OIDC, but also not
+	// yet backfilled". Every existing user is rewritten here with AuthProvider explicitly set to
+	// "internal" so that guard has something correct to compare against.
+	if currentDbVersion < 9 {
+		for _, user := range p.GetAllUsers() {
+			if user.AuthProvider == "" {
+				user.AuthProvider = models.AuthProviderInternal
+				p.SaveUser(user, false)
+			}
+		}
 	}
 }
 

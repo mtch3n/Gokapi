@@ -1827,7 +1827,7 @@ func requireLogin(next http.HandlerFunc, isUiCall, isPwChangeView bool) http.Han
 			authConfig := configuration.Get().Authentication
 			isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
 			// Force password change for internal auth users only (not OAuth-provisioned users)
-			if user.ResetPassword && isUiCall && (authConfig.Method == models.AuthenticationInternal || (isHybrid && user.AuthProvider != "oidc")) {
+			if user.ResetPassword && isUiCall && (authConfig.Method == models.AuthenticationInternal || (isHybrid && user.AuthProvider != models.AuthProviderGoogle)) {
 				if !isPwChangeView {
 					redirect(w, r, "changePassword")
 					return

@@ -405,7 +405,7 @@ func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	newUser, err := users.Create(request.Username, "internal", "")
+	newUser, err := users.Create(request.Username, models.AuthProviderInternal, "")
 	if err != nil {
 		switch {
 		case errors.Is(err, users.ErrorNameToShort):

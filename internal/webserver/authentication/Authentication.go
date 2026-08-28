@@ -150,7 +150,7 @@ func isGrantedHeader(r *http.Request) (models.User, bool, error) {
 	if userName == "" {
 		return models.User{}, false, errors.New("header key is not set or empty")
 	}
-	return getOrCreateUser(userName, "internal", "")
+	return getOrCreateUser(userName, models.AuthProviderInternal, "")
 }
 
 func matchesWithWildcard(pattern, input string) (bool, error) {
@@ -252,7 +252,7 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 		}
 	}
 	if isValidOauthUser(userInfo, groups) {
-		user, ok, errCreate := getOrCreateUser(userInfo.Email, "google", userInfo.Subject)
+		user, ok, errCreate := getOrCreateUser(userInfo.Email, models.AuthProviderGoogle, userInfo.Subject)
 		if errCreate != nil {
 			return errCreate
 		}
@@ -268,24 +268,34 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 	return nil
 }
 
-// getOrCreateUser handles provider-aware user binding
-// For OAuth/OIDC: matches by email and enforces provider consistency
-// For internal: matches by username
+// getOrCreateUser handles provider-aware user binding.
+// For OAuth/OIDC (provider == models.AuthProviderGoogle): this is an ALLOW-LIST. A row is only
+// ever authenticated through this path if it was deliberately provisioned for OIDC, i.e. its
+// stored AuthProvider is already models.AuthProviderGoogle. An empty, "internal", or any other
+// AuthProvider is rejected outright - this is what stops a Google login for the super admin's
+// (or any internal user's) email address from silently taking over that account. Within a row
+// that is allowed, the OidcSubject is either bound on first use (a row that was provisioned for
+// OIDC but never logged in yet) or must match exactly on every later login; a mismatch (e.g. a
+// corporate email address reassigned to a different person in Google) is rejected too.
+// For internal/header auth: matches by username only, unchanged.
 func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool, error) {
 	user, ok := database.GetUserByName(username)
 	if ok {
-		// User exists by name/email
-		if provider == "google" {
-			// Attempting to authenticate via Google
-			if user.AuthProvider == "internal" {
-				// Account takeover protection: reject if user was created for internal auth
+		if provider == models.AuthProviderGoogle {
+			if user.AuthProvider != models.AuthProviderGoogle {
+				// Not a row deliberately provisioned for OIDC: reject regardless of whether
+				// AuthProvider is empty, "internal", or anything else. This is the account
+				// takeover guard.
 				return models.User{}, false, nil
 			}
-			// User is google provider or empty - bind/update if needed
-			if user.OidcSubject == "" && oidcSubject != "" {
-				// First time linking this OIDC subject
+			if user.OidcSubject == "" {
+				// First-time binding on a row that was deliberately provisioned for OIDC.
 				user.OidcSubject = oidcSubject
 				database.SaveUser(user, false)
+			} else if user.OidcSubject != oidcSubject {
+				// A different subject is presented for the same email - e.g. a reassigned
+				// corporate mailbox - must not inherit the previous owner's account.
+				return models.User{}, false, nil
 			}
 		}
 		return user, true, nil

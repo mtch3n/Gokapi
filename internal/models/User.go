@@ -9,6 +9,15 @@ import (
 // UserPermission contains zero or more permissions as uint16
 type UserPermission uint16
 
+// AuthProviderInternal marks a user row provisioned for the internal username/password
+// authentication method. A row with this AuthProvider must never be authenticated through the
+// OAuth/OIDC path, regardless of what email address is presented.
+const AuthProviderInternal = "internal"
+
+// AuthProviderGoogle marks a user row provisioned for Google/OIDC OAuth authentication. Only a
+// row with this AuthProvider may be authenticated through the OAuth/OIDC path.
+const AuthProviderGoogle = "google"
+
 // User contains information about the Gokapi user
 type User struct {
 	Id            int            `json:"id" redis:"id"`

@@ -91,6 +91,7 @@ func writeUsers() {
 		LastOnline:    0,
 		Password:      hashSalt("adminadmin", "LW6fW4Pjv8GtdWVLSZD66gYEev6NAaXxOVBw7C"),
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}
 	user := models.User{
 		Id:            7,
@@ -100,6 +101,7 @@ func writeUsers() {
 		LastOnline:    0,
 		Password:      hashSalt("useruser", "LW6fW4Pjv8GtdWVLSZD66gYEev6NAaXxOVBw7C"),
 		ResetPassword: false,
+		AuthProvider:  models.AuthProviderInternal,
 	}
 	database.SaveUser(admin, false)
 	database.SaveUser(user, false)

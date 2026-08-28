@@ -143,6 +143,11 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		_, err := p.exec(`ALTER TABLE Users ADD COLUMN IF NOT EXISTS AuthProvider TEXT NOT NULL DEFAULT 'internal';
 		ALTER TABLE Users ADD COLUMN IF NOT EXISTS OidcSubject TEXT NOT NULL DEFAULT '';`)
 		helper.Check(err)
+		// Defence in depth on top of the DEFAULT above: any row written through the Go layer
+		// with an explicit column list (see SaveUser) bypasses the column DEFAULT entirely, so
+		// backfill any row that reaches this migration with an empty AuthProvider explicitly.
+		_, err = p.exec(`UPDATE Users SET AuthProvider = 'internal' WHERE AuthProvider = '' OR AuthProvider IS NULL;`)
+		helper.Check(err)
 	}
 }
 

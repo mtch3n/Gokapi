@@ -296,6 +296,12 @@ func toConfiguration(formObjects *[]jsonFormObject) (models.Configuration, *clou
 	switch result.Authentication.Method {
 	case models.AuthenticationInternal:
 		result.Authentication.Username = authInfo.UserInternalAuth
+		if result.Authentication.OAuthEnabledAlongsideInternal {
+			// Hybrid mode: an unset OnlyRegisteredUsers previously defaulted to false, letting
+			// any Google account on the internet auto-provision a user. Default to pre-registered
+			// users only unless a wizard field for this is wired up in the future.
+			result.Authentication.OnlyRegisteredUsers = true
+		}
 	case models.AuthenticationOAuth2:
 		result.Authentication.Username = authInfo.UserOAuth
 		result.Authentication.OnlyRegisteredUsers = authInfo.OnlyRegisteredUsersOAuth
