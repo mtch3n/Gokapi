@@ -514,6 +514,30 @@ func LogDelete(file models.File, user models.User) {
 	})
 }
 
+// LogFolderCreate adds a log entry when a folder was created. Non-Blocking
+func LogFolderCreate(bundle models.FileBundle, user models.User) {
+	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s (%s) created by %s (user #%d)", bundle.Id, bundle.Name, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "folder.created",
+		Outcome:  OutcomeSuccess,
+		BundleId: bundle.Id,
+		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+	})
+}
+
+// LogFolderDelete adds a log entry when a folder was deleted. Non-Blocking
+func LogFolderDelete(bundle models.FileBundle, user models.User) {
+	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s (%s) and associated files deleted by %s (user #%d)", bundle.Id, bundle.Name, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "folder.deleted",
+		Outcome:  OutcomeSuccess,
+		BundleId: bundle.Id,
+		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+	})
+}
+
 // LogRestore adds a log entry when the pending deletion of a file was cancelled and the file restored. Non-Blocking
 func LogRestore(file models.File, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, restored by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)

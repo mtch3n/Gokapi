@@ -513,7 +513,14 @@ func apiFolderCreate(w http.ResponseWriter, r requestParser, user models.User, _
 		panic("invalid parameter passed")
 	}
 
+	// Cap folder name length at 256 characters
+	if len(request.Name) > 256 {
+		sendError(w, http.StatusBadRequest, errorcodes.CannotParse, "Folder name is too long (maximum 256 characters)")
+		return
+	}
+
 	bundle := filebundle.Create(request.Name, user.Id)
+	logging.LogFolderCreate(bundle, user)
 
 	response := map[string]interface{}{
 		"Result":     "OK",
@@ -568,6 +575,15 @@ func apiFolderDelete(w http.ResponseWriter, r requestParser, user models.User, _
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this folder")
 		return
 	}
+
+	// Log deletion of each member file before deletion
+	memberFiles := filebundle.GetFiles(bundle)
+	for _, file := range memberFiles {
+		logging.LogDelete(file, user)
+	}
+
+	// Log folder-level deletion
+	logging.LogFolderDelete(bundle, user)
 
 	filebundle.Delete(bundle)
 

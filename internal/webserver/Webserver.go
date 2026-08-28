@@ -1474,19 +1474,16 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all files and find the first one with a password (by Id ascending)
+	// Get all files and find ALL that have a password
 	allFiles := database.GetAllMetadata()
-	var passwordFile *models.File
+	var passwordFiles []models.File
 	for _, file := range allFiles {
 		if file.BundleId == bundle.Id && file.PasswordHash != "" {
-			if passwordFile == nil || file.Id < passwordFile.Id {
-				f := file
-				passwordFile = &f
-			}
+			passwordFiles = append(passwordFiles, file)
 		}
 	}
 
-	if passwordFile == nil {
+	if len(passwordFiles) == 0 {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "{\"ok\":false}")
 		return
@@ -1511,22 +1508,37 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 	ip := logging.GetIpAddress(r)
 	ratelimiter.WaitOnDownloadPassword(ip)
 
-	// Verify password using the same logic as file password
-	isValid, isLegacy := configuration.VerifyPassword(password, passwordFile.PasswordHash, configuration.Get().Authentication.SaltFiles)
-	if isValid {
+	// Verify password against EVERY protected member
+	allValid := true
+	var migratedFiles []models.File
+	for i, file := range passwordFiles {
+		isValid, isLegacy := configuration.VerifyPassword(password, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
+		if !isValid {
+			allValid = false
+			break
+		}
 		// Migrate legacy passwords to the new format
 		if isLegacy {
-			passwordFile.PasswordHash = configuration.HashPassword(password, false, "")
-			database.SaveMetaData(*passwordFile)
+			file.PasswordHash = configuration.HashPassword(password, false, "")
+			migratedFiles = append(migratedFiles, file)
+			passwordFiles[i] = file
 		}
-		writeFolderPwCookie(w, bundle)
+	}
+
+	if !allValid {
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "{\"ok\":true}")
+		_, _ = io.WriteString(w, "{\"ok\":false}")
 		return
 	}
 
+	// Save any migrated passwords
+	for _, file := range migratedFiles {
+		database.SaveMetaData(file)
+	}
+
+	writeFolderPwCookie(w, bundle)
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, "{\"ok\":false}")
+	_, _ = io.WriteString(w, "{\"ok\":true}")
 }
 
 // Handling of /pubapi/folderzip
@@ -1573,6 +1585,9 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if file.RequiresClientDecryption() {
+			continue
+		}
+		if file.IsFileRequest() {
 			continue
 		}
 
@@ -1647,10 +1662,10 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 // Serve a single file from a bundle with proper headers and decryption
 func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
 	// Use ServeFile with forceDownload=true to set attachment headers and serve the file
-	// increaseCounter=false to not decrement download counter (matches zip/presign decision)
+	// increaseCounter=true to decrement download counter (matches the /d door behavior)
 	// forceDecryption=false to handle decryption normally
-	// recheckExpiry=false since we already checked expiry
-	storage.ServeFile(file, w, r, true, false, false, false)
+	// recheckExpiry=true to verify expiry at serve time
+	storage.ServeFile(file, w, r, true, true, false, true)
 }
 
 // Check if folder is password protected and if a valid cookie exists

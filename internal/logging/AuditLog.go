@@ -110,6 +110,7 @@ type AuditEntry struct {
 	Ip         string           `json:"ip,omitempty"`
 	FileId     string           `json:"fileId,omitempty"`
 	RequestId  string           `json:"requestId,omitempty"`
+	BundleId   string           `json:"bundleId,omitempty"`
 	Actor      AuditActor       `json:"actor"`
 	FileConfig *AuditFileConfig `json:"fileConfig,omitempty"`
 	// Detail is a short free-form description for event-specific context that does not
