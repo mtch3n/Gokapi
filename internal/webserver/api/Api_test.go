@@ -2634,3 +2634,38 @@ func testFolderDeleteCall(t *testing.T, apiKey models.ApiKey, folderId string, r
 		test.ResponseBodyIs(t, w, expectedResponse)
 	}
 }
+
+// TestChunkCompleteBundleOwnershipRejected tests that /api/chunk/complete rejects
+// attempts to upload to a bundle owned by a different user. The bundleid header
+// must belong to the authenticated user.
+func TestChunkCompleteBundleOwnershipRejected(t *testing.T) {
+	apiKeyUser := generateNewKey(false, idUser, "", "")
+	apiKeyUser.GrantPermission(models.ApiPermUpload)
+	database.SaveApiKey(apiKeyUser)
+
+	apiKeyAdmin := generateNewKey(false, idAdmin, "", "")
+	apiKeyAdmin.GrantPermission(models.ApiPermUpload)
+	database.SaveApiKey(apiKeyAdmin)
+
+	bundleUser := filebundle.Create("TestBundleOwner_User_"+helper.GenerateRandomString(8), idUser)
+	bundleAdmin := filebundle.Create("TestBundleOwner_Admin_"+helper.GenerateRandomString(8), idAdmin)
+
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKeyUser.Id},
+		{Name: "uuid", Value: helper.GenerateRandomString(16)},
+		{Name: "filename", Value: "test.txt"},
+		{Name: "filesize", Value: "100"},
+		{Name: "bundleid", Value: bundleAdmin.Id}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"bundle does not belong to user","ErrorCode":10}`)
+
+	w2, r2 := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKeyUser.Id},
+		{Name: "uuid", Value: helper.GenerateRandomString(16)},
+		{Name: "filename", Value: "test2.txt"},
+		{Name: "filesize", Value: "100"},
+		{Name: "bundleid", Value: bundleUser.Id}}, nil)
+	Process(w2, r2)
+	test.IsEqualInt(t, w2.Code, 400)
+}

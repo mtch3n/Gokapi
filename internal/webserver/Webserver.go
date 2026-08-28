@@ -1616,31 +1616,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve single file raw, or multiple files as zip
-	if len(filesToServe) == 1 {
-		file := filesToServe[0]
-
-		// Validate requested ids if specified
-		if len(requestedIds) > 0 {
-			found := false
-			for _, id := range requestedIds {
-				if id == file.Id {
-					found = true
-					break
-				}
-			}
-			if !found {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-		}
-
-		// Serve raw file
-		serveBundleFile(w, r, file)
-		return
-	}
-
-	// Validate all requested ids are members of this bundle
+	// Validate all requested ids are members of this bundle (applies to both single and multi-file cases)
 	if len(requestedIds) > 0 {
 		for _, requestedId := range requestedIds {
 			found := false
@@ -1655,6 +1631,14 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+
+	// Serve single file raw, or multiple files as zip
+	if len(filesToServe) == 1 {
+		file := filesToServe[0]
+		// Serve raw file
+		serveBundleFile(w, r, file)
+		return
 	}
 
 	// Serve as zip

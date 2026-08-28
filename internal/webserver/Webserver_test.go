@@ -4,6 +4,7 @@ package webserver
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/storage/processingstatus"
@@ -1283,5 +1285,388 @@ func TestPublicApiConfigUnauthenticated(t *testing.T) {
 	// Should succeed without authentication
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200 for unauthenticated request, got %d", resp.StatusCode)
+	}
+}
+
+// TestFolderPasswordCrossMemberRejected tests that a password-protected folder requires
+// the password to match ALL members, not just one. A bundle with two members having
+// different passwords should reject a password that only matches one member.
+func TestFolderPasswordCrossMemberRejected(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestFolderCrossPw_" + helper.GenerateRandomString(8)
+	password1 := "password1"
+	password2 := "different_password"
+
+	bundle := filebundle.Create(uniqueName, 999)
+
+	hash1 := configuration.HashPassword(password1, false, "")
+	hash2 := configuration.HashPassword(password2, false, "")
+
+	database.SaveMetaData(models.File{
+		Id:                 helper.GenerateRandomString(16),
+		Name:               "file1.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+		PasswordHash:       hash1,
+	})
+
+	database.SaveMetaData(models.File{
+		Id:                 helper.GenerateRandomString(16),
+		Name:               "file2.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+		PasswordHash:       hash2,
+	})
+
+	client := &http.Client{}
+
+	payloadWrongPw := []byte(`{"password":"password1"}`)
+	req, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payloadWrongPw))
+	if err != nil {
+		t.Errorf("Failed to create request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Errorf("Failed to make POST request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+		return
+	}
+
+	if ok, exists := response["ok"].(bool); !exists || ok {
+		t.Errorf("Expected ok=false, got %v", response["ok"])
+	}
+
+	if len(resp.Cookies()) > 0 {
+		for _, cookie := range resp.Cookies() {
+			if strings.HasPrefix(cookie.Name, "b") {
+				t.Errorf("Expected no bundle cookie to be set, but got %s", cookie.Name)
+			}
+		}
+	}
+
+	bundleMatch := filebundle.Create("TestFolderMatchPw_"+helper.GenerateRandomString(8), 999)
+	sharedHash := configuration.HashPassword("shared_password", false, "")
+
+	database.SaveMetaData(models.File{
+		Id:                 helper.GenerateRandomString(16),
+		Name:               "file3.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundleMatch.Id,
+		PasswordHash:       sharedHash,
+	})
+
+	database.SaveMetaData(models.File{
+		Id:                 helper.GenerateRandomString(16),
+		Name:               "file4.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundleMatch.Id,
+		PasswordHash:       sharedHash,
+	})
+
+	payloadCorrectPw := []byte(`{"password":"shared_password"}`)
+	req2, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundleMatch.Id, bytes.NewReader(payloadCorrectPw))
+	if err != nil {
+		t.Errorf("Failed to create request: %v", err)
+		return
+	}
+	req2.Header.Set("Content-Type", "application/json")
+
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Errorf("Failed to make POST request: %v", err)
+		return
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp2.StatusCode)
+	}
+
+	var response2 map[string]interface{}
+	if err := json.NewDecoder(resp2.Body).Decode(&response2); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+		return
+	}
+
+	if ok, exists := response2["ok"].(bool); !exists || !ok {
+		t.Errorf("Expected ok=true, got %v", response2["ok"])
+	}
+
+	cookieFound := false
+	for _, cookie := range resp2.Cookies() {
+		if strings.HasPrefix(cookie.Name, "b") {
+			cookieFound = true
+			break
+		}
+	}
+	if !cookieFound {
+		t.Errorf("Expected bundle cookie to be set")
+	}
+}
+
+// TestFolderLockedLeaksNothing tests that a password-protected folder without a valid cookie
+// returns only id and requiresPassword fields, never name or files.
+func TestFolderLockedLeaksNothing(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestFolderLocked_" + helper.GenerateRandomString(8)
+	password := "secret_password"
+
+	bundle := filebundle.Create(uniqueName, 999)
+
+	pwHash := configuration.HashPassword(password, false, "")
+
+	database.SaveMetaData(models.File{
+		Id:                 helper.GenerateRandomString(16),
+		Name:               "sensitive.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+		PasswordHash:       pwHash,
+	})
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle.Id)
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+		return
+	}
+
+	if id, ok := response["id"]; !ok || id != bundle.Id {
+		t.Errorf("Expected id '%s', got %v", bundle.Id, id)
+	}
+
+	if requiresPw, ok := response["requiresPassword"].(bool); !ok || !requiresPw {
+		t.Errorf("Expected requiresPassword=true, got %v", response["requiresPassword"])
+	}
+
+	if _, ok := response["name"]; ok {
+		t.Errorf("Expected name to be absent when locked, but it was present: %v", response["name"])
+	}
+
+	if _, ok := response["files"]; ok {
+		t.Errorf("Expected files to be absent when locked, but it was present: %v", response["files"])
+	}
+}
+
+// TestFolderZipCounterEnforced tests that download counter is enforced on folder zip downloads.
+// A member with DownloadsRemaining=1 should allow one download, then subsequent requests fail.
+func TestFolderZipCounterEnforced(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestFolderCounter_" + helper.GenerateRandomString(8)
+
+	bundle := filebundle.Create(uniqueName, 999)
+
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "limited.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: false,
+		DownloadsRemaining: 1,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	client := &http.Client{}
+
+	firstReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+fileId, nil)
+	if err != nil {
+		t.Errorf("Failed to create first request: %v", err)
+		return
+	}
+
+	resp1, err := client.Do(firstReq)
+	if err != nil {
+		t.Errorf("Failed to make first request: %v", err)
+		return
+	}
+	resp1.Body.Close()
+
+	if resp1.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 for first download, got %d", resp1.StatusCode)
+	}
+
+	secondReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+fileId, nil)
+	if err != nil {
+		t.Errorf("Failed to create second request: %v", err)
+		return
+	}
+
+	resp2, err := client.Do(secondReq)
+	if err != nil {
+		t.Errorf("Failed to make second request: %v", err)
+		return
+	}
+	resp2.Body.Close()
+
+	if resp2.StatusCode == http.StatusOK {
+		t.Errorf("Expected status other than 200 for second download (counter exhausted), got %d", resp2.StatusCode)
+	}
+}
+
+// TestFolderZipMembershipAndFileRequestExclusion tests membership validation and file request exclusion.
+// (a) ids containing a file from a different bundle returns 400
+// (b) Files with UploadRequestId set are excluded from /pubapi/folder and /pubapi/folderzip
+func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
+	t.Parallel()
+	bundle1 := filebundle.Create("TestFolderZipMembership_"+helper.GenerateRandomString(8), 999)
+	bundle2 := filebundle.Create("TestFolderZipOther_"+helper.GenerateRandomString(8), 999)
+
+	file1Id := helper.GenerateRandomString(16)
+	file2Id := helper.GenerateRandomString(16)
+	fileRequestId := helper.GenerateRandomString(16)
+
+	database.SaveMetaData(models.File{
+		Id:                 file1Id,
+		Name:               "file1.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle1.Id,
+	})
+
+	database.SaveMetaData(models.File{
+		Id:                 file2Id,
+		Name:               "file2_other_bundle.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle2.Id,
+	})
+
+	database.SaveMetaData(models.File{
+		Id:                 fileRequestId,
+		Name:               "file_request_upload.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle1.Id,
+		UploadRequestId:    "some_request_id",
+	})
+
+	client := &http.Client{}
+
+	resp1, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle1.Id + "&ids=" + file1Id + "," + file2Id)
+	if err != nil {
+		t.Errorf("Failed to make request with cross-bundle ids: %v", err)
+		return
+	}
+	resp1.Body.Close()
+
+	if resp1.StatusCode != http.StatusBadRequest {
+		t.Errorf("Expected status 400 for cross-bundle ids, got %d", resp1.StatusCode)
+	}
+
+	resp2, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle1.Id)
+	if err != nil {
+		t.Errorf("Failed to make folder request: %v", err)
+		return
+	}
+	defer resp2.Body.Close()
+
+	var folderResponse map[string]interface{}
+	if err := json.NewDecoder(resp2.Body).Decode(&folderResponse); err != nil {
+		t.Errorf("Failed to decode folder response: %v", err)
+		return
+	}
+
+	files, ok := folderResponse["files"].([]interface{})
+	if !ok {
+		t.Errorf("Expected files array in response")
+		return
+	}
+
+	if len(files) != 1 {
+		t.Errorf("Expected 1 file (file request should be excluded), got %d files", len(files))
+	}
+
+	resp3, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle1.Id)
+	if err != nil {
+		t.Errorf("Failed to make folderzip request: %v", err)
+		return
+	}
+	defer resp3.Body.Close()
+
+	var zipResponse map[string]interface{}
+	if err := json.NewDecoder(resp3.Body).Decode(&zipResponse); err == nil {
+		t.Errorf("Expected non-JSON error response for folderzip with file request")
 	}
 }
