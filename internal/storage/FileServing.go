@@ -944,11 +944,13 @@ func cleanInvalidFileRequests() {
 
 // cleanInvalidBundles removes bundles that have zero non-pending members and are older than 24 hours
 func cleanInvalidBundles() {
-	for _, bundle := range database.GetAllFileBundles() {
-		if !bundle.IsExpired() {
+	bundles := database.GetAllFileBundles()
+	files := database.GetAllMetadata()
+
+	for _, bundle := range bundles {
+		if !bundle.IsOlderThanGracePeriod() {
 			continue
 		}
-		files := database.GetAllMetadata()
 		hasValidMember := false
 		for _, file := range files {
 			if file.BundleId == bundle.Id && !file.IsPendingForDeletion() {

@@ -1560,8 +1560,11 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get all files once, do exactly one database scan
+	allFiles := database.GetAllMetadata()
+
 	// Check password gate
-	if !isValidFolderPassword(w, r, bundle) {
+	if !isValidFolderPassword(w, r, bundle, allFiles) {
 		return
 	}
 
@@ -1572,8 +1575,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		requestedIds = strings.Split(idsParam, ",")
 	}
 
-	// Get all files and filter
-	allFiles := database.GetAllMetadata()
+	// Filter files
 	timeNow := time.Now().Unix()
 	var filesToServe []models.File
 
@@ -1669,9 +1671,8 @@ func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
 }
 
 // Check if folder is password protected and if a valid cookie exists
-func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle) bool {
-	// Get all files for this bundle
-	allFiles := database.GetAllMetadata()
+func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle, allFiles map[string]models.File) bool {
+	// Check if any file in this bundle has a password
 	isProtected := false
 	for _, file := range allFiles {
 		if file.BundleId == bundle.Id && file.PasswordHash != "" {

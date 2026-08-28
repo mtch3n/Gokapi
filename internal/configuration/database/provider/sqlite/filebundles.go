@@ -56,6 +56,7 @@ func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
 			CreationDate: rowData.CreationDate,
 		})
 	}
+	helper.Check(rows.Err())
 	return result
 }
 

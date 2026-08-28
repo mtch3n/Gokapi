@@ -35,6 +35,9 @@
       "name": "uploadrequest"
     },
     {
+      "name": "folder"
+    },
+    {
       "name": "user"
     },
     {
@@ -1974,6 +1977,176 @@
           },
           "404": {
             "description": "Upload request not found"
+          }
+        }
+      }
+    },
+    "/folder/create": {
+      "post": {
+        "tags": [
+          "folder"
+        ],
+        "summary": "Creates a new file bundle/folder",
+        "description": "This API call creates a new file bundle (folder) owned by the calling user. Requires API permission UPLOAD",
+        "operationId": "foldercreate",
+        "security": [
+          {
+            "apikey": [
+              "UPLOAD"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "header",
+            "description": "The name of the folder. If the name includes non-ANSI characters, you can encode them with base64, by adding 'base64:' at the beginning, e.g. 'base64:ZmlsZW5hbWU='",
+            "required": true,
+            "style": "simple",
+            "explode": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "Result": {
+                      "type": "string",
+                      "example": "OK"
+                    },
+                    "FileBundle": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "userid": {
+                          "type": "integer"
+                        },
+                        "creationdate": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameters supplied"
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          }
+        }
+      }
+    },
+    "/folder/list": {
+      "get": {
+        "tags": [
+          "folder"
+        ],
+        "summary": "Lists file bundles/folders",
+        "description": "This API call returns a list of file bundles owned by the calling user. Admin users with LIST_OTHER_UPLOADS permission can see all bundles. Requires API permission VIEW",
+        "operationId": "folderlist",
+        "security": [
+          {
+            "apikey": [
+              "VIEW"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "userid": {
+                        "type": "integer"
+                      },
+                      "creationdate": {
+                        "type": "integer"
+                      },
+                      "membercount": {
+                        "type": "integer"
+                      },
+                      "totalsizebytes": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          }
+        }
+      }
+    },
+    "/folder/delete": {
+      "post": {
+        "tags": [
+          "folder"
+        ],
+        "summary": "Deletes a file bundle/folder and all associated files",
+        "description": "This API call deletes a file bundle and all files associated with it. To delete a bundle of a different user, the user requires the user permission DELETE to execute this call. Requires API permission DELETE",
+        "operationId": "folderdelete",
+        "security": [
+          {
+            "apikey": [
+              "DELETE"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "header",
+            "description": "The folder/bundle to be deleted",
+            "required": true,
+            "style": "simple",
+            "explode": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful"
+          },
+          "400": {
+            "description": "Invalid ID or parameters supplied"
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "404": {
+            "description": "Folder not found"
           }
         }
       }

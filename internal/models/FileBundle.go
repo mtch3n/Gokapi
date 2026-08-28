@@ -4,11 +4,15 @@ import (
 	"time"
 )
 
+// FileBundleGracePeriod is the time window after creation within which a bundle is kept
+// even if it has no valid members (24 hours)
+const FileBundleGracePeriod = 24 * 60 * 60
+
 // FileBundle contains information about a file bundle (folder)
 type FileBundle struct {
-	Id           string `json:"id" redis:"id"`                   // The internal ID of the bundle
-	Name         string `json:"name" redis:"name"`               // The name of the bundle
-	UserId       int    `json:"userid" redis:"userid"`           // The user ID of the owner
+	Id           string `json:"id" redis:"id"`                     // The internal ID of the bundle
+	Name         string `json:"name" redis:"name"`                 // The name of the bundle
+	UserId       int    `json:"userid" redis:"userid"`             // The user ID of the owner
 	CreationDate int64  `json:"creationdate" redis:"creationdate"` // The timestamp of the bundle creation
 }
 
@@ -29,7 +33,7 @@ func (b *FileBundle) Populate(files map[string]File) ([]File, int64, int) {
 	return memberFiles, totalSize, count
 }
 
-// IsExpired returns true if the bundle was created more than 24 hours ago
-func (b *FileBundle) IsExpired() bool {
-	return time.Now().Unix() > b.CreationDate+86400
+// IsOlderThanGracePeriod returns true if the bundle was created more than 24 hours ago
+func (b *FileBundle) IsOlderThanGracePeriod() bool {
+	return time.Now().Unix() > b.CreationDate+FileBundleGracePeriod
 }

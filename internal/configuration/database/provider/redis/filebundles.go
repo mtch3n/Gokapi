@@ -38,7 +38,7 @@ func (p DatabaseProvider) GetFileBundle(id string) (models.FileBundle, bool) {
 
 // GetAllFileBundles returns an array with all file bundles, ordered by creation date
 func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
-	var result []models.FileBundle
+	result := make([]models.FileBundle, 0)
 	maps := p.getAllHashesWithPrefix(prefixFileBundles)
 	for _, v := range maps {
 		bundle, err := dbToFileBundle(v)

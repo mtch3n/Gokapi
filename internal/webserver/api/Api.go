@@ -522,9 +522,13 @@ func apiFolderCreate(w http.ResponseWriter, r requestParser, user models.User, _
 	bundle := filebundle.Create(request.Name, user.Id)
 	logging.LogFolderCreate(bundle, user)
 
-	response := map[string]interface{}{
-		"Result":     "OK",
-		"FileBundle": bundle,
+	type FolderCreateResponse struct {
+		Result     string           `json:"Result"`
+		FileBundle models.FileBundle `json:"FileBundle"`
+	}
+	response := FolderCreateResponse{
+		Result:     "OK",
+		FileBundle: bundle,
 	}
 	result, err := json.Marshal(response)
 	helper.Check(err)
@@ -541,11 +545,10 @@ func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ m
 		TotalSizeBytes int64 `json:"totalsizebytes"`
 	}
 
-	var result []BundleWithMetadata
+	result := make([]BundleWithMetadata, 0)
 	for _, bundle := range allBundles {
 		if bundle.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
-			memberFiles, totalSize, memberCount := bundle.Populate(allFiles)
-			_ = memberFiles
+			_, totalSize, memberCount := bundle.Populate(allFiles)
 			result = append(result, BundleWithMetadata{
 				FileBundle:     bundle,
 				MemberCount:    memberCount,
@@ -587,8 +590,11 @@ func apiFolderDelete(w http.ResponseWriter, r requestParser, user models.User, _
 
 	filebundle.Delete(bundle)
 
-	response := map[string]interface{}{
-		"Result": "OK",
+	type FolderDeleteResponse struct {
+		Result string `json:"Result"`
+	}
+	response := FolderDeleteResponse{
+		Result: "OK",
 	}
 	jsonResult, err := json.Marshal(response)
 	helper.Check(err)
