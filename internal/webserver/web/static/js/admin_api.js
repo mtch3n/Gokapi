@@ -401,7 +401,12 @@ async function apiFilesListDownloadZip(fileIds, filename) {
 }
 
 
-async function apiFilesModify(id, allowedDownloads, expiry, password, originalPw) {
+// apiFilesModify calls PUT /api/files/modify. Password semantics: omitting the "password"
+// argument (undefined) leaves the file's current password untouched - it is NOT the same as
+// passing an empty string, which the server now rejects as too short rather than treating it
+// as "no password". Pass removePassword=true to explicitly clear password protection; passing
+// both a password and removePassword is rejected by the server.
+async function apiFilesModify(id, allowedDownloads, expiry, password, removePassword) {
     const apiUrl = './api/files/modify';
     const reqPerm = 'PERM_EDIT';
 
@@ -414,17 +419,23 @@ async function apiFilesModify(id, allowedDownloads, expiry, password, originalPw
         throw error;
     }
 
+    const headers = {
+        'Content-Type': 'application/json',
+        'id': id,
+        'apikey': token,
+        'allowedDownloads': allowedDownloads,
+        'expiryTimestamp': expiry,
+    };
+    if (password !== undefined) {
+        headers.password = password;
+    }
+    if (removePassword) {
+        headers.removePassword = true;
+    }
+
     const requestOptions = {
         method: 'PUT',
-        headers: {
-            'Content-Type': 'application/json',
-            'id': id,
-            'apikey': token,
-            'allowedDownloads': allowedDownloads,
-            'expiryTimestamp': expiry,
-            'password': password,
-            'originalPassword': originalPw
-        },
+        headers: headers,
     };
     try {
         const response = await fetch(apiUrl, requestOptions);

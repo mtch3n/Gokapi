@@ -109,7 +109,18 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 	// Validated and hashed up front, before any field of file is touched, so that a
 	// rejected password change (too short, or whitespace that trims to nothing) leaves
 	// every other requested edit unsaved too, instead of applying a partial update.
-	changePassword := !request.KeepPassword
+	//
+	// changePassword is true only when the caller actually sent a "password" header -
+	// never merely because a "keep the original" flag was left at its zero value. This
+	// mirrors paramFilesDuplicate/apiDuplicateFile exactly: an absent password header
+	// always means "do not touch the password", whether that's because the caller wants
+	// to keep it or because the caller only meant to change something else entirely
+	// (e.g. allowedDownloads). Removal is a separate, explicit signal (RemovePassword)
+	// requested through its own header, so it can never happen as the byproduct of an
+	// omission - see paramFilesModify.ProcessParameter in routing.go, which also rejects
+	// a request that sets both password and removePassword at once.
+	changePassword := request.IsPasswordSet
+	removePassword := request.RemovePassword
 	var newPasswordHash string
 	if changePassword {
 		validatedPassword, err := configuration.ValidateSharePassword(request.Password, request.IsPasswordSet)
@@ -143,6 +154,9 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 
 	if changePassword {
 		file.PasswordHash = newPasswordHash
+		downloadPasswordToken.DeleteAllForFile(file.Id)
+	} else if removePassword {
+		file.PasswordHash = ""
 		downloadPasswordToken.DeleteAllForFile(file.Id)
 	}
 

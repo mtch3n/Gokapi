@@ -499,7 +499,7 @@
           {
             "name": "password",
             "in": "header",
-            "description": "Password for this file to be set. No password will be used if empty.",
+            "description": "Sets the password for this file. Omit this header entirely for no password protection. If the header is present, its value is trimmed and must meet the server's minimum password length or the request is rejected with 400; an empty value is NOT treated as 'no password' and is rejected the same way. A password containing bytes outside printable ASCII (or one that happens to start with the literal text 'base64:') should be sent base64-encoded with a 'base64:' prefix, e.g. 'base64:ZmlsZW5hbWU=' - the server decodes it before hashing. Gokapi's own web UI always does this for you.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1105,7 +1105,7 @@
             "name": "password",
             "in": "header",
             "required": false,
-            "description": "Password for this file to be set. No password will be used if empty.",
+            "description": "Sets a new password for the duplicated file. Omit this header entirely to keep the source file's original password (protected or not). If the header is present, its value is trimmed and must meet the server's minimum password length or the request is rejected with 400; an empty value is NOT treated as 'no password' and is rejected the same way. A password containing bytes outside printable ASCII (or one that happens to start with the literal text 'base64:') should be sent base64-encoded with a 'base64:' prefix, e.g. 'base64:ZmlsZW5hbWU=' - the server decodes it before hashing. Gokapi's own web UI always does this for you.",
             "schema": {
               "type": "string"
             }
@@ -1260,16 +1260,16 @@
             "schema": {
               "type": "string"
             },
-            "description": "Password for this file to be set. No password will be used if empty."
+            "description": "Sets a new password for this file. Omit this header entirely to leave the file's current password protection untouched - this is the only way to edit other fields (e.g. allowedDownloads) without affecting the password. If the header is present, its value is trimmed and must meet the server's minimum password length (GET /pubapi/authinfo) or the request is rejected with 400; an empty value is NOT treated as 'no password' and is rejected the same way. To remove password protection, use removePassword instead of sending an empty password. A password containing bytes outside printable ASCII (or one that happens to start with the literal text 'base64:') should be sent base64-encoded with a 'base64:' prefix, e.g. 'base64:ZmlsZW5hbWU=' - the server decodes it before hashing. Gokapi's own web UI always does this for you."
           },
           {
-            "name": "originalPassword",
+            "name": "removePassword",
             "in": "header",
             "required": false,
             "schema": {
               "type": "boolean"
             },
-            "description": "Set to true to use the original password. Field \"password\" will be ignored if set."
+            "description": "Set to true to remove password protection from the file. This is the only way to remove a password: omitting the password header keeps the current password unchanged, it does not remove it. Cannot be combined with the password header in the same request; doing so is rejected with 400."
           }
         ],
         "responses": {

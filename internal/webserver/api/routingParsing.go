@@ -359,16 +359,16 @@ func (p *paramFilesModify) ParseRequest(r *http.Request) error {
 		}
 	}
 
-	// RequestParser header value "originalPassword", required: false
-	exists, err = checkHeaderExists(r, "originalPassword", false, false)
+	// RequestParser header value "removePassword", required: false
+	exists, err = checkHeaderExists(r, "removePassword", false, false)
 	if err != nil {
 		return err
 	}
-	p.foundHeaders["originalPassword"] = exists
+	p.foundHeaders["removePassword"] = exists
 	if exists {
-		p.KeepPassword, err = parseHeaderBool(r, "originalPassword")
+		p.RemovePassword, err = parseHeaderBool(r, "removePassword")
 		if err != nil {
-			return fmt.Errorf("invalid value in header originalPassword supplied")
+			return fmt.Errorf("invalid value in header removePassword supplied")
 		}
 	}
 

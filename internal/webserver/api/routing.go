@@ -464,12 +464,19 @@ func (p *paramFilesDuplicate) ProcessParameter(r *http.Request) error {
 	return nil
 }
 
+// paramFilesModify's password semantics are deliberately the same as paramFilesDuplicate's
+// (see ProcessParameter below and apiDuplicateFile in Api.go): whether the password header
+// was actually PRESENT on the request - not whether a "keep the original" flag defaulted to
+// false - is the only signal that decides whether the password is touched at all. Omitting
+// both headers must be indistinguishable from an explicit "keep current password", never an
+// implicit "remove it". Removal is its own explicit signal (RemovePassword), so a caller can
+// never wipe a password as the side effect of leaving an optional header off a request.
 type paramFilesModify struct {
 	Id                 string `header:"id" required:"true"`
 	AllowedDownloads   int    `header:"allowedDownloads"`
 	ExpiryTimestamp    int64  `header:"expiryTimestamp"`
 	Password           string `header:"password" supportBase64:"true"`
-	KeepPassword       bool   `header:"originalPassword"`
+	RemovePassword     bool   `header:"removePassword"`
 	UnlimitedDownloads bool
 	UnlimitedExpiry    bool
 	IsPasswordSet      bool
@@ -484,6 +491,9 @@ func (p *paramFilesModify) ProcessParameter(_ *http.Request) error {
 		p.UnlimitedExpiry = true
 	}
 	p.IsPasswordSet = p.foundHeaders["password"]
+	if p.IsPasswordSet && p.RemovePassword {
+		return errors.New("cannot set both password and removePassword")
+	}
 	return nil
 }
 

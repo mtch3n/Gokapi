@@ -25,6 +25,7 @@ import (
 	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
+	"github.com/forceu/gokapi/internal/webserver/authentication/downloadPasswordToken"
 	"github.com/forceu/gokapi/internal/webserver/ratelimiter"
 )
 
@@ -2090,7 +2091,6 @@ func TestEditFileRejectsWhitespaceOnlyPassword(t *testing.T) {
 
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: "editpwwhitespace"},
-		{Name: "originalPassword", Value: "false"},
 		{Name: "password", Value: "   "},
 	})
 	Process(w, r)
@@ -2119,7 +2119,6 @@ func TestEditFileRejectsShortPassword(t *testing.T) {
 
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: "editpwshort"},
-		{Name: "originalPassword", Value: "false"},
 		{Name: "password", Value: "short1"},
 	})
 	Process(w, r)
@@ -2147,7 +2146,6 @@ func TestEditFileAcceptsValidPassword(t *testing.T) {
 
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: "editpwvalid"},
-		{Name: "originalPassword", Value: "false"},
 		{Name: "password", Value: "avalidpassword"},
 	})
 	Process(w, r)
@@ -2159,11 +2157,17 @@ func TestEditFileAcceptsValidPassword(t *testing.T) {
 	test.IsEqualBool(t, file.PasswordHash != "", true)
 }
 
-// TestEditFileAbsentPasswordHeaderKeepsExistingHash confirms that not sending a password
-// header at all - "the caller is not changing the password, or is deliberately creating
-// an unprotected file" - continues to work: with "keep current password" left at its
-// default, an edit that omits the password header entirely must leave the existing hash
-// exactly as it was, with no rejection and no silent change.
+// TestEditFileAbsentPasswordHeaderKeepsExistingHash is the exact reproduction from the
+// BLOCKER 1 report: a caller changes an unrelated field (allowedDownloads) on a
+// password-protected file and sends NEITHER "password" NOR the old "originalPassword"
+// header at all. Before the fix, KeepPassword (parsed from the optional originalPassword
+// header) defaulted to false when the header was absent, which made
+// changePassword := !request.KeepPassword true and wrote an empty password hash - silently
+// stripping protection as the byproduct of an omitted, optional header. The fix requires a
+// password header to actually be PRESENT before the password is touched at all, exactly
+// mirroring paramFilesDuplicate/apiDuplicateFile (see routing.go and Api.go). This test
+// sends only "id" and "allowedDownloads", matching the reviewer's runtime reproduction, and
+// must observe the file still password protected afterwards.
 func TestEditFileAbsentPasswordHeaderKeepsExistingHash(t *testing.T) {
 	const apiUrl = "/files/modify"
 	apiKey := generateNewKey(true, idUser, "", "")
@@ -2179,12 +2183,162 @@ func TestEditFileAbsentPasswordHeaderKeepsExistingHash(t *testing.T) {
 
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: "editpwabsent"},
-		{Name: "originalPassword", Value: "true"},
+		{Name: "allowedDownloads", Value: "25"},
 	})
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
 
 	file, ok := database.GetMetaDataById("editpwabsent")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.PasswordHash, "existinghash")
+	test.IsEqualBool(t, file.PasswordHash != "", true)
+	test.IsEqualInt(t, file.DownloadsRemaining, 25)
+}
+
+// TestEditFileRemovePasswordHeaderRemovesProtection is MAJOR 2's fix: the only way to
+// deliberately remove a password is the dedicated removePassword header. It must clear the
+// stored hash AND invalidate any outstanding download-password tokens for the file, exactly
+// like a password change does.
+//
+// This test also sends the retired "originalPassword: true" header alongside removePassword,
+// which is deliberate, not an oversight: under the pre-fix code, that header alone is enough
+// to make changePassword false (keep the password), which would leave the file protected and
+// make this test fail red - the removal would only have "worked" via the OLD code's blanket
+// "no originalPassword=true means wipe everything" bug, not because a removal was genuinely
+// honored. Sending both proves removePassword is what does the work in the fixed code, and
+// that the retired header is now inert rather than quietly overriding it.
+func TestEditFileRemovePasswordHeaderRemovesProtection(t *testing.T) {
+	const apiUrl = "/files/modify"
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwremove",
+		Name:               "editpwremove.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+	token := downloadPasswordToken.Generate("editpwremove")
+	test.IsEqualBool(t, downloadPasswordToken.IsValid(token, "editpwremove"), true)
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: "editpwremove"},
+		{Name: "originalPassword", Value: "true"},
+		{Name: "removePassword", Value: "true"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	file, ok := database.GetMetaDataById("editpwremove")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.PasswordHash, "")
+	test.IsEqualBool(t, downloadPasswordToken.IsValid(token, "editpwremove"), false)
+}
+
+// TestEditFileRejectsPasswordAndRemovePasswordTogether confirms that sending both headers
+// in the same request - a genuinely contradictory instruction ("set this password" and
+// "remove the password" at once) - is rejected rather than silently picking one, and that
+// the stored hash is left untouched.
+func TestEditFileRejectsPasswordAndRemovePasswordTogether(t *testing.T) {
+	const apiUrl = "/files/modify"
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwbothheaders",
+		Name:               "editpwbothheaders.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: "editpwbothheaders"},
+		{Name: "password", Value: "avalidpassword"},
+		{Name: "removePassword", Value: "true"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	file, ok := database.GetMetaDataById("editpwbothheaders")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.PasswordHash, "existinghash")
+}
+
+// TestEditFileRejectsWhitespaceOnlyPasswordOverRealSocket is MAJOR 3's fix: every other
+// whitespace-only-password test in this file goes through getRecorder, which builds the
+// request with httptest.NewRequest and r.Header.Set - that stores "   " in the Header map
+// verbatim, without going through Go's HTTP header parser. Over a real socket, Go's
+// textproto reader trims optional whitespace (OWS) from a header value, so a
+// whitespace-only value arrives as "", and r.Header.Get(key) != "" (the fast path in
+// checkHeaderExists) is false. checkHeaderExists can then only report the header as present
+// via the isString fallback branch (routing.go: len(r.Header.Values(key)) > 0) - the branch
+// this whole fix's presence-vs-value distinction depends on. This test proves that branch is
+// actually exercised end to end, by sending the request over a real httptest.Server through
+// a real http.Client instead of building an *http.Request in memory.
+func TestEditFileRejectsWhitespaceOnlyPasswordOverRealSocket(t *testing.T) {
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwwhitespacesocket",
+		Name:               "editpwwhitespacesocket.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(Process))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/files/modify", nil)
+	test.IsNil(t, err)
+	req.Header.Set("apikey", apiKey.Id)
+	req.Header.Set("id", "editpwwhitespacesocket")
+	req.Header.Set("password", "   ")
+
+	resp, err := http.DefaultClient.Do(req)
+	test.IsNil(t, err)
+	defer resp.Body.Close()
+	test.IsEqualInt(t, resp.StatusCode, 400)
+
+	file, ok := database.GetMetaDataById("editpwwhitespacesocket")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.PasswordHash, "existinghash")
+}
+
+// TestEditFileAbsentPasswordHeaderKeepsExistingHashOverRealSocket is the real-socket
+// counterpart to TestEditFileAbsentPasswordHeaderKeepsExistingHash, and also a real-socket
+// proof for BLOCKER 1 itself: a genuinely absent header, sent over a real connection, must
+// leave the password untouched.
+func TestEditFileAbsentPasswordHeaderKeepsExistingHashOverRealSocket(t *testing.T) {
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwabsentsocket",
+		Name:               "editpwabsentsocket.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(Process))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/files/modify", nil)
+	test.IsNil(t, err)
+	req.Header.Set("apikey", apiKey.Id)
+	req.Header.Set("id", "editpwabsentsocket")
+	req.Header.Set("allowedDownloads", "25")
+
+	resp, err := http.DefaultClient.Do(req)
+	test.IsNil(t, err)
+	defer resp.Body.Close()
+	test.IsEqualInt(t, resp.StatusCode, 200)
+
+	file, ok := database.GetMetaDataById("editpwabsentsocket")
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, file.PasswordHash, "existinghash")
 }
@@ -2246,7 +2400,6 @@ func TestEditFileNonAsciiPasswordRoundTrips(t *testing.T) {
 	headerValue := "base64:" + base64.StdEncoding.EncodeToString([]byte(nonAsciiPassword))
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: "editpwnonascii"},
-		{Name: "originalPassword", Value: "false"},
 		{Name: "password", Value: headerValue},
 	})
 	Process(w, r)

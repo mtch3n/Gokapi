@@ -353,8 +353,7 @@ function editFile() {
 
     let allowedDownloads = document.getElementById('mi_edit_down').value;
     let expiryTimestamp = document.getElementById('mi_edit_expiry').value;
-    let password = document.getElementById('mi_edit_pw').value;
-    let originalPassword = (password === '(unchanged)');
+    let passwordField = document.getElementById('mi_edit_pw').value;
 
     if (!document.getElementById('mc_download').checked) {
         allowedDownloads = 0;
@@ -362,9 +361,18 @@ function editFile() {
     if (!document.getElementById('mc_expiry').checked) {
         expiryTimestamp = 0;
     }
+
+    // Password: three explicit, mutually exclusive outcomes, never the side effect of an
+    // empty or placeholder field left over from opening the dialog.
+    //   - checkbox unchecked              -> explicit removal (removePassword header)
+    //   - checkbox checked, "(unchanged)" -> keep the current password (send neither header)
+    //   - checkbox checked, real value    -> change the password (password header only)
+    let password = undefined;
+    let removePassword = false;
     if (!document.getElementById('mc_password').checked) {
-        originalPassword = false;
-        password = "";
+        removePassword = true;
+    } else if (passwordField !== '(unchanged)') {
+        password = passwordField;
     }
 
     let replaceFile = false;
@@ -374,7 +382,7 @@ function editFile() {
         replaceFile = (replaceId != "");
     }
 
-    apiFilesModify(id, allowedDownloads, expiryTimestamp, password, originalPassword)
+    apiFilesModify(id, allowedDownloads, expiryTimestamp, password, removePassword)
         .then(data => {
             if (!replaceFile) {
                 location.reload();
