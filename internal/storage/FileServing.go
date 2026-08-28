@@ -413,7 +413,14 @@ func DuplicateFile(file models.File, parametersToChange int, newFileName string,
 		newFile.UnlimitedDownloads = fileParameters.UnlimitedDownload
 	}
 	if changePassword {
-		newFile.PasswordHash = configuration.HashPassword(fileParameters.Password, false, "")
+		// changePassword is only true when the caller (apiDuplicateFile) determined that a
+		// password header was actually present in the request, so isPresent is always true
+		// here - see paramFilesDuplicate.ProcessParameter in routing.go.
+		validatedPassword, err := configuration.ValidateSharePassword(fileParameters.Password, true)
+		if err != nil {
+			return models.File{}, err
+		}
+		newFile.PasswordHash = configuration.HashPassword(validatedPassword, false, "")
 	}
 	if changeName {
 		newFile.Name = newFileName

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -644,7 +645,7 @@ func TestDuplicateFile(t *testing.T) {
 		AllowedDownloads:  5,
 		Expiry:            5,
 		ExpiryTimestamp:   200000,
-		Password:          "1234",
+		Password:          "password1",
 		UnlimitedDownload: true,
 		UnlimitedTime:     true,
 	}
@@ -710,18 +711,20 @@ func TestDuplicateFile(t *testing.T) {
 	test.IsEqualBool(t, newFile.UnlimitedTime, false)
 	test.IsEqualString(t, newFile.Name, "test.dat")
 
+	// A duplicate request that explicitly asks to change the password (ParamPassword set,
+	// which storage.DuplicateFile's caller only does when a password header was actually
+	// present - see paramFilesDuplicate.ProcessParameter) but supplies an empty value must
+	// be rejected, not silently produce an unprotected duplicate. This is the duplicate
+	// path's equivalent of the whitespace-only-password confidentiality bug on the edit
+	// path: the caller intended to set a password (isPresent=true), so an empty result -
+	// whether truly empty or whitespace that trimmed away to nothing - is refused rather
+	// than treated as "no password wanted".
 	uploadRequest.Password = ""
 	newFile, err = DuplicateFile(retrievedFile, ParamPassword, "123", uploadRequest)
-	test.IsNil(t, err)
-	test.IsEqualInt(t, newFile.DownloadCount, 0)
-	test.IsEqualInt(t, newFile.DownloadsRemaining, 1)
-	test.IsEqualInt64(t, newFile.ExpireAt, 2147483600)
-	test.IsEqualString(t, newFile.PasswordHash, "")
-	test.IsEqualBool(t, newFile.UnlimitedDownloads, false)
-	test.IsEqualBool(t, newFile.UnlimitedTime, false)
-	test.IsEqualString(t, newFile.Name, "test.dat")
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, configuration.ErrSharePasswordTooShort), true)
 
-	uploadRequest.Password = "123"
+	uploadRequest.Password = "password2"
 	newFile, err = DuplicateFile(retrievedFile, ParamExpiry|ParamPassword|ParamDownloads|ParamName, "123", uploadRequest)
 	test.IsNil(t, err)
 	test.IsEqualInt(t, newFile.DownloadCount, 0)
@@ -732,6 +735,21 @@ func TestDuplicateFile(t *testing.T) {
 	test.IsEqualBool(t, newFile.UnlimitedTime, true)
 	test.IsEqualString(t, newFile.Name, "123")
 
+}
+
+// TestDuplicateFileRejectsWhitespaceOnlyPassword proves the fix directly against a
+// whitespace-only password, the exact string the reported bug used to reproduce a
+// silently-unprotected file.
+func TestDuplicateFileRejectsWhitespaceOnlyPassword(t *testing.T) {
+	tempFile, err := createTestFile()
+	test.IsNil(t, err)
+	file := tempFile.File
+	file.PasswordHash = "existinghash"
+	database.SaveMetaData(file)
+
+	_, err = DuplicateFile(file, ParamPassword, "duplicate.dat", models.UploadParameters{Password: "   "})
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, configuration.ErrSharePasswordTooShort), true)
 }
 
 func TestServeFile(t *testing.T) {

@@ -35,7 +35,7 @@ func TestParseConfig(t *testing.T) {
 	data := testData{
 		allowedDownloads: "9",
 		expiryDays:       "5",
-		password:         "123",
+		password:         "longenoughpw",
 		isE2E:            "",
 		realSize:         "",
 	}
@@ -45,7 +45,7 @@ func TestParseConfig(t *testing.T) {
 	test.IsEqualInt64(t, config.RealSize, 0)
 
 	test.IsEqualInt(t, config.AllowedDownloads, 9)
-	test.IsEqualString(t, config.Password, "123")
+	test.IsEqualString(t, config.Password, "longenoughpw")
 	test.IsEqualInt(t, config.Expiry, 5)
 
 	config, err = parseConfig(data)
@@ -85,6 +85,41 @@ func TestParseConfig(t *testing.T) {
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.IsEndToEndEncrypted, true)
 	test.IsEqualInt64(t, config.RealSize, 200)
+}
+
+// TestParseConfigRejectsWhitespaceOnlyPassword closes the confidentiality bug where a
+// password field that ends up all whitespace was silently treated the same as no
+// password at all, producing an unprotected upload while the caller believed it was
+// protected. Unlike a header value, a form field is not trimmed by the transport, so
+// this reproduces the exact string a real whitespace-only submission would carry.
+func TestParseConfigRejectsWhitespaceOnlyPassword(t *testing.T) {
+	data := testData{password: "   "}
+	_, err := parseConfig(data)
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, configuration.ErrSharePasswordTooShort), true)
+}
+
+func TestParseConfigRejectsShortPassword(t *testing.T) {
+	data := testData{password: "short1"}
+	_, err := parseConfig(data)
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, configuration.ErrSharePasswordTooShort), true)
+}
+
+// TestParseConfigAllowsAbsentPassword confirms that not supplying a password at all -
+// the ordinary "this upload has no password" case - is still accepted without error.
+func TestParseConfigAllowsAbsentPassword(t *testing.T) {
+	data := testData{password: ""}
+	config, err := parseConfig(data)
+	test.IsNil(t, err)
+	test.IsEqualString(t, config.Password, "")
+}
+
+func TestParseConfigAllowsValidPassword(t *testing.T) {
+	data := testData{password: "validpassword"}
+	config, err := parseConfig(data)
+	test.IsNil(t, err)
+	test.IsEqualString(t, config.Password, "validpassword")
 }
 
 func TestProcess(t *testing.T) {
@@ -155,7 +190,7 @@ func TestCompleteChunk(t *testing.T) {
 	data.Del("realSize")
 	data.Set("allowedDownloads", "9")
 	data.Set("expiryDays", "5")
-	data.Set("password", "123")
+	data.Set("password", "longenoughpw")
 	data.Set("chunkid", "randomchunkuuid")
 	data.Set("filename", "random.file")
 	data.Set("filesize", "13")
@@ -178,6 +213,25 @@ func TestCompleteChunk(t *testing.T) {
 	test.IsNil(t, err)
 	_, err = CompleteChunk(chunkId, header, 9, config)
 	test.IsNotNil(t, err)
+}
+
+// TestCompleteChunkRejectsWhitespaceOnlyPassword closes the confidentiality bug for the
+// chunked upload path: a password that is present but all whitespace must be refused
+// with an error at the parsing stage, before a file is ever created, rather than
+// silently producing an unprotected file.
+func TestCompleteChunkRejectsWhitespaceOnlyPassword(t *testing.T) {
+	data := url.Values{}
+	data.Set("allowedDownloads", "9")
+	data.Set("expiryDays", "5")
+	data.Set("password", "   ")
+	data.Set("chunkid", "randomchunkuuid")
+	data.Set("filename", "random.file")
+	data.Set("filesize", "13")
+	_, r := test.GetRecorder("POST", "/uploadComplete", nil, nil, strings.NewReader(data.Encode()))
+	r.Header.Set("Content-type", "application/x-www-form-urlencoded")
+	_, _, _, err := ParseFileHeader(r)
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, errors.Is(err, configuration.ErrSharePasswordTooShort), true)
 }
 
 func getFileUploadRecorder(addChunkInfo bool) *http.Request {

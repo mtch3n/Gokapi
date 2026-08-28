@@ -182,6 +182,14 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	allowedDownloads := values.Get("allowedDownloads")
 	expiryDays := values.Get("expiryDays")
 	password := values.Get("password")
+	// Unlike a header value, a form field is not trimmed by the transport, so a
+	// whitespace-only submission survives here intact and password != "" correctly
+	// signals "the caller supplied something", the same presence bit a header-based
+	// caller gets from its foundHeaders map.
+	validatedPassword, err := configuration.ValidateSharePassword(password, password != "")
+	if err != nil {
+		return models.UploadParameters{}, err
+	}
 	allowedDownloadsInt, err := strconv.Atoi(allowedDownloads)
 	if err != nil {
 		allowedDownloadsInt = 1
@@ -211,7 +219,7 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 			return models.UploadParameters{}, err
 		}
 	}
-	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, password, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "", "")
+	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, validatedPassword, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "", "")
 }
 
 type formOrHeader interface {

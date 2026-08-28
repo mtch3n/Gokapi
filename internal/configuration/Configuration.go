@@ -274,6 +274,48 @@ func HashPassword(password string, useOldHash bool, legacySalt string) string {
 	)
 }
 
+// ErrSharePasswordTooShort is returned by ValidateSharePassword when a caller supplies a
+// password intended to protect a share, but after trimming leading and trailing
+// whitespace it is shorter than the server-side minimum (env.MinLengthPassword).
+var ErrSharePasswordTooShort = errors.New("password does not meet the minimum length requirement")
+
+// ValidateSharePassword enforces the server-side minimum length on a password a caller
+// wants to use to protect a share (an uploaded file or a bundle). This is the single
+// choke point every path that sets a share's PasswordHash must call before hashing, so
+// that no client - whatever it trims, strips or forgets to validate - can end up
+// publishing a file that is supposed to be password protected but isn't.
+//
+// isPresent must reflect whether the caller actually supplied a password value, not
+// merely whether the resulting string is non-empty. This distinction matters because
+// Go's HTTP header parser silently trims a whitespace-only header value down to "" before
+// application code ever sees it, which would otherwise make a password of three spaces
+// indistinguishable from no password being supplied at all - the exact bypass this
+// function exists to close. Callers reading a header-based parameter must pass whether
+// the header was present in the request (e.g. the generated parser's foundHeaders bit),
+// not password != "". Callers reading a raw form field, where whitespace is not trimmed
+// by the transport, may use password != "" instead.
+//
+// When isPresent is false, ("", nil) is returned: no password was requested, which is
+// the ordinary and completely legitimate default for most uploads. When isPresent is
+// true, the value is trimmed and, if the result is shorter than MinLengthPassword -
+// including an empty or whitespace-only submission - ErrSharePasswordTooShort is
+// returned so the caller can reject the request with a clear error instead of silently
+// storing an empty password hash. On success the trimmed password is returned; callers
+// should hash that value, not the original, so a value that only differs by leading or
+// trailing whitespace does not produce a hash the visitor typing it back verbatim can
+// never satisfy.
+func ValidateSharePassword(password string, isPresent bool) (string, error) {
+	if !isPresent {
+		return "", nil
+	}
+	trimmed := strings.TrimSpace(password)
+	minLength := GetEnvironment().MinLengthPassword
+	if len(trimmed) < minLength {
+		return "", fmt.Errorf("%w: minimum length is %d characters", ErrSharePasswordTooShort, minLength)
+	}
+	return trimmed, nil
+}
+
 // VerifyPassword checks a plaintext password against a stored hash.
 // If hash is still SHA1, it will check the sha1 hash and return the second parameter as true, to indicate
 // that the hash was generated with the old hash function and requires rehashing

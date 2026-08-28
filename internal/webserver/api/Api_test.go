@@ -1910,7 +1910,7 @@ func uploadNewFile(t *testing.T) (models.Result, *bytes.Buffer) {
 	test.IsNil(t, err)
 	err = writer.WriteField("expiryDays", "10")
 	test.IsNil(t, err)
-	err = writer.WriteField("password", "12345")
+	err = writer.WriteField("password", "12345678")
 	test.IsNil(t, err)
 	err = writer.Close()
 	test.IsNil(t, err)
@@ -1977,7 +1977,7 @@ func TestDuplicate(t *testing.T) {
 			}
 		}
 		if i > 4 {
-			headers = append(headers, test.Header{Name: "password", Value: "secret"})
+			headers = append(headers, test.Header{Name: "password", Value: "secretpw"})
 		}
 		if i > 5 {
 			headers = append(headers, test.Header{Name: "originalPassword", Value: "true"})
@@ -2066,6 +2066,156 @@ func TestEditFileHotlinkDisabled(t *testing.T) {
 	editedFile, ok = database.GetMetaDataById("hotlinkedittest2")
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, editedFile.HotlinkId, "")
+}
+
+// TestEditFileRejectsWhitespaceOnlyPassword closes the reported confidentiality bug:
+// unchecking "keep current password" and submitting a password of three spaces used to
+// reach apiEditFile as an empty string (Go's HTTP header parser trims a whitespace-only
+// value down to "") and be hashed with configuration.HashPassword, which returns "" for
+// an empty password - silently publishing the file unprotected while the caller was told
+// the update succeeded. The fix must reject this with an error and leave the stored hash
+// untouched.
+func TestEditFileRejectsWhitespaceOnlyPassword(t *testing.T) {
+	const apiUrl = "/files/modify"
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwwhitespace",
+		Name:               "editpwwhitespace.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: "editpwwhitespace"},
+		{Name: "originalPassword", Value: "false"},
+		{Name: "password", Value: "   "},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	file, ok := database.GetMetaDataById("editpwwhitespace")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.PasswordHash, "existinghash")
+}
+
+// TestEditFileRejectsShortPassword is the same bug class as
+// TestEditFileRejectsWhitespaceOnlyPassword, but for a non-whitespace password that is
+// simply shorter than the server-enforced minimum.
+func TestEditFileRejectsShortPassword(t *testing.T) {
+	const apiUrl = "/files/modify"
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwshort",
+		Name:               "editpwshort.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: "editpwshort"},
+		{Name: "originalPassword", Value: "false"},
+		{Name: "password", Value: "short1"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	file, ok := database.GetMetaDataById("editpwshort")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.PasswordHash, "existinghash")
+}
+
+// TestEditFileAcceptsValidPassword confirms the fix does not block a legitimate password
+// change: a password that meets the minimum length is hashed and stored as before.
+func TestEditFileAcceptsValidPassword(t *testing.T) {
+	const apiUrl = "/files/modify"
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwvalid",
+		Name:               "editpwvalid.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: "editpwvalid"},
+		{Name: "originalPassword", Value: "false"},
+		{Name: "password", Value: "avalidpassword"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	file, ok := database.GetMetaDataById("editpwvalid")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, file.PasswordHash != "existinghash", true)
+	test.IsEqualBool(t, file.PasswordHash != "", true)
+}
+
+// TestEditFileAbsentPasswordHeaderKeepsExistingHash confirms that not sending a password
+// header at all - "the caller is not changing the password, or is deliberately creating
+// an unprotected file" - continues to work: with "keep current password" left at its
+// default, an edit that omits the password header entirely must leave the existing hash
+// exactly as it was, with no rejection and no silent change.
+func TestEditFileAbsentPasswordHeaderKeepsExistingHash(t *testing.T) {
+	const apiUrl = "/files/modify"
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwabsent",
+		Name:               "editpwabsent.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		PasswordHash:       "existinghash",
+	})
+
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: "editpwabsent"},
+		{Name: "originalPassword", Value: "true"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	file, ok := database.GetMetaDataById("editpwabsent")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.PasswordHash, "existinghash")
+}
+
+// TestChunkCompleteRejectsWhitespaceOnlyPassword proves the same fix on the upload path:
+// a chunked upload completed through the API with a whitespace-only password header must
+// be refused, not silently create an unprotected file.
+func TestChunkCompleteRejectsWhitespaceOnlyPassword(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermUpload)
+	database.SaveApiKey(apiKey)
+
+	// A real chunk file must exist on disk, otherwise CompleteChunk would fail with
+	// "chunk file does not exist" regardless of the password check this test targets -
+	// see TestChunkCompleteRejectsE2EWhenNotConfigured for the same setup pattern.
+	chunkUUID := "whitespacepwtest"
+	err := os.WriteFile("test/data/chunk-"+chunkUUID, []byte("testcontent"), 0600)
+	test.IsNil(t, err)
+	metadataBefore := len(database.GetAllMetadata())
+
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKey.Id},
+		{Name: "uuid", Value: chunkUUID},
+		{Name: "filename", Value: "test.upload"},
+		{Name: "filesize", Value: "11"},
+		{Name: "password", Value: "   "}},
+		nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"password does not meet the minimum length requirement: minimum length is 8 characters","ErrorCode":10}`)
+	test.IsEqualInt(t, len(database.GetAllMetadata()), metadataBefore)
 }
 
 func TestChunkUpload(t *testing.T) {

@@ -105,6 +105,21 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to edit file.")
 		return
 	}
+
+	// Validated and hashed up front, before any field of file is touched, so that a
+	// rejected password change (too short, or whitespace that trims to nothing) leaves
+	// every other requested edit unsaved too, instead of applying a partial update.
+	changePassword := !request.KeepPassword
+	var newPasswordHash string
+	if changePassword {
+		validatedPassword, err := configuration.ValidateSharePassword(request.Password, request.IsPasswordSet)
+		if err != nil {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+			return
+		}
+		newPasswordHash = configuration.HashPassword(validatedPassword, false, "")
+	}
+
 	if request.UnlimitedDownloads {
 		file.UnlimitedDownloads = true
 	} else {
@@ -126,8 +141,8 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 	// branches above also catches a file that predates the cap being configured.
 	file.ExpireAt, file.UnlimitedTime = fileupload.ClampExpiryTimestamp(file.ExpireAt, file.UnlimitedTime)
 
-	if !request.KeepPassword {
-		file.PasswordHash = configuration.HashPassword(request.Password, false, "")
+	if changePassword {
+		file.PasswordHash = newPasswordHash
 		downloadPasswordToken.DeleteAllForFile(file.Id)
 	}
 
@@ -743,9 +758,14 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 			return
 		}
 	}
+	validatedPassword, err := configuration.ValidateSharePassword(request.Password, request.foundHeaders["password"])
+	if err != nil {
+		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+		return
+	}
 	uploadParams, err := fileupload.CreateUploadConfig(request.AllowedDownloads,
 		request.ExpiryDays,
-		request.Password,
+		validatedPassword,
 		request.UnlimitedTime,
 		request.UnlimitedDownloads,
 		request.IsE2E,
@@ -1052,6 +1072,10 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 	uploadConfig.UserId = user.Id
 	newFile, err := storage.DuplicateFile(file, request.RequestedChanges, request.FileName, uploadConfig)
 	if err != nil {
+		if errors.Is(err, configuration.ErrSharePasswordTooShort) {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+			return
+		}
 		sendError(w, http.StatusInternalServerError, errorcodes.InternalServer, err.Error())
 		return
 	}
