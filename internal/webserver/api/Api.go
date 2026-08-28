@@ -21,6 +21,7 @@ import (
 	"github.com/forceu/gokapi/internal/storage"
 	"github.com/forceu/gokapi/internal/storage/chunking"
 	"github.com/forceu/gokapi/internal/storage/chunking/chunkreservation"
+	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/storage/filerequest"
 	"github.com/forceu/gokapi/internal/storage/presign"
 	"github.com/forceu/gokapi/internal/webserver/api/mutex/apimutex"
@@ -504,6 +505,78 @@ func apiRestoreFile(w http.ResponseWriter, r requestParser, user models.User, _ 
 	}
 	logging.LogRestore(file, user)
 	outputFileJson(w, file)
+}
+
+func apiFolderCreate(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramFolderCreate)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+
+	bundle := filebundle.Create(request.Name, user.Id)
+
+	response := map[string]interface{}{
+		"Result":     "OK",
+		"FileBundle": bundle,
+	}
+	result, err := json.Marshal(response)
+	helper.Check(err)
+	_, _ = w.Write(result)
+}
+
+func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
+	allBundles := filebundle.GetAll()
+	allFiles := database.GetAllMetadata()
+
+	type BundleWithMetadata struct {
+		models.FileBundle
+		MemberCount    int   `json:"membercount"`
+		TotalSizeBytes int64 `json:"totalsizebytes"`
+	}
+
+	var result []BundleWithMetadata
+	for _, bundle := range allBundles {
+		if bundle.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
+			memberFiles, totalSize, memberCount := bundle.Populate(allFiles)
+			_ = memberFiles
+			result = append(result, BundleWithMetadata{
+				FileBundle:     bundle,
+				MemberCount:    memberCount,
+				TotalSizeBytes: totalSize,
+			})
+		}
+	}
+
+	jsonResult, err := json.Marshal(result)
+	helper.Check(err)
+	_, _ = w.Write(jsonResult)
+}
+
+func apiFolderDelete(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramFolderDelete)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+
+	bundle, ok := filebundle.Get(request.Id)
+	if !ok {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Folder does not exist")
+		return
+	}
+
+	if bundle.UserId != user.Id && !user.HasPermission(models.UserPermDeleteOtherUploads) {
+		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this folder")
+		return
+	}
+
+	filebundle.Delete(bundle)
+
+	response := map[string]interface{}{
+		"Result": "OK",
+	}
+	jsonResult, err := json.Marshal(response)
+	helper.Check(err)
+	_, _ = w.Write(jsonResult)
 }
 
 func apiChunkAdd(w http.ResponseWriter, r requestParser, _ models.User, _ models.ApiKey) {

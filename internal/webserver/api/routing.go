@@ -232,6 +232,24 @@ var routes = []apiRoute{
 		RequestParser: &paramURequestDelete{},
 	},
 	{
+		Url:           "/folder/create",
+		ApiPerm:       models.ApiPermUpload,
+		execution:     apiFolderCreate,
+		RequestParser: &paramFolderCreate{},
+	},
+	{
+		Url:           "/folder/list",
+		ApiPerm:       models.ApiPermView,
+		execution:     apiFolderList,
+		RequestParser: nil,
+	},
+	{
+		Url:           "/folder/delete",
+		ApiPerm:       models.ApiPermDelete,
+		execution:     apiFolderDelete,
+		RequestParser: &paramFolderDelete{},
+	},
+	{
 		Url:              "/uploadrequest/chunk/add",
 		ApiPerm:          models.ApiPermNone,
 		execution:        apiChunkUploadRequestAdd,
@@ -820,6 +838,24 @@ type paramURequestDelete struct {
 }
 
 func (p *paramURequestDelete) ProcessParameter(_ *http.Request) error {
+	return nil
+}
+
+type paramFolderCreate struct {
+	Name         string `header:"name" required:"true" supportBase64:"true"`
+	foundHeaders map[string]bool
+}
+
+func (p *paramFolderCreate) ProcessParameter(_ *http.Request) error {
+	return nil
+}
+
+type paramFolderDelete struct {
+	Id           string `header:"id" required:"true"`
+	foundHeaders map[string]bool
+}
+
+func (p *paramFolderDelete) ProcessParameter(_ *http.Request) error {
 	return nil
 }
 

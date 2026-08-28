@@ -1290,6 +1290,63 @@ func (p *paramURequestDelete) New() requestParser {
 	return &paramURequestDelete{}
 }
 
+// ParseRequest reads r and saves the passed header values in the paramFolderCreate struct
+// In the end, ProcessParameter() is called
+func (p *paramFolderCreate) ParseRequest(r *http.Request) error {
+	var err error
+	var exists bool
+	p.foundHeaders = make(map[string]bool)
+
+	// RequestParser header value "name", required: true, has base64support
+	exists, err = checkHeaderExists(r, "name", true, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["name"] = exists
+	if exists {
+		p.Name = r.Header.Get("name")
+		if strings.HasPrefix(p.Name, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Name, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Name = string(decoded)
+		}
+	}
+
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramFolderCreate struct
+func (p *paramFolderCreate) New() requestParser {
+	return &paramFolderCreate{}
+}
+
+// ParseRequest reads r and saves the passed header values in the paramFolderDelete struct
+// In the end, ProcessParameter() is called
+func (p *paramFolderDelete) ParseRequest(r *http.Request) error {
+	var err error
+	var exists bool
+	p.foundHeaders = make(map[string]bool)
+
+	// RequestParser header value "id", required: true
+	exists, err = checkHeaderExists(r, "id", true, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["id"] = exists
+	if exists {
+		p.Id = r.Header.Get("id")
+	}
+
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramFolderDelete struct
+func (p *paramFolderDelete) New() requestParser {
+	return &paramFolderDelete{}
+}
+
 // ParseRequest reads r and saves the passed header values in the paramURequestSave struct
 // In the end, ProcessParameter() is called
 func (p *paramURequestSave) ParseRequest(r *http.Request) error {

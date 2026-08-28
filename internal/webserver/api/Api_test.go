@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -21,6 +22,7 @@ import (
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
+	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
 	"github.com/forceu/gokapi/internal/webserver/ratelimiter"
@@ -2354,4 +2356,201 @@ func TestLogsAudit(t *testing.T) {
 	// Verify it's an empty array, not null
 	bodyStr := w.Body.String()
 	test.IsEqualBool(t, strings.Contains(bodyStr, `"entries":[]`), true)
+}
+
+func TestFolderCreate(t *testing.T) {
+	apiKey := testAuthorisation(t, "/folder/create", models.ApiPermUpload)
+
+	// Test missing name header
+	testFolderCreateCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header name is required","ErrorCode":4}`)
+
+	// Test successful folder creation
+	testFolderName := "TestFolderCreate_Folder"
+	w, r := getRecorder("/folder/create", apiKey.Id, []test.Header{{Name: "name", Value: testFolderName}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response struct {
+		Result     string
+		FileBundle struct {
+			Id   string
+			Name string
+			UserId int
+		}
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	test.IsNil(t, err)
+	test.IsEqual(t, response.Result, "OK")
+	test.IsEqual(t, response.FileBundle.Name, testFolderName)
+	test.IsEqualBool(t, response.FileBundle.Id != "", true)
+
+	// Test base64 encoded name
+	testFolderNameUtf8 := "TestFolderCreate_UTF8_éàü"
+	encodedName := "base64:" + base64.StdEncoding.EncodeToString([]byte(testFolderNameUtf8))
+	w, r = getRecorder("/folder/create", apiKey.Id, []test.Header{{Name: "name", Value: encodedName}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+}
+
+func testFolderCreateCall(t *testing.T, apiKey models.ApiKey, name string, resultCode int, expectedResponse string) {
+	t.Helper()
+	const apiUrl = "/folder/create"
+	headers := []test.Header{}
+	if name != "" {
+		headers = append(headers, test.Header{Name: "name", Value: name})
+	}
+	w, r := getRecorder(apiUrl, apiKey.Id, headers)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, resultCode)
+	if expectedResponse != "" {
+		test.ResponseBodyIs(t, w, expectedResponse)
+	}
+}
+
+func TestFolderList(t *testing.T) {
+	// Create some test folders and files
+	apiKey := testAuthorisation(t, "/folder/list", models.ApiPermView)
+
+	// Get initial count of folders for the user
+	w, r := getRecorder("/folder/list", apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var initialResult []map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &initialResult)
+	test.IsNil(t, err)
+	initialCount := len(initialResult)
+
+	// Create folders for the user (use unique names to avoid test pollution)
+	folder1 := filebundle.Create("TestFolderList_Folder1", idUser)
+	_ = filebundle.Create("TestFolderList_Folder2", idUser) // folderUser2
+
+	// Create a folder for another user
+	_ = filebundle.Create("TestFolderList_OtherUserFolder", idSuperAdmin) // folderOther
+
+	// Create some files and add them to the folders
+	database.SaveMetaData(models.File{
+		Id:                 "flist1",
+		Name:               "flist1",
+		SHA1:               "03cfd743661f07975fa2f1220c5194cbaff48451",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 1,
+		UserId:             idUser,
+		BundleId:           folder1.Id,
+	})
+	database.SaveMetaData(models.File{
+		Id:                 "flist2",
+		Name:               "flist2",
+		SHA1:               "03cfd743661f07975fa2f1220c5194cbaff48451",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 1,
+		UserId:             idUser,
+		BundleId:           folder1.Id,
+		SizeBytes:          1024,
+	})
+
+	// Test listing as regular user (should include our new folders)
+	w, r = getRecorder("/folder/list", apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var result []map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	afterCreateCount := len(result)
+	test.IsEqualBool(t, afterCreateCount > initialCount, true)
+
+	// Verify we see folder1 with correct metadata
+	found := false
+	for _, bundle := range result {
+		if bundle["id"] == folder1.Id {
+			test.IsEqual(t, bundle["name"], "TestFolderList_Folder1")
+			test.IsEqualInt(t, int(bundle["membercount"].(float64)), 2)
+			test.IsEqualInt(t, int(bundle["totalsizebytes"].(float64)), 1024)
+			found = true
+			break
+		}
+	}
+	test.IsEqualBool(t, found, true)
+
+	// Grant LIST_OTHER_UPLOADS permission
+	grantUserPermission(t, idUser, models.UserPermListOtherUploads)
+
+	// Test listing with elevated permission (should see one more folder than before)
+	w, r = getRecorder("/folder/list", apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	result = []map[string]interface{}{}
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(result), afterCreateCount+1)
+
+	// Remove permission
+	removeUserPermission(t, idUser, models.UserPermListOtherUploads)
+}
+
+func TestFolderDelete(t *testing.T) {
+	apiKey := testAuthorisation(t, "/folder/delete", models.ApiPermDelete)
+
+	// Create test folders (use unique names to avoid test pollution)
+	folder1 := filebundle.Create("TestFolderDelete_Folder1", idUser)
+	folder2 := filebundle.Create("TestFolderDelete_OtherUserFolder", idSuperAdmin)
+
+	// Add files to folder1
+	database.SaveMetaData(models.File{
+		Id:                 "fdfile1",
+		Name:               "fdfile1",
+		SHA1:               "03cfd743661f07975fa2f1220c5194cbaff48451",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 1,
+		UserId:             idUser,
+		BundleId:           folder1.Id,
+	})
+
+	// Test missing id header
+	testFolderDeleteCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
+
+	// Test invalid id
+	testFolderDeleteCall(t, apiKey, "invalid", 404, `{"Result":"error","ErrorMessage":"Folder does not exist","ErrorCode":5}`)
+
+	// Test successful deletion of own folder
+	testFolderDeleteCall(t, apiKey, folder1.Id, 200, "")
+
+	// Wait for async deletion to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify folder and files are deleted
+	_, ok := filebundle.Get(folder1.Id)
+	test.IsEqualBool(t, ok, false)
+	_, ok = database.GetMetaDataById("fdfile1")
+	test.IsEqualBool(t, ok, false)
+
+	// Test deletion of other user's folder without permission
+	testFolderDeleteCall(t, apiKey, folder2.Id, 401, `{"Result":"error","ErrorMessage":"No permission to delete this folder","ErrorCode":6}`)
+
+	// Grant DELETE_OTHER_UPLOADS permission
+	grantUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
+
+	// Test deletion with elevated permission
+	testFolderDeleteCall(t, apiKey, folder2.Id, 200, "")
+	_, ok = filebundle.Get(folder2.Id)
+	test.IsEqualBool(t, ok, false)
+
+	// Remove permission
+	removeUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
+}
+
+func testFolderDeleteCall(t *testing.T, apiKey models.ApiKey, folderId string, resultCode int, expectedResponse string) {
+	t.Helper()
+	const apiUrl = "/folder/delete"
+	headers := []test.Header{}
+	if folderId != "" {
+		headers = append(headers, test.Header{Name: "id", Value: folderId})
+	}
+	w, r := getRecorder(apiUrl, apiKey.Id, headers)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, resultCode)
+	if expectedResponse != "" {
+		test.ResponseBodyIs(t, w, expectedResponse)
+	}
 }
