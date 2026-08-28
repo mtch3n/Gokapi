@@ -128,8 +128,8 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	}
 	// < v2.3.0
 	if currentDbVersion < 16 {
-		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN "BundleId" TEXT NOT NULL DEFAULT '';
-		CREATE TABLE FileBundles (
+		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS BundleId TEXT NOT NULL DEFAULT '';
+		CREATE TABLE IF NOT EXISTS FileBundles (
 			id	TEXT NOT NULL UNIQUE,
 			name	TEXT NOT NULL,
 			userid	INTEGER NOT NULL,
