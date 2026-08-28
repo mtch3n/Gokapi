@@ -2237,6 +2237,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "authprovider",
+            "in": "header",
+            "description": "Authentication provider to provision the user for. Either 'internal' (default) for username/password login, or 'google' to provision the user for OIDC login only. A user created with 'google' has no password set, so the password login path stays closed for that user.",
+            "required": false,
+            "style": "simple",
+            "explode": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3036,6 +3047,10 @@
       "UserListItem": {
         "type": "object",
         "properties": {
+          "authProvider": {
+            "type": "string",
+            "example": "internal"
+          },
           "id": {
             "type": "integer",
             "example": 14

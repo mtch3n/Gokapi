@@ -293,6 +293,7 @@ func apiGetUserList(w http.ResponseWriter, _ requestParser, _ models.User, _ mod
 		LastOnline    int64  `json:"lastOnline"`
 		ResetPassword bool   `json:"resetPassword"`
 		UploadCount   int    `json:"uploadCount"`
+		AuthProvider  string `json:"authProvider"`
 	}
 
 	uploadCounts := storage.GetUploadCounts()
@@ -306,6 +307,7 @@ func apiGetUserList(w http.ResponseWriter, _ requestParser, _ models.User, _ mod
 			LastOnline:    userEntry.LastOnline,
 			ResetPassword: userEntry.ResetPassword,
 			UploadCount:   uploadCounts[userEntry.Id],
+			AuthProvider:  userEntry.AuthProvider,
 		})
 	}
 	resultJson, err := json.Marshal(result)
@@ -405,7 +407,7 @@ func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	newUser, err := users.Create(request.Username, models.AuthProviderInternal, "")
+	newUser, err := users.Create(request.Username, request.AuthProvider, "")
 	if err != nil {
 		switch {
 		case errors.Is(err, users.ErrorNameToShort):

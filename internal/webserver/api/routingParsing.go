@@ -637,6 +637,16 @@ func (p *paramUserCreate) ParseRequest(r *http.Request) error {
 		p.Username = r.Header.Get("username")
 	}
 
+	// RequestParser header value "authprovider", required: false
+	exists, err = checkHeaderExists(r, "authprovider", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["authprovider"] = exists
+	if exists {
+		p.authProviderRaw = r.Header.Get("authprovider")
+	}
+
 	return p.ProcessParameter(r)
 }
 

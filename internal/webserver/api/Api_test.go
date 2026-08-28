@@ -408,6 +408,90 @@ func TestUserCreate(t *testing.T) {
 	apiCreateUser(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
+// TestUserCreateWithAuthProvider verifies BLOCKER W17: an admin can deliberately provision an
+// OIDC user through the create-user API by passing the authprovider header. A user created with
+// the google provider must have AuthProvider set to google and no password hash, so the internal
+// password login path stays closed for that account (see IsCorrectUsernameAndPassword). Before
+// this fix, apiCreateUser hardcoded models.AuthProviderInternal, so this header had no effect and
+// the created user's AuthProvider would be "internal" instead of "google".
+func TestUserCreateWithAuthProvider(t *testing.T) {
+	const apiUrl = "/user/create"
+	const headerUsername = "username"
+	const headerAuthProvider = "authprovider"
+
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+
+	uniqueUsername := "TestUserCreateGoogle_" + helper.GenerateRandomString(8)
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerUsername,
+		Value: uniqueUsername,
+	}, {
+		Name:  headerAuthProvider,
+		Value: "google",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	dbUser, ok := database.GetUserByName(strings.ToLower(uniqueUsername))
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, dbUser.AuthProvider, models.AuthProviderGoogle)
+	test.IsEqualString(t, dbUser.Password, "")
+
+	// Default (no authprovider header) still yields an internal user
+	uniqueUsername2 := "TestUserCreateDefault_" + helper.GenerateRandomString(8)
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerUsername,
+		Value: uniqueUsername2,
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	dbUser, ok = database.GetUserByName(strings.ToLower(uniqueUsername2))
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, dbUser.AuthProvider, models.AuthProviderInternal)
+
+	// The user list API surfaces AuthProvider, so the UI can show which accounts are SSO
+	w, r = getRecorder("/user/list", apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	type userListItem struct {
+		Name         string `json:"name"`
+		AuthProvider string `json:"authProvider"`
+	}
+	var list []userListItem
+	err := json.Unmarshal(w.Body.Bytes(), &list)
+	test.IsNil(t, err)
+	found := false
+	for _, item := range list {
+		if item.Name == strings.ToLower(uniqueUsername) {
+			found = true
+			test.IsEqualString(t, item.AuthProvider, models.AuthProviderGoogle)
+		}
+	}
+	test.IsEqualBool(t, found, true)
+}
+
+// TestUserCreateInvalidAuthProvider verifies that an unknown authprovider value is rejected with
+// a 400 rather than silently falling through to a default, since AuthProvider gates both the
+// password and OIDC login paths.
+func TestUserCreateInvalidAuthProvider(t *testing.T) {
+	const apiUrl = "/user/create"
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+
+	uniqueUsername := "TestUserCreateInvalid_" + helper.GenerateRandomString(8)
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  "username",
+		Value: uniqueUsername,
+	}, {
+		Name:  "authprovider",
+		Value: "not-a-real-provider",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	_, ok := database.GetUserByName(strings.ToLower(uniqueUsername))
+	test.IsEqualBool(t, ok, false)
+}
+
 func TestUserChangeRank(t *testing.T) {
 	const apiUrl = "/user/changeRank"
 	const headerUserId = "userid"

@@ -560,11 +560,30 @@ type paramAuthDelete struct {
 func (p *paramAuthDelete) ProcessParameter(_ *http.Request) error { return nil }
 
 type paramUserCreate struct {
-	Username     string `header:"username" required:"true"`
-	foundHeaders map[string]bool
+	Username        string `header:"username" required:"true"`
+	authProviderRaw string `header:"authprovider"`
+	AuthProvider    string
+	foundHeaders    map[string]bool
 }
 
-func (p *paramUserCreate) ProcessParameter(_ *http.Request) error { return nil }
+// ProcessParameter defaults an absent authprovider header to models.AuthProviderInternal and
+// rejects any value that is not one of the two known provider constants. This is the only way an
+// admin can deliberately provision an OIDC user through the API: user/create must not silently
+// accept an arbitrary string here, since AuthProvider gates both the password and OIDC login
+// paths (see authentication.IsCorrectUsernameAndPassword and authentication.getOrCreateUser).
+func (p *paramUserCreate) ProcessParameter(_ *http.Request) error {
+	if p.authProviderRaw == "" {
+		p.AuthProvider = models.AuthProviderInternal
+		return nil
+	}
+	switch p.authProviderRaw {
+	case models.AuthProviderInternal, models.AuthProviderGoogle:
+		p.AuthProvider = p.authProviderRaw
+		return nil
+	default:
+		return errors.New("invalid value for header authprovider")
+	}
+}
 
 type paramUserChangeRank struct {
 	Id           int    `header:"userid" required:"true"`
