@@ -34,6 +34,7 @@ import (
 	"github.com/forceu/gokapi/internal/logging/serverstats"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
+	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/storage/filerequest"
 	"github.com/forceu/gokapi/internal/storage/presign"
 	"github.com/forceu/gokapi/internal/webserver/api"
@@ -124,6 +125,9 @@ func Start() {
 	mux.HandleFunc("/publicUpload", showPublicUpload)
 	mux.HandleFunc("/pubapi/file", pubApiFileMetadata)
 	mux.HandleFunc("/pubapi/filepassword", pubApiFilePassword)
+	mux.HandleFunc("/pubapi/folder", pubApiFolder)
+	mux.HandleFunc("/pubapi/folderpassword", pubApiFolderPassword)
+	mux.HandleFunc("/pubapi/folderzip", pubApiFolderZip)
 	mux.HandleFunc("/pubapi/uploadrequest", pubApiUploadRequest)
 	mux.HandleFunc("/uploadChunk", requireLogin(uploadChunk, false, false))
 	mux.HandleFunc("/uploadStatus", requireLogin(sse.GetStatusSSE, false, false))
@@ -1362,6 +1366,342 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+}
+
+// Handling of /pubapi/folder
+// Public, unauthenticated endpoint that returns folder metadata as JSON.
+func pubApiFolder(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	folderId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	if folderId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	bundle, ok := filebundle.Get(folderId)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Get all files and compute members
+	allFiles := database.GetAllMetadata()
+	timeNow := time.Now().Unix()
+	var memberFiles []models.File
+
+	for _, file := range allFiles {
+		if file.BundleId == bundle.Id &&
+			!file.IsPendingForDeletion() &&
+			!storage.IsExpiredFile(file, timeNow) &&
+			!file.IsFileRequest() {
+			memberFiles = append(memberFiles, file)
+		}
+	}
+
+	// Check if folder is password protected (ANY member has a password)
+	isProtected := false
+	for _, file := range memberFiles {
+		if file.PasswordHash != "" {
+			isProtected = true
+			break
+		}
+	}
+
+	// Handle password protection
+	if isProtected && !isValidPwCookieBundle(r, bundle) {
+		response := map[string]interface{}{
+			"id":               folderId,
+			"requiresPassword": true,
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// Return full folder metadata
+	type FileMetadata struct {
+		Id          string `json:"id"`
+		Name        string `json:"name"`
+		SizeBytes   int64  `json:"sizeBytes"`
+		Size        string `json:"size"`
+		ContentType string `json:"contentType"`
+	}
+
+	files := make([]FileMetadata, 0)
+	for _, file := range memberFiles {
+		files = append(files, FileMetadata{
+			Id:          file.Id,
+			Name:        file.Name,
+			SizeBytes:   file.SizeBytes,
+			Size:        file.Size,
+			ContentType: file.ContentType,
+		})
+	}
+
+	response := map[string]interface{}{
+		"id":               folderId,
+		"name":             bundle.Name,
+		"requiresPassword": isProtected,
+		"files":            files,
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+// Handling of /pubapi/folderpassword
+// Public, unauthenticated endpoint that verifies a password for a folder.
+func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	folderId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	if folderId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	bundle, ok := filebundle.Get(folderId)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Get all files and find the first one with a password (by Id ascending)
+	allFiles := database.GetAllMetadata()
+	var passwordFile *models.File
+	for _, file := range allFiles {
+		if file.BundleId == bundle.Id && file.PasswordHash != "" {
+			if passwordFile == nil || file.Id < passwordFile.Id {
+				f := file
+				passwordFile = &f
+			}
+		}
+	}
+
+	if passwordFile == nil {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "{\"ok\":false}")
+		return
+	}
+
+	// Parse password from body (support both form and JSON)
+	var password string
+	contentType := r.Header.Get("Content-Type")
+	if strings.Contains(contentType, "application/json") {
+		var body struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			password = body.Password
+		}
+	} else {
+		_ = r.ParseForm()
+		password = r.PostForm.Get("password")
+	}
+
+	// Rate limit the password check attempt
+	ip := logging.GetIpAddress(r)
+	ratelimiter.WaitOnDownloadPassword(ip)
+
+	// Verify password using the same logic as file password
+	isValid, isLegacy := configuration.VerifyPassword(password, passwordFile.PasswordHash, configuration.Get().Authentication.SaltFiles)
+	if isValid {
+		// Migrate legacy passwords to the new format
+		if isLegacy {
+			passwordFile.PasswordHash = configuration.HashPassword(password, false, "")
+			database.SaveMetaData(*passwordFile)
+		}
+		writeFolderPwCookie(w, bundle)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "{\"ok\":true}")
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "{\"ok\":false}")
+}
+
+// Handling of /pubapi/folderzip
+// Public, unauthenticated endpoint that serves folder files as a zip or single file raw.
+func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+
+	folderId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	if folderId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	bundle, ok := filebundle.Get(folderId)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Check password gate
+	if !isValidFolderPassword(w, r, bundle) {
+		return
+	}
+
+	// Parse ids parameter (optional; absent = all servable members)
+	idsParam := r.URL.Query().Get("ids")
+	var requestedIds []string
+	if idsParam != "" {
+		requestedIds = strings.Split(idsParam, ",")
+	}
+
+	// Get all files and filter
+	allFiles := database.GetAllMetadata()
+	timeNow := time.Now().Unix()
+	var filesToServe []models.File
+
+	for _, file := range allFiles {
+		if file.BundleId != bundle.Id {
+			continue
+		}
+		if file.IsPendingForDeletion() || storage.IsExpiredFile(file, timeNow) {
+			continue
+		}
+		if file.RequiresClientDecryption() {
+			continue
+		}
+
+		// If ids parameter was provided, check if this file is in the list
+		if len(requestedIds) > 0 {
+			found := false
+			for _, id := range requestedIds {
+				if id == file.Id {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+
+		filesToServe = append(filesToServe, file)
+	}
+
+	if len(filesToServe) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Serve single file raw, or multiple files as zip
+	if len(filesToServe) == 1 {
+		file := filesToServe[0]
+
+		// Validate requested ids if specified
+		if len(requestedIds) > 0 {
+			found := false
+			for _, id := range requestedIds {
+				if id == file.Id {
+					found = true
+					break
+				}
+			}
+			if !found {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+
+		// Serve raw file
+		serveBundleFile(w, r, file)
+		return
+	}
+
+	// Validate all requested ids are members of this bundle
+	if len(requestedIds) > 0 {
+		for _, requestedId := range requestedIds {
+			found := false
+			for _, file := range filesToServe {
+				if file.Id == requestedId {
+					found = true
+					break
+				}
+			}
+			if !found {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	// Serve as zip
+	storage.ServeFilesAsZip(filesToServe, bundle.Name, w, r)
+}
+
+// Serve a single file from a bundle with proper headers and decryption
+func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
+	// Use ServeFile with forceDownload=true to set attachment headers and serve the file
+	// increaseCounter=false to not decrement download counter (matches zip/presign decision)
+	// forceDecryption=false to handle decryption normally
+	// recheckExpiry=false since we already checked expiry
+	storage.ServeFile(file, w, r, true, false, false, false)
+}
+
+// Check if folder is password protected and if a valid cookie exists
+func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle) bool {
+	// Get all files for this bundle
+	allFiles := database.GetAllMetadata()
+	isProtected := false
+	for _, file := range allFiles {
+		if file.BundleId == bundle.Id && file.PasswordHash != "" {
+			isProtected = true
+			break
+		}
+	}
+
+	if !isProtected {
+		return true
+	}
+
+	if isValidPwCookieBundle(r, bundle) {
+		return true
+	}
+
+	// Password protection required, no valid cookie
+	response := map[string]interface{}{
+		"id":               bundle.Id,
+		"requiresPassword": true,
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	json.NewEncoder(w).Encode(response)
+	return false
+}
+
+// Helper function to check if a valid password cookie exists for a bundle
+func isValidPwCookieBundle(r *http.Request, bundle models.FileBundle) bool {
+	cookie, err := r.Cookie("b" + bundle.Id)
+	if err != nil {
+		return false
+	}
+	return downloadPasswordToken.IsValid(cookie.Value, "bundle:"+bundle.Id)
+}
+
+// Helper function to write a password cookie for a bundle
+func writeFolderPwCookie(w http.ResponseWriter, bundle models.FileBundle) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "b" + bundle.Id,
+		Value:    downloadPasswordToken.Generate("bundle:" + bundle.Id),
+		Expires:  time.Now().Add(5 * time.Minute),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Path:     "/",
+	})
 }
 
 // respondAuditWriteFailed refuses a request whose audit record could not be committed to

@@ -16,6 +16,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/models"
+	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
@@ -1056,6 +1057,82 @@ func TestPublicApiUploadRequestWrongKey(t *testing.T) {
 
 	client := &http.Client{}
 	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqkey1234&key=wrongkey")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if error, ok := response["error"]; !ok || error != "not found" {
+		t.Errorf("Expected error 'not found', got %v", error)
+	}
+}
+
+// TestPublicApiFolderUnprotected tests GET /pubapi/folder for an unprotected folder
+func TestPublicApiFolderUnprotected(t *testing.T) {
+	t.Parallel()
+	// Create a test folder with files
+	bundle := filebundle.Create("TestFolder_Unprotected", 5)
+	database.SaveMetaData(models.File{
+		Id:                 "pubfolder_file1",
+		Name:               "file1.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             5,
+		BundleId:           bundle.Id,
+	})
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle.Id)
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	// Verify the response contains the expected fields
+	if id, ok := response["id"]; !ok || id != bundle.Id {
+		t.Errorf("Expected id '%s', got %v", bundle.Id, id)
+	}
+	if name, ok := response["name"]; !ok || name != "TestFolder_Unprotected" {
+		t.Errorf("Expected name 'TestFolder_Unprotected', got %v", name)
+	}
+	if requiresPw, ok := response["requiresPassword"]; !ok || requiresPw != false {
+		t.Errorf("Expected requiresPassword false, got %v", requiresPw)
+	}
+	if files, ok := response["files"]; !ok || len(files.([]interface{})) != 1 {
+		t.Errorf("Expected 1 file, got %v", files)
+	}
+}
+
+// TestPublicApiFolderNotFound tests GET /pubapi/folder for a non-existent folder
+func TestPublicApiFolderNotFound(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=unknownfolder123456")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
