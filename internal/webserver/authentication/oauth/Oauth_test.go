@@ -244,6 +244,39 @@ func TestHandlerLogin(t *testing.T) {
 		test.IsEqualBool(t, containsString(location, "prompt=consent"), true)
 		test.IsEqualBool(t, len(rr.Result().Cookies()) > 0, true)
 	})
+
+	// TestHandlerLogin/With_force-consent_cookie_no_query verifies BLOCKER W17-3a: a hybrid-mode
+	// logout sets CookieForceConsent (see showLogin) rather than relying on the query parameter
+	// being forwarded, since the SPA's own client-side navigation to /oauth-login does not always
+	// carry query strings through. HandlerLogin must honour the cookie on its own and clear it, so
+	// a stale cookie cannot keep forcing consent on every subsequent login.
+	t.Run("With force-consent cookie, no query", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/login", nil)
+		req.AddCookie(&http.Cookie{Name: CookieForceConsent, Value: "true"})
+		HandlerLogin(rr, req)
+
+		test.IsEqualInt(t, rr.Code, http.StatusFound)
+		location := rr.Header().Get("Location")
+		test.IsNotEmpty(t, location)
+		test.IsEqualBool(t, containsString(location, "prompt=consent"), true)
+
+		var cleared bool
+		for _, cookie := range rr.Result().Cookies() {
+			if cookie.Name == CookieForceConsent && cookie.MaxAge < 0 {
+				cleared = true
+			}
+		}
+		test.IsEqualBool(t, cleared, true)
+	})
+
+	t.Run("Without force-consent cookie or query", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		HandlerLogin(rr, httptest.NewRequest("GET", "/login", nil))
+
+		location := rr.Header().Get("Location")
+		test.IsEqualBool(t, containsString(location, "prompt=none"), true)
+	})
 }
 
 func TestHandlerCallback_MissingStateCookie(t *testing.T) {

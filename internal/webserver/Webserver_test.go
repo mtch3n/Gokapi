@@ -9,6 +9,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
 	"github.com/forceu/gokapi/internal/webserver/authentication"
 	"github.com/forceu/gokapi/internal/webserver/authentication/csrftoken"
+	"github.com/forceu/gokapi/internal/webserver/authentication/oauth"
 	"github.com/forceu/gokapi/internal/webserver/ratelimiter"
 )
 
@@ -161,6 +163,41 @@ func TestLogin(t *testing.T) {
 		RedirectUrl: "admin",
 		Cookies:     []test.Cookie{{Name: "session_token", Value: session}},
 	})
+}
+
+// TestShowLoginSetsForceConsentCookieInHybridMode verifies BLOCKER W17-3a: logout redirects to
+// login?consent=true for an OAuth session, but in hybrid mode showLogin does not take the
+// oauth-login redirect branch (it shows the login choice page instead), so that query parameter
+// used to simply be dropped - the SPA's own "Sign in with Google" button navigated to
+// /oauth-login with no query string, and oauth.HandlerLogin silently reauthenticated the
+// previous session's account. showLogin must now set a short-lived cookie that makes the next
+// call to oauth.HandlerLogin force consent independently of any query string being forwarded.
+func TestShowLoginSetsForceConsentCookieInHybridMode(t *testing.T) {
+	config := configuration.Get()
+	originalMethod := config.Authentication.Method
+	originalHybrid := config.Authentication.OAuthEnabledAlongsideInternal
+	config.Authentication.Method = models.AuthenticationInternal
+	config.Authentication.OAuthEnabledAlongsideInternal = true
+	defer func() {
+		config.Authentication.Method = originalMethod
+		config.Authentication.OAuthEnabledAlongsideInternal = originalHybrid
+	}()
+
+	w := httptest.NewRecorder()
+	showLogin(w, httptest.NewRequest("GET", "/login?consent=true", nil))
+	var foundConsentCookie bool
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == oauth.CookieForceConsent && cookie.Value == "true" {
+			foundConsentCookie = true
+		}
+	}
+	test.IsEqualBool(t, foundConsentCookie, true)
+
+	w2 := httptest.NewRecorder()
+	showLogin(w2, httptest.NewRequest("GET", "/login", nil))
+	for _, cookie := range w2.Result().Cookies() {
+		test.IsEqualBool(t, cookie.Name == oauth.CookieForceConsent, false)
+	}
 }
 
 // TestAdminHybridResetPasswordGate verifies MAJOR-3 W17-2c: the guard in requireLogin that

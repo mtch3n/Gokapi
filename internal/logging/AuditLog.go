@@ -39,6 +39,7 @@ history already collected is covered.
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -305,6 +306,26 @@ func recomputeEntryHash(line string, prevHash string) (hashHex string, ok bool) 
 // "confirm creation" path (uploads) must treat a non-nil error as a reason to refuse the
 // request rather than proceed, so that nothing happens without a durable record of it.
 func appendAuditEntry(entry AuditEntry) error {
+	return appendAuditEntries([]AuditEntry{entry})
+}
+
+// appendAuditEntries is the batched form of appendAuditEntry: every entry in entries is
+// chained, written and fsync'd as a single durable unit - one mutex acquisition, one file open,
+// one fsync - rather than one of each per entry. This matters for a bulk operation such as a
+// folder delete affecting many member files: N synchronous fsyncs under the shared audit mutex,
+// one per member, would otherwise serialize with (and can stall) every other concurrent audit
+// write in the process, including ones on the download-serving path.
+//
+// All-or-nothing: if any entry fails to canonicalise, or the combined write or fsync fails, no
+// entry is appended and auditNextSeq/auditPrevHash are left exactly as they were, so the chain
+// never records an event that did not durably happen. Callers on a fail-closed path (see
+// appendAuditEntry's doc comment) must treat a non-nil error the same way: refuse to proceed with
+// whatever the batch was recording, for every entry in it.
+func appendAuditEntries(entries []AuditEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
 	auditMutex.Lock()
 	defer auditMutex.Unlock()
 
@@ -313,19 +334,30 @@ func appendAuditEntry(entry AuditEntry) error {
 			"refusing to append until this is resolved manually", auditLogPath)
 	}
 
-	entry.Version = auditFormatVersion
-	entry.Timestamp = time.Now().Unix()
-	entry.Seq = auditNextSeq
-	entry.PrevHash = auditPrevHash
-	entry.Hash = ""
+	seq := auditNextSeq
+	prevHash := auditPrevHash
+	var buf bytes.Buffer
+	for i := range entries {
+		entry := entries[i]
+		entry.Version = auditFormatVersion
+		entry.Timestamp = time.Now().Unix()
+		entry.Seq = seq
+		entry.PrevHash = prevHash
+		entry.Hash = ""
 
-	preImage, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("audit: could not canonicalise entry: %w", err)
-	}
-	line, hashHex, ok := finalizeEntryLine(preImage, entry.PrevHash)
-	if !ok {
-		return fmt.Errorf("audit: marshaled entry did not have the expected trailing empty hash field")
+		preImage, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("audit: could not canonicalise entry: %w", err)
+		}
+		line, hashHex, ok := finalizeEntryLine(preImage, entry.PrevHash)
+		if !ok {
+			return fmt.Errorf("audit: marshaled entry did not have the expected trailing empty hash field")
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+
+		seq++
+		prevHash = hashHex
 	}
 
 	file, err := os.OpenFile(auditLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -334,15 +366,29 @@ func appendAuditEntry(entry AuditEntry) error {
 	}
 	defer file.Close()
 
-	if _, err = file.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("audit: could not write audit entry: %w", err)
+	// Record the file's size before writing so a failure - including a short write that landed
+	// some, but not all, of the batch on disk before erroring, e.g. a size-quota or disk-full
+	// condition hit partway through a single large Write call - can be undone by truncating back
+	// to it. Without this, a partial write could leave a complete, validly hash-chained JSON line
+	// for a member the batch never durably committed to, even though this function itself
+	// reports an error and never advances auditNextSeq/auditPrevHash - exactly the false record
+	// this batching exists to prevent.
+	originalSize, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return fmt.Errorf("audit: could not determine audit log size: %w", err)
+	}
+
+	if _, err = file.Write(buf.Bytes()); err != nil {
+		_ = file.Truncate(originalSize)
+		return fmt.Errorf("audit: could not write audit entries: %w", err)
 	}
 	if err = file.Sync(); err != nil {
+		_ = file.Truncate(originalSize)
 		return fmt.Errorf("audit: could not fsync audit log: %w", err)
 	}
 
-	auditNextSeq++
-	auditPrevHash = hashHex
+	auditNextSeq = seq
+	auditPrevHash = prevHash
 	return nil
 }
 

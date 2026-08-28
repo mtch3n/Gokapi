@@ -346,6 +346,86 @@ func TestAuditChainVerificationWithCursor(t *testing.T) {
 	test.IsEqualBool(t, *entries[1].Verified, true)
 }
 
+// TestAuditChainBatchedFolderDeleteSingleWrite verifies MAJOR-2: a folder delete with several
+// member files produces one correctly hash-chained batch (one entry per member plus one for the
+// folder itself) via a single call to appendAuditEntries, rather than the N+1 separate
+// appendAuditEntry calls (each its own mutex acquisition, file open and fsync) that a folder
+// delete with thousands of members used to make.
+func TestAuditChainBatchedFolderDeleteSingleWrite(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+
+	entries := []AuditEntry{
+		{Category: categoryEdit, Action: "file.deleted", Outcome: OutcomeSuccess, FileId: "batchMember1"},
+		{Category: categoryEdit, Action: "file.deleted", Outcome: OutcomeSuccess, FileId: "batchMember2"},
+		{Category: categoryEdit, Action: "file.deleted", Outcome: OutcomeSuccess, FileId: "batchMember3"},
+		{Category: categoryEdit, Action: "folder.deleted", Outcome: OutcomeSuccess, BundleId: "batchBundleId"},
+	}
+	test.IsNil(t, appendAuditEntries(entries))
+	test.IsEqual(t, auditNextSeq, uint64(5))
+
+	stored := readAuditEntries(t, dir)
+	test.IsEqualInt(t, len(stored), 4)
+	test.IsEqualString(t, stored[0].PrevHash, "")
+	for i := 1; i < len(stored); i++ {
+		test.IsEqualString(t, stored[i].PrevHash, stored[i-1].Hash)
+	}
+	test.IsEqualString(t, stored[3].Action, "folder.deleted")
+	test.IsEqualString(t, stored[3].BundleId, "batchBundleId")
+}
+
+// TestAuditChainBatchedWriteAllOrNothingOnFailure verifies MAJOR-2/MINOR-2: appendAuditEntries
+// (used by LogFolderDeleteBatch for a folder delete) writes every entry in a batch as a single
+// all-or-nothing unit. It uses a small RLIMIT_FSIZE so the combined write fails partway through
+// writing the batch, rather than failing outright on the very first byte - a fault that fails
+// immediately would pass even against the pre-fix per-member appendAuditEntry loop, since that
+// loop's very first call would also fail immediately with no partial writes. This fault instead
+// lets a small first write succeed and only the larger combined write overflow the limit, which
+// is exactly the shape of failure that let the old per-member loop durably write the first few
+// members' "deleted" entries before erroring out on a later one - entries the caller then treats
+// as fatal and aborts the delete on, leaving those already-written entries false. The batched
+// write must leave the chain exactly as it was before the call in every case.
+func TestAuditChainBatchedWriteAllOrNothingOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+
+	// Prime the chain with one small entry so the audit file already has durable content and a
+	// non-empty PrevHash to preserve.
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryEdit, Action: "priming", Outcome: OutcomeSuccess}))
+	seqBefore := auditNextSeq
+	prevHashBefore := auditPrevHash
+
+	// The margin allows exactly one further ~300-byte entry to fit (this is the fault that
+	// differentiates the old per-member loop from the new batched write: the loop's first
+	// member write fits and durably lands before the second one overflows the limit, while the
+	// batched write asks for all three entries - well over 600 bytes - in a single write call).
+	restoreLimit := limitAuditFileSize(t, dir, 350)
+	defer restoreLimit()
+
+	entries := []AuditEntry{
+		{Category: categoryEdit, Action: "file.deleted", Outcome: OutcomeSuccess, FileId: "batchFailMember1"},
+		{Category: categoryEdit, Action: "file.deleted", Outcome: OutcomeSuccess, FileId: "batchFailMember2"},
+		{Category: categoryEdit, Action: "folder.deleted", Outcome: OutcomeSuccess, BundleId: "batchFailBundle"},
+	}
+	err := appendAuditEntries(entries)
+	test.IsNotNil(t, err)
+
+	test.IsEqual(t, auditNextSeq, seqBefore)
+	test.IsEqualString(t, auditPrevHash, prevHashBefore)
+
+	// A failed write can still leave a torn, incomplete line physically in the file (the OS may
+	// write some bytes before hitting the size limit, even though Sync is never reached) - use
+	// GetAuditEntriesSince rather than a raw line-by-line read, since it is the production reader
+	// and already tolerates exactly this (see its "Parse error, skip this line" handling), the
+	// same way a real crash-torn tail is tolerated on the next startup.
+	stored, _ := GetAuditEntriesSince(0, 100)
+	for _, e := range stored {
+		isFalseMemberRecord := e.Action == "file.deleted" && (e.FileId == "batchFailMember1" || e.FileId == "batchFailMember2")
+		isFalseFolderRecord := e.Action == "folder.deleted" && e.BundleId == "batchFailBundle"
+		test.IsEqualBool(t, isFalseMemberRecord || isFalseFolderRecord, false)
+	}
+}
+
 func readAuditEntries(t *testing.T, dir string) []AuditEntry {
 	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
 	test.IsNil(t, err)

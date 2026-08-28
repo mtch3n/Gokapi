@@ -547,16 +547,35 @@ func LogFolderCreate(bundle models.FileBundle, user models.User) {
 	})
 }
 
-// LogFolderDelete adds a log entry when a folder was deleted. Fail-closed, see LogDelete.
-func LogFolderDelete(bundle models.FileBundle, user models.User) error {
+// LogFolderDeleteBatch adds log entries for a folder deletion and all of its member files as a
+// single durable batch. Fail-closed like LogDelete: every entry is fsync'd to durable local
+// storage before this returns, and the caller must not delete anything (the files and the folder
+// must still exist) if this returns a non-nil error. Unlike calling LogDelete once per member
+// file, this takes the audit mutex and fsyncs exactly once for the whole folder regardless of
+// member count, and writes nothing at all if any part of the batch fails - so a folder delete
+// that aborts partway through never leaves a durable "deleted" record for a member file that was
+// never actually deleted.
+func LogFolderDeleteBatch(bundle models.FileBundle, memberFiles []models.File, user models.User) error {
+	entries := make([]AuditEntry, 0, len(memberFiles)+1)
+	for _, file := range memberFiles {
+		createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, deleted by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+		entries = append(entries, AuditEntry{
+			Category: categoryEdit,
+			Action:   "file.deleted",
+			Outcome:  OutcomeSuccess,
+			FileId:   file.Id,
+			Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+		})
+	}
 	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s (%s) and associated files deleted by %s (user #%d)", bundle.Id, bundle.Name, user.Name, user.Id), false)
-	return appendAuditEntry(AuditEntry{
+	entries = append(entries, AuditEntry{
 		Category: categoryEdit,
 		Action:   "folder.deleted",
 		Outcome:  OutcomeSuccess,
 		BundleId: bundle.Id,
 		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
 	})
+	return appendAuditEntries(entries)
 }
 
 // LogRestore adds a log entry when the pending deletion of a file was cancelled and the file restored. Non-Blocking

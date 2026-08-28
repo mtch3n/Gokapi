@@ -2740,6 +2740,59 @@ func TestFolderDelete(t *testing.T) {
 	removeUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
 }
 
+// TestFolderDeleteWritesBatchedAuditRecord verifies MAJOR-2: deleting a folder with several
+// member files records one contiguous, correctly hash-chained batch of audit entries (one per
+// member plus one for the folder), rather than each member racing the next for the shared audit
+// mutex through N separate synchronous fsyncs. See TestAuditChainBatchedWriteAllOrNothingOnFailure
+// in the logging package for the accompanying failure-mode contract this exists for.
+func TestFolderDeleteWritesBatchedAuditRecord(t *testing.T) {
+	apiKey := testAuthorisation(t, "/folder/delete", models.ApiPermDelete)
+
+	tempDir := t.TempDir()
+	logging.Init(tempDir)
+	defer func() {
+		testDataDir := os.Getenv("GOKAPI_DATA_DIR")
+		if testDataDir == "" {
+			testDataDir = "test/data"
+		}
+		logging.Init(testDataDir)
+	}()
+
+	folder := filebundle.Create("TestFolderDeleteBatch_Folder", idUser)
+	memberIds := []string{"batchApiMember1", "batchApiMember2", "batchApiMember3"}
+	for _, id := range memberIds {
+		database.SaveMetaData(models.File{
+			Id:                 id,
+			Name:               id,
+			SHA1:               "03cfd743661f07975fa2f1220c5194cbaff48451",
+			ExpireAt:           2147483646,
+			DownloadsRemaining: 1,
+			UserId:             idUser,
+			BundleId:           folder.Id,
+		})
+	}
+
+	testFolderDeleteCall(t, apiKey, folder.Id, 200, "")
+
+	entries, _ := logging.GetAuditEntriesSince(0, 100)
+	test.IsEqualInt(t, len(entries), len(memberIds)+1)
+
+	prevHash := ""
+	var fileEntries, folderEntries int
+	for _, e := range entries {
+		test.IsEqualString(t, e.PrevHash, prevHash)
+		prevHash = e.Hash
+		if e.Action == "file.deleted" {
+			fileEntries++
+		}
+		if e.Action == "folder.deleted" && e.BundleId == folder.Id {
+			folderEntries++
+		}
+	}
+	test.IsEqualInt(t, fileEntries, len(memberIds))
+	test.IsEqualInt(t, folderEntries, 1)
+}
+
 func testFolderDeleteCall(t *testing.T, apiKey models.ApiKey, folderId string, resultCode int, expectedResponse string) {
 	t.Helper()
 	const apiUrl = "/folder/delete"

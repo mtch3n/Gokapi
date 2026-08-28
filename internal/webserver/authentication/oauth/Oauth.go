@@ -61,10 +61,49 @@ const (
 	promptConsent
 )
 
+// CookieForceConsent is a short-lived cookie set by the webserver package (see showLogin) when a
+// logout redirected here with a consent hint in hybrid mode. HandlerLogin honours it in addition
+// to the consent query parameter, so that forcing consent after logout does not depend on a
+// client-rendered login page passing the query string through to the OAuth login redirect - see
+// the package doc comment on why hybrid mode cannot rely on a server-side redirect for this.
+const CookieForceConsent = "oauth_force_consent"
+
+// SetForceConsentHint sets CookieForceConsent so the next call to HandlerLogin requests consent
+// regardless of whether a consent query parameter is present on that request.
+func SetForceConsentHint(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     CookieForceConsent,
+		Value:    "true",
+		MaxAge:   300,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   configuration.Get().UseSsl,
+	})
+}
+
+func clearForceConsentHint(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     CookieForceConsent,
+		Value:    "",
+		MaxAge:   -1,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   configuration.Get().UseSsl,
+	})
+}
+
+func hasForceConsentHint(r *http.Request) bool {
+	cookie, err := r.Cookie(CookieForceConsent)
+	return err == nil && cookie.Value == "true"
+}
+
 // HandlerLogin is a handler for showing the login screen
 func HandlerLogin(w http.ResponseWriter, r *http.Request) {
 	// If user clicked logout, force account selection
-	if r.URL.Query().Has("consent") {
+	if r.URL.Query().Has("consent") || hasForceConsentHint(r) {
+		clearForceConsentHint(w)
 		initLogin(w, r, promptConsent)
 		return
 	}

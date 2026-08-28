@@ -588,20 +588,17 @@ func apiFolderDelete(w http.ResponseWriter, r requestParser, user models.User, _
 		return
 	}
 
-	// Fail closed: commit an audit record for every member file and for the folder itself
-	// before anything is deleted. Audit writes previously raced the deletion on a background
-	// goroutine (appendAuditEntryAsync), so a write failure returned {"Result":"OK"} with the
-	// files already gone. If any write fails here, abort without deleting anything, mirroring
-	// the download path in FileServing.go.
+	// Fail closed: commit a single batched audit record covering every member file and the
+	// folder itself before anything is deleted. This used to be N+1 separate synchronous
+	// fsyncs (one appendAuditEntry call per member plus one for the folder), each taking the
+	// package-global audit mutex - for a folder with thousands of members that could exceed the
+	// write timeout and stalled every concurrent download that also needed an audit write, since
+	// they share the same mutex. LogFolderDeleteBatch takes the mutex and fsyncs exactly once
+	// for the whole folder, and writes nothing at all if any part of the batch fails, so an
+	// aborted delete never leaves a durable "deleted" record for a member that was never
+	// actually deleted.
 	memberFiles := filebundle.GetFiles(bundle)
-	for _, file := range memberFiles {
-		if err := logging.LogDelete(file, user); err != nil {
-			fmt.Println("audit: refusing to delete folder, could not record audit event:", err)
-			sendError(w, http.StatusServiceUnavailable, errorcodes.AuditWriteFailed, "Service temporarily unavailable, please try again.")
-			return
-		}
-	}
-	if err := logging.LogFolderDelete(bundle, user); err != nil {
+	if err := logging.LogFolderDeleteBatch(bundle, memberFiles, user); err != nil {
 		fmt.Println("audit: refusing to delete folder, could not record audit event:", err)
 		sendError(w, http.StatusServiceUnavailable, errorcodes.AuditWriteFailed, "Service temporarily unavailable, please try again.")
 		return

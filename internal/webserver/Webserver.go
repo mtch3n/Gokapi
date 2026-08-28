@@ -530,6 +530,14 @@ func showLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if isHybrid && r.URL.Query().Has("consent") {
+		// Hybrid mode shows the login choice page here rather than redirecting straight to
+		// oauth-login, so the consent hint on the URL cannot simply be forwarded through a
+		// redirect like the OAuth2-only case above. Set a short-lived cookie instead: this makes
+		// the next OAuth login request consent, independently of whether the client that renders
+		// this page (e.g. the SPA) also happens to forward the query string itself.
+		oauth.SetForceConsentHint(w)
+	}
 	err = r.ParseForm()
 	if err != nil {
 		fmt.Println("Invalid form data sent to server for /login")
