@@ -759,6 +759,13 @@ func getFilesForUser(user models.User, includeUploadRequests bool) []models.File
 			}
 		}
 	}
+	// Sort by UploadDate descending, then by Id ascending for stable ordering
+	sort.Slice(validFiles, func(i, j int) bool {
+		if validFiles[i].UploadDate != validFiles[j].UploadDate {
+			return validFiles[i].UploadDate > validFiles[j].UploadDate
+		}
+		return validFiles[i].Id < validFiles[j].Id
+	})
 	return validFiles
 }
 

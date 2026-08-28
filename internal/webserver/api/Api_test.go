@@ -1490,6 +1490,33 @@ func TestList(t *testing.T) {
 	test.IsEqualString(t, result[0].Name, "newTestFileName")
 }
 
+func TestListDeterministicOrder(t *testing.T) {
+	const apiUrl = "/files/list"
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermView)
+	grantUserPermission(t, idUser, models.UserPermListOtherUploads)
+
+	var result1 []models.FileApiOutput
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	err := json.Unmarshal(w.Body.Bytes(), &result1)
+	test.IsNil(t, err)
+
+	var result2 []models.FileApiOutput
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	err = json.Unmarshal(w.Body.Bytes(), &result2)
+	test.IsNil(t, err)
+
+	test.IsEqualInt(t, len(result1), len(result2))
+	for i := 0; i < len(result1); i++ {
+		test.IsEqualString(t, result1[i].Id, result2[i].Id)
+	}
+
+	removeUserPermission(t, idUser, models.UserPermListOtherUploads)
+}
+
 func TestListSingle(t *testing.T) {
 	const apiUrl = "/files/list/"
 	_ = testAuthorisation(t, apiUrl, models.ApiPermView)
