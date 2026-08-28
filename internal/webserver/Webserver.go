@@ -140,10 +140,14 @@ func Start() {
 
 	addMuxForCustomContent(mux)
 
-	if configuration.Get().Authentication.Method == models.AuthenticationOAuth2 {
-		oauth.Init(configuration.Get().ServerUrl, configuration.Get().Authentication)
-		mux.HandleFunc("/oauth-login", oauth.HandlerLogin)
-		mux.HandleFunc("/oauth-callback", oauth.HandlerCallback)
+	authConfig := configuration.Get().Authentication
+	isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
+	if authConfig.Method == models.AuthenticationOAuth2 || isHybrid {
+		oauth.Init(configuration.Get().ServerUrl, authConfig, isHybrid)
+		if oauth.IsAvailable() {
+			mux.HandleFunc("/oauth-login", oauth.HandlerLogin)
+			mux.HandleFunc("/oauth-callback", oauth.HandlerCallback)
+		}
 	}
 
 	fmt.Println("Binding webserver to " + configuration.Get().Port)
@@ -512,7 +516,9 @@ func showLogin(w http.ResponseWriter, r *http.Request) {
 			"No login information was sent from the authentication provider.", errorHandling.WidthDefault)
 		return
 	}
-	if configuration.Get().Authentication.Method == models.AuthenticationOAuth2 {
+	authConfig := configuration.Get().Authentication
+	isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
+	if authConfig.Method == models.AuthenticationOAuth2 && !isHybrid {
 		// If user clicked logout, force consent
 		if r.URL.Query().Has("consent") {
 			redirect(w, r, "oauth-login?consent=true")
@@ -1389,19 +1395,9 @@ func pubApiFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all files and compute members
+	// Get all files and compute servable members
 	allFiles := database.GetAllMetadata()
-	timeNow := time.Now().Unix()
-	var memberFiles []models.File
-
-	for _, file := range allFiles {
-		if file.BundleId == bundle.Id &&
-			!file.IsPendingForDeletion() &&
-			!storage.IsExpiredFile(file, timeNow) &&
-			!file.IsFileRequest() {
-			memberFiles = append(memberFiles, file)
-		}
-	}
+	memberFiles := servableBundleMembers(bundle.Id, allFiles)
 
 	// Check if folder is password protected (ANY member has a password)
 	isProtected := false
@@ -1474,11 +1470,12 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all files and find ALL that have a password
+	// Get all files and find all servable members that have a password
 	allFiles := database.GetAllMetadata()
+	members := servableBundleMembers(bundle.Id, allFiles)
 	var passwordFiles []models.File
-	for _, file := range allFiles {
-		if file.BundleId == bundle.Id && file.PasswordHash != "" {
+	for _, file := range members {
+		if file.PasswordHash != "" {
 			passwordFiles = append(passwordFiles, file)
 		}
 	}
@@ -1575,21 +1572,12 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		requestedIds = strings.Split(idsParam, ",")
 	}
 
-	// Filter files
-	timeNow := time.Now().Unix()
+	// Filter files: start with servable members
+	members := servableBundleMembers(bundle.Id, allFiles)
 	var filesToServe []models.File
 
-	for _, file := range allFiles {
-		if file.BundleId != bundle.Id {
-			continue
-		}
-		if file.IsPendingForDeletion() || storage.IsExpiredFile(file, timeNow) {
-			continue
-		}
+	for _, file := range members {
 		if file.RequiresClientDecryption() {
-			continue
-		}
-		if file.IsFileRequest() {
 			continue
 		}
 
@@ -1641,25 +1629,86 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve as zip
-	storage.ServeFilesAsZip(filesToServe, bundle.Name, w, r)
+	// Serve as zip - folder downloads meter every member by rechecking expiry and
+	// atomically consuming one download before streaming each member.
+	// Exclude members whose allowance is exhausted or expired from the archive;
+	// if nothing remains servable, respond 404 like an empty folder.
+	filesToServeInZip := make([]models.File, 0)
+	for _, file := range filesToServe {
+		// Recheck expiry and atomically consume one download, reusing the same primitives ServeFile uses
+		if !file.UnlimitedDownloads {
+			file.DownloadsRemaining = database.GetDownloadsRemaining(file.Id)
+		}
+		if storage.IsExpiredFile(file, time.Now().Unix()) {
+			// This member has expired; exclude it from the archive
+			continue
+		}
+		if !file.UnlimitedDownloads {
+			if !database.IncreaseDownloadCount(file.Id, true) {
+				// Atomic, floored decrement lost the race (or found the allowance already exhausted);
+				// exclude this member from the archive
+				continue
+			}
+		} else {
+			database.IncreaseDownloadCount(file.Id, false)
+		}
+		filesToServeInZip = append(filesToServeInZip, file)
+	}
+
+	if len(filesToServeInZip) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// Serve as zip - keep the audit logging that ServeFilesAsZip already performs per entry
+	storage.ServeFilesAsZip(filesToServeInZip, bundle.Name, w, r)
 }
 
 // Serve a single file from a bundle with proper headers and decryption
+// Returns true if successfully served, false if download was denied (expired or exhausted).
 func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
 	// Use ServeFile with forceDownload=true to set attachment headers and serve the file
 	// increaseCounter=true to decrement download counter (matches the /d door behavior)
 	// forceDecryption=false to handle decryption normally
 	// recheckExpiry=true to verify expiry at serve time
-	storage.ServeFile(file, w, r, true, true, false, true)
+	validFile := storage.ServeFile(file, w, r, true, true, false, true)
+	if !validFile {
+		// Called if the file has expired or its download allowance was exhausted, checked
+		// during storage.ServeFile()
+		if err := logging.LogDownloadDenied(file, r, configuration.Get().SaveIp, "link expired or download allowance exhausted"); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
+	}
+}
+
+// servableBundleMembers returns files in a bundle that pass the full filter set:
+// - Not pending for deletion
+// - Not expired
+// - Not file request members
+// This unified helper ensures consistent member-set definitions across all four password/listing paths.
+func servableBundleMembers(bundleId string, allFiles map[string]models.File) []models.File {
+	var result []models.File
+	timeNow := time.Now().Unix()
+	for _, file := range allFiles {
+		if file.BundleId == bundleId &&
+			!file.IsPendingForDeletion() &&
+			!storage.IsExpiredFile(file, timeNow) &&
+			!file.IsFileRequest() {
+			result = append(result, file)
+		}
+	}
+	return result
 }
 
 // Check if folder is password protected and if a valid cookie exists
 func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle, allFiles map[string]models.File) bool {
-	// Check if any file in this bundle has a password
+	// Check if any servable member has a password
+	members := servableBundleMembers(bundle.Id, allFiles)
 	isProtected := false
-	for _, file := range allFiles {
-		if file.BundleId == bundle.Id && file.PasswordHash != "" {
+	for _, file := range members {
+		if file.PasswordHash != "" {
 			isProtected = true
 			break
 		}
@@ -1674,12 +1723,12 @@ func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models
 	}
 
 	// Password protection required, no valid cookie
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	response := map[string]interface{}{
 		"id":               bundle.Id,
 		"requiresPassword": true,
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	json.NewEncoder(w).Encode(response)
 	return false
 }
@@ -1716,8 +1765,16 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 	env := configuration.GetEnvironment()
 
 	// Determine auth methods
-	isInternal := config.Authentication.Method == models.AuthenticationInternal
-	isOAuth := config.Authentication.Method == models.AuthenticationOAuth2
+	authConfig := config.Authentication
+	isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
+	isInternal := authConfig.Method == models.AuthenticationInternal || isHybrid
+	isOAuth := authConfig.Method == models.AuthenticationOAuth2 || (isHybrid && oauth.IsAvailable())
+
+	// Determine oauthProvider label
+	oauthProviderLabel := "SSO"
+	if strings.Contains(authConfig.OAuthProvider, "accounts.google.com") {
+		oauthProviderLabel = "Google"
+	}
 
 	// Determine if hotlinks are enabled globally
 	// Hotlinks are disabled if: DisableHotlinks flag is set OR encryption is full server-side
@@ -1730,7 +1787,7 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 		"auth": map[string]interface{}{
 			"internal":       isInternal,
 			"oauth":          isOAuth,
-			"oauthProvider":  "", // Not exposed at this time
+			"oauthProvider":  oauthProviderLabel,
 		},
 		"features": map[string]interface{}{
 			"folders":         true,
@@ -1768,7 +1825,10 @@ func requireLogin(next http.HandlerFunc, isUiCall, isPwChangeView bool) http.Han
 			return
 		}
 		if isLoggedIn {
-			if user.ResetPassword && isUiCall && configuration.Get().Authentication.Method == models.AuthenticationInternal {
+			authConfig := configuration.Get().Authentication
+			isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
+			// Force password change for internal auth users only (not OAuth-provisioned users)
+			if user.ResetPassword && isUiCall && (authConfig.Method == models.AuthenticationInternal || (isHybrid && user.AuthProvider != "oidc")) {
 				if !isPwChangeView {
 					redirect(w, r, "changePassword")
 					return

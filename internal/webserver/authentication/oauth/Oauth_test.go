@@ -149,7 +149,7 @@ func TestInit_WithoutGroupScope(t *testing.T) {
 	// Ensure no group scope is set in the global config
 	configuration.Get().Authentication.OAuthGroupScope = ""
 
-	Init(mock.URL()+"/", credentials)
+	Init(mock.URL()+"/", credentials, false)
 
 	test.IsEqualBool(t, ctx != nil, true)
 	test.IsEqualBool(t, provider != nil, true)
@@ -175,7 +175,7 @@ func TestInit_WithGroupScope(t *testing.T) {
 	configuration.Get().Authentication.OAuthGroupScope = "groups"
 	defer func() { configuration.Get().Authentication.OAuthGroupScope = "" }()
 
-	Init(mock.URL()+"/", credentials)
+	Init(mock.URL()+"/", credentials, false)
 
 	// Group scope must be appended as a fourth scope
 	test.IsEqualInt(t, len(config.Scopes), 4)

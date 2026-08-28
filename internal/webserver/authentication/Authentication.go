@@ -52,6 +52,21 @@ func checkAuthConfig(config models.AuthenticationConfig) error {
 		if len(config.Username) < 3 {
 			return errors.New("username too short")
 		}
+		// In hybrid mode, also validate OAuth fields
+		if config.OAuthEnabledAlongsideInternal {
+			if config.OAuthProvider == "" {
+				return errors.New("oauth provider was not set")
+			}
+			if config.OAuthClientId == "" {
+				return errors.New("oauth client id was not set")
+			}
+			if config.OAuthClientSecret == "" {
+				return errors.New("oauth client secret was not set")
+			}
+			if config.OAuthRecheckInterval < 1 {
+				return errors.New("oauth recheck interval invalid")
+			}
+		}
 		return nil
 	case models.AuthenticationOAuth2:
 		if config.OAuthProvider == "" {
@@ -308,10 +323,11 @@ func IsCorrectUsernameAndPassword(username, password, userCsrfToken string) (mod
 
 // Logout logs the user out and removes the session
 func Logout(w http.ResponseWriter, r *http.Request) {
-	if authSettings.Method == models.AuthenticationInternal || authSettings.Method == models.AuthenticationOAuth2 {
+	isHybrid := authSettings.Method == models.AuthenticationInternal && authSettings.OAuthEnabledAlongsideInternal
+	if authSettings.Method == models.AuthenticationInternal || authSettings.Method == models.AuthenticationOAuth2 || isHybrid {
 		sessionmanager.LogoutSession(w, r)
 	}
-	if authSettings.Method == models.AuthenticationOAuth2 {
+	if authSettings.Method == models.AuthenticationOAuth2 && !isHybrid {
 		http.Redirect(w, r, "login?consent=true", http.StatusTemporaryRedirect)
 	} else {
 		http.Redirect(w, r, "login", http.StatusTemporaryRedirect)

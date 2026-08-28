@@ -18,13 +18,25 @@ import (
 var config oauth2.Config
 var ctx context.Context
 var provider *oidc.Provider
+var isAvailable bool = true
 
-// Init starts the oauth connection
-func Init(baseUrl string, credentials models.AuthenticationConfig) {
+// IsAvailable returns true if OAuth is initialized and available
+func IsAvailable() bool {
+	return isAvailable
+}
+
+// Init starts the oauth connection. In hybrid mode, returns non-fatally if initialization fails
+func Init(baseUrl string, credentials models.AuthenticationConfig, isHybrid bool) {
 	var err error
 	ctx = context.Background()
 	provider, err = oidc.NewProvider(ctx, credentials.OAuthProvider)
 	if err != nil {
+		if isHybrid {
+			log.Println("Warning: OAuth initialization failed in hybrid mode, password login will remain available:")
+			log.Println(err)
+			isAvailable = false
+			return
+		}
 		log.Fatal(err)
 	}
 

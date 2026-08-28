@@ -18,6 +18,8 @@ type User struct {
 	LastOnline    int64          `json:"lastOnline" redis:"LastOnline"`
 	Password      string         `json:"-" redis:"Password"`
 	ResetPassword bool           `json:"resetPassword" redis:"ResetPassword"`
+	AuthProvider  string         `json:"-" redis:"AuthProvider"`
+	OidcSubject   string         `json:"-" redis:"OidcSubject"`
 }
 
 // GetReadableUserLevel returns the userlevel as a group name
