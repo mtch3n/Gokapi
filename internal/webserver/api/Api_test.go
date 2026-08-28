@@ -2218,6 +2218,85 @@ func TestChunkCompleteRejectsWhitespaceOnlyPassword(t *testing.T) {
 	test.IsEqualInt(t, len(database.GetAllMetadata()), metadataBefore)
 }
 
+// TestEditFileNonAsciiPasswordRoundTrips closes the second reported bug: the password
+// header is the one user-supplied text header that used to be neither encoded by the
+// client nor decoded by the server. The Headers API a browser client uses serializes
+// codepoints up to U+00FF as single latin-1 bytes, so a password containing a non-ASCII
+// character such as sharp s (U+00DF) would go on the wire as a single byte and be hashed
+// as such, while the public unlock page (pubApiFilePassword in Webserver.go) posts JSON,
+// which is UTF-8, so the same character arrives as two bytes there - a different hash,
+// so the file could never be unlocked again. The fix decodes a "base64:" prefixed
+// password header before hashing (supportBase64 on the routing.go struct tag), so this
+// test sends the password the same way the fixed frontend does - base64 encoded - and
+// confirms that configuration.VerifyPassword, the exact function pubApiFilePassword
+// calls with the raw UTF-8 string a JSON body decodes to, accepts it.
+func TestEditFileNonAsciiPasswordRoundTrips(t *testing.T) {
+	const apiUrl = "/files/modify"
+	const nonAsciiPassword = "Strasse-Sicherheit-2026-ß"
+	apiKey := generateNewKey(true, idUser, "", "")
+	database.SaveMetaData(models.File{
+		Id:                 "editpwnonascii",
+		Name:               "editpwnonascii.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+	})
+
+	headerValue := "base64:" + base64.StdEncoding.EncodeToString([]byte(nonAsciiPassword))
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: "editpwnonascii"},
+		{Name: "originalPassword", Value: "false"},
+		{Name: "password", Value: headerValue},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	file, ok := database.GetMetaDataById("editpwnonascii")
+	test.IsEqualBool(t, ok, true)
+
+	// This mirrors exactly what pubApiFilePassword does with a JSON-decoded body value.
+	isValid, _ := configuration.VerifyPassword(nonAsciiPassword, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
+	test.IsEqualBool(t, isValid, true)
+}
+
+// TestChunkCompleteNonAsciiPasswordRoundTrips is the same proof as
+// TestEditFileNonAsciiPasswordRoundTrips, for the upload path.
+func TestChunkCompleteNonAsciiPasswordRoundTrips(t *testing.T) {
+	const nonAsciiPassword = "Strasse-Sicherheit-2026-ß"
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermUpload)
+	database.SaveApiKey(apiKey)
+
+	chunkUUID := "nonasciipwtest"
+	err := os.WriteFile("test/data/chunk-"+chunkUUID, []byte("testcontent"), 0600)
+	test.IsNil(t, err)
+
+	headerValue := "base64:" + base64.StdEncoding.EncodeToString([]byte(nonAsciiPassword))
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKey.Id},
+		{Name: "uuid", Value: chunkUUID},
+		{Name: "filename", Value: "test.upload"},
+		{Name: "filesize", Value: "11"},
+		{Name: "password", Value: headerValue}},
+		nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	result := struct {
+		FileInfo models.FileApiOutput `json:"FileInfo"`
+	}{}
+	response, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	err = json.Unmarshal(response, &result)
+	test.IsNil(t, err)
+
+	file, ok := database.GetMetaDataById(result.FileInfo.Id)
+	test.IsEqualBool(t, ok, true)
+	isValid, _ := configuration.VerifyPassword(nonAsciiPassword, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
+	test.IsEqualBool(t, isValid, true)
+}
+
 func TestChunkUpload(t *testing.T) {
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermUpload)

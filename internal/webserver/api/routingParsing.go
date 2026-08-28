@@ -251,7 +251,7 @@ func (p *paramFilesDuplicate) ParseRequest(r *http.Request) error {
 		}
 	}
 
-	// RequestParser header value "password", required: false
+	// RequestParser header value "password", required: false, has base64support
 	exists, err = checkHeaderExists(r, "password", false, true)
 	if err != nil {
 		return err
@@ -259,6 +259,13 @@ func (p *paramFilesDuplicate) ParseRequest(r *http.Request) error {
 	p.foundHeaders["password"] = exists
 	if exists {
 		p.Password = r.Header.Get("password")
+		if strings.HasPrefix(p.Password, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Password, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Password = string(decoded)
+		}
 	}
 
 	// RequestParser header value "originalPassword", required: false
@@ -335,7 +342,7 @@ func (p *paramFilesModify) ParseRequest(r *http.Request) error {
 		}
 	}
 
-	// RequestParser header value "password", required: false
+	// RequestParser header value "password", required: false, has base64support
 	exists, err = checkHeaderExists(r, "password", false, true)
 	if err != nil {
 		return err
@@ -343,6 +350,13 @@ func (p *paramFilesModify) ParseRequest(r *http.Request) error {
 	p.foundHeaders["password"] = exists
 	if exists {
 		p.Password = r.Header.Get("password")
+		if strings.HasPrefix(p.Password, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Password, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Password = string(decoded)
+		}
 	}
 
 	// RequestParser header value "originalPassword", required: false
@@ -1084,7 +1098,7 @@ func (p *paramChunkComplete) ParseRequest(r *http.Request) error {
 		}
 	}
 
-	// RequestParser header value "password", required: false
+	// RequestParser header value "password", required: false, has base64support
 	exists, err = checkHeaderExists(r, "password", false, true)
 	if err != nil {
 		return err
@@ -1092,6 +1106,13 @@ func (p *paramChunkComplete) ParseRequest(r *http.Request) error {
 	p.foundHeaders["password"] = exists
 	if exists {
 		p.Password = r.Header.Get("password")
+		if strings.HasPrefix(p.Password, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Password, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Password = string(decoded)
+		}
 	}
 
 	// RequestParser header value "bundleid", required: false

@@ -430,7 +430,7 @@ type paramFilesDuplicate struct {
 	Id                 string `header:"id" required:"true"`
 	AllowedDownloads   int    `header:"allowedDownloads"`
 	ExpiryDays         int    `header:"expiryDays"`
-	Password           string `header:"password"`
+	Password           string `header:"password" supportBase64:"true"`
 	KeepPassword       bool   `header:"originalPassword"`
 	FileName           string `header:"filename"`
 	UnlimitedDownloads bool
@@ -468,7 +468,7 @@ type paramFilesModify struct {
 	Id                 string `header:"id" required:"true"`
 	AllowedDownloads   int    `header:"allowedDownloads"`
 	ExpiryTimestamp    int64  `header:"expiryTimestamp"`
-	Password           string `header:"password"`
+	Password           string `header:"password" supportBase64:"true"`
 	KeepPassword       bool   `header:"originalPassword"`
 	UnlimitedDownloads bool
 	UnlimitedExpiry    bool
@@ -772,7 +772,7 @@ type paramChunkComplete struct {
 	ContentType        string `header:"contenttype"`
 	AllowedDownloads   int    `header:"allowedDownloads"`
 	ExpiryDays         int    `header:"expiryDays"`
-	Password           string `header:"password"`
+	Password           string `header:"password" supportBase64:"true"`
 	BundleId           string `header:"bundleid"`
 	IsE2E              bool   `header:"isE2E" unpublished:"true"` // not published in API documentation
 	IsNonBlocking      bool   `header:"nonblocking"`
