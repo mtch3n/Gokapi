@@ -1062,6 +1062,118 @@ func TestPublicApiFilePasswordCorrect(t *testing.T) {
 	}
 }
 
+// TestPublicApiFilePasswordTrimMatchesSetTrim closes the trim asymmetry: ValidateSharePassword
+// trims leading/trailing whitespace before hashing whatever password protects a share
+// (Configuration.go), so the stored hash always corresponds to the TRIMMED value regardless of
+// which endpoint set it. pubApiFilePassword must trim the same way before calling VerifyPassword,
+// or the exact string an uploader typed (with surrounding whitespace preserved) would be rejected
+// and only the trimmed form would ever unlock the file. The stored hash here is built exactly the
+// way ValidateSharePassword+HashPassword build it at set time; the verify call below sends the
+// untrimmed original.
+func TestPublicApiFilePasswordTrimMatchesSetTrim(t *testing.T) {
+	t.Parallel()
+	const rawPassword = "  Trim12Chars!  "
+	trimmedHash := configuration.HashPassword(strings.TrimSpace(rawPassword), false, "")
+
+	fileId := "trimpwtest" + helper.GenerateRandomString(8)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "trimpwtest.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		PasswordHash:       trimmedHash,
+	})
+
+	client := &http.Client{}
+	payload, err := json.Marshal(map[string]string{"password": rawPassword})
+	if err != nil {
+		t.Fatalf("Failed to marshal payload: %v", err)
+	}
+	req, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/filepassword?id="+fileId, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to make POST request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if ok, exists := response["ok"].(bool); !exists || !ok {
+		t.Errorf("Expected ok=true for the untrimmed password matching a trimmed-at-set hash, got %v", response["ok"])
+	}
+}
+
+// TestPublicApiFolderPasswordTrimMatchesSetTrim is the folder-bundle counterpart of
+// TestPublicApiFilePasswordTrimMatchesSetTrim - pubApiFolderPassword must trim the submitted
+// password the same way before verifying against every protected member's hash.
+func TestPublicApiFolderPasswordTrimMatchesSetTrim(t *testing.T) {
+	t.Parallel()
+	const rawPassword = "  FolderTrim12!  "
+	trimmedHash := configuration.HashPassword(strings.TrimSpace(rawPassword), false, "")
+
+	bundle := filebundle.Create("TestFolderTrimPw_"+helper.GenerateRandomString(8), 999)
+	database.SaveMetaData(models.File{
+		Id:                 helper.GenerateRandomString(16),
+		Name:               "trimfolder.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+		PasswordHash:       trimmedHash,
+	})
+
+	client := &http.Client{}
+	payload, err := json.Marshal(map[string]string{"password": rawPassword})
+	if err != nil {
+		t.Fatalf("Failed to marshal payload: %v", err)
+	}
+	req, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to make POST request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if ok, exists := response["ok"].(bool); !exists || !ok {
+		t.Errorf("Expected ok=true for the untrimmed password matching a trimmed-at-set hash, got %v", response["ok"])
+	}
+}
+
 // TestPublicApiUploadRequestValid tests GET /pubapi/uploadrequest for a valid request
 func TestPublicApiUploadRequestValid(t *testing.T) {
 	t.Parallel()

@@ -646,12 +646,18 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 		ip := logging.GetIpAddress(r)
 		ratelimiter.WaitOnDownloadPassword(ip)
 
-		isValid, isLegacy := configuration.VerifyPassword(enteredPassword, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
+		// Trim to match ValidateSharePassword, which trims before hashing whatever value
+		// was used to protect the share - see the identical comment in pubApiFilePassword.
+		// The emptiness check above stays on the untrimmed value, so a whitespace-only
+		// submission still re-shows the password prompt rather than being treated as a
+		// (trimmed-away) password guess.
+		trimmedPassword := strings.TrimSpace(enteredPassword)
+		isValid, isLegacy := configuration.VerifyPassword(trimmedPassword, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
 		if isValid {
 			// Migrate legacy passwords to the new format
 			// Will be removed in the future
 			if isLegacy {
-				file.PasswordHash = configuration.HashPassword(enteredPassword, false, "")
+				file.PasswordHash = configuration.HashPassword(trimmedPassword, false, "")
 				database.SaveMetaData(file)
 			}
 			writeFilePwCookie(w, file)
@@ -1306,6 +1312,12 @@ func pubApiFilePassword(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		password = r.PostForm.Get("password")
 	}
+	// Trim to match ValidateSharePassword, which trims before hashing whatever value was
+	// used to protect the share. Without this, a password set with surrounding whitespace
+	// (e.g. "  Trim12Chars!  ") would store the hash of the trimmed value, and the exact
+	// string the uploader typed would then fail verification here - only the trimmed form
+	// would ever unlock it.
+	password = strings.TrimSpace(password)
 
 	// Rate limit the password check attempt
 	ip := logging.GetIpAddress(r)
@@ -1522,6 +1534,8 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		password = r.PostForm.Get("password")
 	}
+	// Trim to match ValidateSharePassword - see the identical comment in pubApiFilePassword.
+	password = strings.TrimSpace(password)
 
 	// Rate limit the password check attempt
 	ip := logging.GetIpAddress(r)
