@@ -279,6 +279,64 @@ func TestHandlerLogin(t *testing.T) {
 	})
 }
 
+// TestHandlerLogin_HybridDefaultsToSelectAccount verifies MAJOR W17-3-2: in hybrid mode,
+// /oauth-login is reached only by an explicit "Sign in with Google" click, never by a
+// server-side redirect on page load the way OAuth2-only mode reaches it. Defaulting that click to
+// prompt=none would silently reauthenticate whoever the browser's live Google session belongs to
+// - on a shared workstation, once the short consent-cookie window has passed, the next person to
+// click "Sign in with Google" would land straight in the previous user's account with no account
+// picker. An explicit sign-in click without a consent hint must default to prompt=select_account
+// and must never produce prompt=none.
+func TestHandlerLogin_HybridDefaultsToSelectAccount(t *testing.T) {
+	config.ClientID = "test-client"
+	config.Endpoint.AuthURL = "https://example.com/auth"
+	isHybridMode = true
+	defer func() { isHybridMode = false }()
+
+	rr := httptest.NewRecorder()
+	HandlerLogin(rr, httptest.NewRequest("GET", "/oauth-login", nil))
+
+	test.IsEqualInt(t, rr.Code, http.StatusFound)
+	location := rr.Header().Get("Location")
+	test.IsNotEmpty(t, location)
+	test.IsEqualBool(t, containsString(location, "prompt=select_account"), true)
+	test.IsEqualBool(t, containsString(location, "prompt=none"), false)
+}
+
+// TestHandlerLogin_OAuth2OnlyStillDefaultsToSilent verifies the OAuth2-only path is unchanged by
+// the hybrid fix: a page-load redirect into /oauth-login with no consent hint must still default
+// to prompt=none, since that is the correct behaviour for silent re-authentication on every page
+// load in that mode.
+func TestHandlerLogin_OAuth2OnlyStillDefaultsToSilent(t *testing.T) {
+	config.ClientID = "test-client"
+	config.Endpoint.AuthURL = "https://example.com/auth"
+	isHybridMode = false
+
+	rr := httptest.NewRecorder()
+	HandlerLogin(rr, httptest.NewRequest("GET", "/oauth-login", nil))
+
+	test.IsEqualInt(t, rr.Code, http.StatusFound)
+	location := rr.Header().Get("Location")
+	test.IsNotEmpty(t, location)
+	test.IsEqualBool(t, containsString(location, "prompt=none"), true)
+}
+
+// TestHandlerLogin_HybridConsentStillHonoured verifies the explicit-consent and force-consent
+// cookie paths continue to work unchanged in hybrid mode: they still force prompt=consent rather
+// than falling through to the new select_account default.
+func TestHandlerLogin_HybridConsentStillHonoured(t *testing.T) {
+	config.ClientID = "test-client"
+	config.Endpoint.AuthURL = "https://example.com/auth"
+	isHybridMode = true
+	defer func() { isHybridMode = false }()
+
+	rr := httptest.NewRecorder()
+	HandlerLogin(rr, httptest.NewRequest("GET", "/oauth-login?consent=true", nil))
+
+	location := rr.Header().Get("Location")
+	test.IsEqualBool(t, containsString(location, "prompt=consent"), true)
+}
+
 func TestHandlerCallback_MissingStateCookie(t *testing.T) {
 	rr := httptest.NewRecorder()
 	// No cookie — state cookie is absent entirely

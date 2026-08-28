@@ -19,6 +19,7 @@ var config oauth2.Config
 var ctx context.Context
 var provider *oidc.Provider
 var isAvailable bool = true
+var isHybridMode bool
 
 // IsAvailable returns true if OAuth is initialized and available
 func IsAvailable() bool {
@@ -28,6 +29,7 @@ func IsAvailable() bool {
 // Init starts the oauth connection. In hybrid mode, returns non-fatally if initialization fails
 func Init(baseUrl string, credentials models.AuthenticationConfig, isHybrid bool) {
 	var err error
+	isHybridMode = isHybrid
 	ctx = context.Background()
 	provider, err = oidc.NewProvider(ctx, credentials.OAuthProvider)
 	if err != nil {
@@ -105,6 +107,20 @@ func HandlerLogin(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Has("consent") || hasForceConsentHint(r) {
 		clearForceConsentHint(w)
 		initLogin(w, r, promptConsent)
+		return
+	}
+	// In hybrid mode, /oauth-login is only ever reached by an explicit "Sign in with Google"
+	// click on the login choice page - never by a server-side redirect the way OAuth2-only mode
+	// reaches it on every page load. Defaulting that click to prompt=none would silently
+	// reauthenticate whoever the browser's live Google session belongs to: on a shared
+	// workstation, if the previous user logged out and the short-lived consent cookie/window
+	// already expired, the next person's click would land straight in the previous user's
+	// account with no account picker and no consent screen. Always let the user choose the
+	// account instead - correctness here must not depend on a time window. OAuth2-only mode
+	// keeps prompt=none, which is the desired silent re-auth behaviour for its server-side
+	// redirect on page load.
+	if isHybridMode {
+		initLogin(w, r, promptSelectAccount)
 		return
 	}
 	initLogin(w, r, promptSilent)
