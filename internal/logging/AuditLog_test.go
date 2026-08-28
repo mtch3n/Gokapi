@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -202,6 +203,147 @@ func TestNoSecretMaterialInAuditEntries(t *testing.T) {
 	// The human-readable log.txt write is fire-and-forget (see createLogEntry); give it time to
 	// land before the temp dir is removed and logPath potentially reassigned by another test.
 	time.Sleep(300 * time.Millisecond)
+}
+
+// TestAuditChainVerificationSuccess verifies that GetAuditEntriesSince marks entries
+// as verified when their hash chain is intact.
+func TestAuditChainVerificationSuccess(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDownload, Action: "download", Outcome: OutcomeSuccess, FileId: "f1"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryUpload, Action: "upload", Outcome: OutcomeSuccess, FileId: "f2"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDenied, Action: "download", Outcome: OutcomeDenied, FileId: "f3"}))
+
+	entries, _ := GetAuditEntriesSince(0, 100)
+	test.IsEqualInt(t, len(entries), 3)
+
+	// All entries should be verified
+	for i, entry := range entries {
+		if entry.Verified == nil {
+			t.Errorf("Entry %d should have Verified set, got nil", i)
+		} else {
+			test.IsEqualBool(t, *entry.Verified, true)
+		}
+	}
+}
+
+// TestAuditChainVerificationTampering verifies that tampering with a middle entry
+// marks it and all successors as unverified.
+func TestAuditChainVerificationTampering(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDownload, Action: "download", Outcome: OutcomeSuccess, FileId: "f1"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryUpload, Action: "upload", Outcome: OutcomeSuccess, FileId: "f2"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDenied, Action: "download", Outcome: OutcomeDenied, FileId: "f3"}))
+
+	// Tamper with the second entry's content without recomputing its hash
+	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	test.IsNil(t, err)
+	tampered := strings.Replace(string(content), `"fileId":"f2"`, `"fileId":"f2tampered"`, 1)
+	test.IsNotEqualString(t, tampered, string(content))
+	test.IsNil(t, os.WriteFile(filepath.Join(dir, "audit.jsonl"), []byte(tampered), 0600))
+
+	entries, _ := GetAuditEntriesSince(0, 100)
+	test.IsEqualInt(t, len(entries), 3)
+
+	// First entry should be verified
+	test.IsNotNil(t, entries[0].Verified)
+	test.IsEqualBool(t, *entries[0].Verified, true)
+
+	// Second entry should be unverified (content tampered)
+	test.IsNotNil(t, entries[1].Verified)
+	test.IsEqualBool(t, *entries[1].Verified, false)
+
+	// Third entry should be unverified (predecessor failed)
+	test.IsNotNil(t, entries[2].Verified)
+	test.IsEqualBool(t, *entries[2].Verified, false)
+}
+
+// TestAuditChainVerificationDeletion verifies that deleting a line from the middle
+// breaks the chain for the next entry.
+func TestAuditChainVerificationDeletion(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDownload, Action: "download", Outcome: OutcomeSuccess, FileId: "f1"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryUpload, Action: "upload", Outcome: OutcomeSuccess, FileId: "f2"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDenied, Action: "download", Outcome: OutcomeDenied, FileId: "f3"}))
+
+	// Delete the second line
+	content, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	test.IsNil(t, err)
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	test.IsEqualInt(t, len(lines), 3)
+
+	// Reconstruct file with only first and third entry
+	test.IsNil(t, os.WriteFile(filepath.Join(dir, "audit.jsonl"), []byte(lines[0]+"\n"+lines[2]+"\n"), 0600))
+
+	entries, _ := GetAuditEntriesSince(0, 100)
+	test.IsEqualInt(t, len(entries), 2)
+
+	// First entry should be verified
+	test.IsNotNil(t, entries[0].Verified)
+	test.IsEqualBool(t, *entries[0].Verified, true)
+
+	// Third entry should be unverified (its prevHash won't match the new predecessor)
+	test.IsNotNil(t, entries[1].Verified)
+	test.IsEqualBool(t, *entries[1].Verified, false)
+}
+
+// TestAuditChainLegacyLinesOmitVerified verifies that legacy entries without a hash
+// field have Verified omitted from JSON (serialized as nil).
+func TestAuditChainLegacyLinesOmitVerified(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+
+	// Manually write a legacy entry without a hash field
+	// We write raw JSON without the hash field to simulate a legacy entry from before hashing was added
+	legacyJson := `{"version":1,"seq":1,"prevHash":"","timestamp":` +
+		fmt.Sprintf("%d", time.Now().Unix()) +
+		`,"category":"download","action":"download","outcome":"success","ip":"","fileId":"f1","requestId":"","actor":{"userId":0,"email":"","oidcSubject":"","anonymous":true}}`
+
+	// Write it to the file (simulate a legacy entry from before hashing was added)
+	test.IsNil(t, os.WriteFile(filepath.Join(dir, "audit.jsonl"), []byte(legacyJson+"\n"), 0600))
+
+	// Now recover state from the legacy entry
+	initAudit(dir)
+
+	entries, _ := GetAuditEntriesSince(0, 100)
+	test.IsEqualInt(t, len(entries), 1)
+
+	// Legacy entry should have Verified as nil
+	if entries[0].Verified != nil {
+		t.Errorf("Expected Verified to be nil for legacy entry, got: %v", *entries[0].Verified)
+	}
+
+	// Verify JSON serialization omits the verified field
+	jsonBytes, err := json.Marshal(entries[0])
+	test.IsNil(t, err)
+	jsonStr := string(jsonBytes)
+	test.IsEqualBool(t, strings.Contains(jsonStr, "verified"), false)
+}
+
+// TestAuditChainVerificationWithCursor verifies that GetAuditEntriesSince maintains
+// verification from file start regardless of the fromSeq cursor.
+func TestAuditChainVerificationWithCursor(t *testing.T) {
+	dir := t.TempDir()
+	initAudit(dir)
+
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDownload, Action: "download", Outcome: OutcomeSuccess, FileId: "f1"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryUpload, Action: "upload", Outcome: OutcomeSuccess, FileId: "f2"}))
+	test.IsNil(t, appendAuditEntry(AuditEntry{Category: categoryDenied, Action: "download", Outcome: OutcomeDenied, FileId: "f3"}))
+
+	// Request entries starting from seq 2 (skip first entry)
+	entries, _ := GetAuditEntriesSince(1, 100)
+	test.IsEqualInt(t, len(entries), 2) // Should get entries 2 and 3
+
+	// Both should still be verified because verification ran from file start
+	test.IsNotNil(t, entries[0].Verified)
+	test.IsEqualBool(t, *entries[0].Verified, true)
+	test.IsNotNil(t, entries[1].Verified)
+	test.IsEqualBool(t, *entries[1].Verified, true)
 }
 
 func readAuditEntries(t *testing.T, dir string) []AuditEntry {

@@ -119,6 +119,9 @@ type AuditEntry struct {
 	// Error is populated on Outcome Failure or Denied with a human-readable reason.
 	Error string `json:"error,omitempty"`
 	Hash  string `json:"hash"`
+	// Verified is set to true if the entry's hash chain is intact; nil for legacy entries
+	// without a hash field, so they serialize with the field omitted via omitempty.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 var auditLogPath = "config/audit.jsonl"
@@ -197,7 +200,22 @@ func recoverAuditChainState() {
 			continue
 		}
 		var entry AuditEntry
-		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.Hash != "" {
+		if err := json.Unmarshal([]byte(line), &entry); err == nil {
+			// Accept entries that either:
+			// 1. Have a valid hash (entry.Hash != "" and it matches recomputed)
+			// 2. Are legacy entries without a hash field (entry.Hash == "")
+			if entry.Hash == "" {
+				// Legacy entry without hash field; accept it and resume from here
+				if badTail > 0 {
+					fmt.Printf("audit: recovered chain state from legacy entry seq %d (no hash field) after skipping %d "+
+						"unparsable or unverifiable trailing line(s), likely a partial write from a crash or legacy data; "+
+						"the malformed data was left in place for forensic review\n", entry.Seq, badTail)
+				}
+				auditNextSeq = entry.Seq + 1
+				auditPrevHash = "" // Legacy entries have no hash to link from
+				return
+			}
+			// Entry has a hash field; verify it
 			if recomputed, ok := recomputeEntryHash(line, entry.PrevHash); ok && recomputed == entry.Hash {
 				if badTail > 0 {
 					fmt.Printf("audit: recovered chain state from entry seq %d after skipping %d unparsable or "+
@@ -375,6 +393,10 @@ func buildActorFromRequest(r *http.Request) AuditActor {
 // oldest-first, capped at limit. If limit <= 0, defaults to 500; hard-capped at 2000.
 // Also returns lastSeq = the highest Seq present in the file (0 if file does not exist or is empty).
 // Parse errors are skipped (corruption tolerance for a read path); blank lines are ignored.
+// Verifies the hash chain from the start of the file regardless of fromSeq cursor: each
+// returned entry has Verified set to true if its hash chain is intact and its predecessor
+// verified, or false if the hash is invalid or its predecessor failed. Legacy entries without
+// a hash field are returned with Verified=nil (omitted from JSON output).
 // Does not take the append mutex: opens the file read-only and reads independently.
 func GetAuditEntriesSince(fromSeq uint64, limit int) ([]AuditEntry, uint64) {
 	// Default and cap limit
@@ -398,6 +420,8 @@ func GetAuditEntriesSince(fromSeq uint64, limit int) ([]AuditEntry, uint64) {
 
 	var entries []AuditEntry
 	var maxSeq uint64 = 0
+	var runningHash = "" // Track hash as we read, starting from empty (genesis constant)
+	var predecessorVerified = true // The genesis state is considered verified
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -415,6 +439,28 @@ func GetAuditEntriesSince(fromSeq uint64, limit int) ([]AuditEntry, uint64) {
 		// Track the highest seq seen
 		if entry.Seq > maxSeq {
 			maxSeq = entry.Seq
+		}
+
+		// Verify the hash if present
+		if entry.Hash != "" {
+			// Entry has a hash field; verify it
+			recomputed, ok := recomputeEntryHash(line, runningHash)
+			if ok && recomputed == entry.Hash && predecessorVerified {
+				// Hash is valid and predecessor verified
+				verified := true
+				entry.Verified = &verified
+				runningHash = entry.Hash
+				predecessorVerified = true
+			} else {
+				// Hash is invalid or predecessor failed
+				verified := false
+				entry.Verified = &verified
+				// Don't update runningHash; this breaks the chain for subsequent entries
+				predecessorVerified = false
+			}
+		} else {
+			// Legacy entry without hash; leave Verified as nil (omitted in JSON)
+			entry.Verified = nil
 		}
 
 		// Only include entries after fromSeq
