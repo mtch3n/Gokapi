@@ -2596,6 +2596,249 @@ func TestChunkCompleteRejectsE2EWhenNotConfigured(t *testing.T) {
 	test.IsEqualInt(t, len(database.GetAllMetadata()), metadataBefore+1)
 }
 
+// chunkUploadWithPassword uploads a small file through /api/chunk/complete (the SPA's real
+// upload path) with the given password and generated-password signal, and returns the
+// resulting file's Id. Fails the test unless the upload itself succeeds - the toggle/generated
+// behaviour under test lives entirely in what gets stored server-side afterwards, not in
+// whether the upload is accepted.
+func chunkUploadWithPassword(t *testing.T, apiKeyId, uuid, password string, generatedPassword bool) string {
+	t.Helper()
+	err := os.WriteFile("test/data/chunk-"+uuid, []byte("testcontent"), 0600)
+	test.IsNil(t, err)
+	headers := []test.Header{
+		{Name: "apikey", Value: apiKeyId},
+		{Name: "uuid", Value: uuid},
+		{Name: "filename", Value: "test.upload"},
+		{Name: "filesize", Value: "11"},
+		{Name: "password", Value: password},
+	}
+	if generatedPassword {
+		headers = append(headers, test.Header{Name: "generatedpassword", Value: "true"})
+	}
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, headers, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result models.Result
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	return result.FileInfo.Id
+}
+
+// withMasterKey loads a fresh server master key for the duration of the calling test, so
+// encryption.IsDecryptionAvailable() (and therefore configuration.StoreShareKeys-gated code)
+// reports the key as available. There is no exported way to unload it again, so this is
+// additive only - safe here because no other test in this package depends on the master key
+// being absent.
+func withMasterKey(t *testing.T) {
+	t.Helper()
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.FullEncryptionStored, Cipher: key}})
+}
+
+// withStoreShareKeys sets configuration.StoreShareKeys for the duration of the calling test and
+// restores the previous value afterwards.
+func withStoreShareKeys(t *testing.T, enabled bool) {
+	t.Helper()
+	previous := configuration.Get().StoreShareKeys
+	configuration.Get().StoreShareKeys = enabled
+	t.Cleanup(func() { configuration.Get().StoreShareKeys = previous })
+}
+
+func getShareKey(apiKeyId, fileId string) (*httptest.ResponseRecorder, *http.Request) {
+	return getRecorder("/files/"+fileId+"/sharekey", apiKeyId, []test.Header{})
+}
+
+// TestApiGetFeatures covers /api/features: it requires a session like any other authenticated
+// route, and storeShareKeys is only ever true when both the config flag is on and the master
+// key is actually available - the flag alone (with no master key loaded) must still report
+// false, since a server in that state could never decrypt a stored key again anyway.
+//
+// This must run before any test that loads a master key (see withMasterKey): once loaded there
+// is no exported way to unload it again for the rest of this test binary, and the
+// "toggle on but no master key yet" assertion below depends on none having run yet.
+func TestApiGetFeatures(t *testing.T) {
+	const apiUrl = "/features"
+	apiKey := generateNewKey(false, idUser, "", "")
+	database.SaveApiKey(apiKey)
+
+	// No session at all.
+	w, r := getRecorder(apiUrl, "", []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	type featuresResponse struct {
+		Features struct {
+			StoreShareKeys bool `json:"storeShareKeys"`
+		} `json:"features"`
+	}
+
+	// Toggle off (whatever the master key state): always false.
+	withStoreShareKeys(t, false)
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result featuresResponse
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, result.Features.StoreShareKeys, false)
+
+	// Toggle on, but nothing has loaded a master key into this test binary yet: still false -
+	// the flag alone must never be enough.
+	withStoreShareKeys(t, true)
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	result = featuresResponse{}
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, result.Features.StoreShareKeys, false)
+
+	// Toggle on and the master key available: true.
+	withMasterKey(t)
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	result = featuresResponse{}
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, result.Features.StoreShareKeys, true)
+}
+
+// TestApiGetShareKeyAuthorisation is the failing-first authz test for GET
+// /api/files/{id}/sharekey: a caller without view rights to the file must get the same
+// not-found response as an unknown file id (no oracle - see apiGetShareKey), while the owner
+// (and a caller with the list-other-uploads permission) gets the stored key back.
+func TestApiGetShareKeyAuthorisation(t *testing.T) {
+	withMasterKey(t)
+	withStoreShareKeys(t, true)
+
+	ownerKey := generateNewKey(false, idUser, "", "")
+	ownerKey.GrantPermission(models.ApiPermUpload)
+	ownerKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(ownerKey)
+
+	// A plain, unprivileged user - deliberately not idAdmin, which already carries
+	// UserPermissionAll (including list-other-uploads) in generateTestData and so would not
+	// exercise the "no permission at all" path this test needs.
+	const idStranger = 103
+	database.SaveUser(models.User{
+		Id:           idStranger,
+		Name:         "TestStranger",
+		Permissions:  models.UserPermissionNone,
+		UserLevel:    models.UserLevelUser,
+		AuthProvider: models.AuthProviderInternal,
+	}, false)
+	otherUserKey := generateNewKey(false, idStranger, "", "")
+	otherUserKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(otherUserKey)
+
+	fileId := chunkUploadWithPassword(t, ownerKey.Id, "sharekeyauthz1", "generatedPassw0rd", true)
+
+	// Unknown id and "no view permission at all" both look identical from the outside.
+	w, r := getShareKey(ownerKey.Id, "doesnotexist")
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"File not found","ErrorCode":5}`)
+
+	// A caller with PERM_VIEW but who is neither the owner nor granted list-other-uploads must
+	// not be able to read another user's key - same not-found response, no leak.
+	w, r = getShareKey(otherUserKey.Id, fileId)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"File not found","ErrorCode":5}`)
+
+	// The owner gets the real, decrypted key back.
+	w, r = getShareKey(ownerKey.Id, fileId)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result struct {
+		Key string `json:"key"`
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualString(t, result.Key, "generatedPassw0rd")
+
+	// Granting list-other-uploads lets the other user in too - same authorisation the rest of
+	// the file-list/view surface (e.g. apiListSingle) already uses.
+	grantUserPermission(t, idStranger, models.UserPermListOtherUploads)
+	w, r = getShareKey(otherUserKey.Id, fileId)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualString(t, result.Key, "generatedPassw0rd")
+	removeUserPermission(t, idStranger, models.UserPermListOtherUploads)
+
+	// No apikey / invalid apikey are refused the same way as any other authenticated route.
+	w, r = getShareKey("", fileId)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+}
+
+// TestApiGetShareKeyToggleOff is the failing-first toggle test: with StoreShareKeys off, an
+// upload with a generated password must store NO EncryptedSharePassword, and the endpoint must
+// answer not-found even for the file's own owner.
+func TestApiGetShareKeyToggleOff(t *testing.T) {
+	withMasterKey(t)
+	withStoreShareKeys(t, false)
+
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermUpload)
+	apiKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(apiKey)
+
+	fileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleoff1", "generatedPassw0rd", true)
+
+	file, ok := database.GetMetaDataById(fileId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, len(file.EncryptedSharePassword), 0)
+
+	w, r := getShareKey(apiKey.Id, fileId)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"File not found","ErrorCode":5}`)
+}
+
+// TestApiGetShareKeyToggleOnGeneratedVsManual is the failing-first test for the toggle-on
+// behaviour: a generated password is stored encrypted and comes back byte-for-byte identical
+// through the endpoint, while a manually typed password - even with the toggle on - is never
+// stored at all.
+func TestApiGetShareKeyToggleOnGeneratedVsManual(t *testing.T) {
+	withMasterKey(t)
+	withStoreShareKeys(t, true)
+
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermUpload)
+	apiKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(apiKey)
+
+	generatedFileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleon1", "generatedPassw0rd", true)
+	file, ok := database.GetMetaDataById(generatedFileId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, len(file.EncryptedSharePassword) > 0, true)
+
+	w, r := getShareKey(apiKey.Id, generatedFileId)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result struct {
+		Key string `json:"key"`
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualString(t, result.Key, "generatedPassw0rd")
+
+	manualFileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleon2", "manuallyTypedPw", false)
+	file, ok = database.GetMetaDataById(manualFileId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, len(file.EncryptedSharePassword), 0)
+
+	w, r = getShareKey(apiKey.Id, manualFileId)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"File not found","ErrorCode":5}`)
+}
+
 func TestMinorFunctions(t *testing.T) {
 	outputFileJson(nil, models.File{})
 	sendError(nil, 0, 0, "none")

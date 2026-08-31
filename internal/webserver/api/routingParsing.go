@@ -39,6 +39,17 @@ func (p *paramFilesListAll) New() requestParser {
 	return &paramFilesListAll{}
 }
 
+// ParseRequest parses the header file. As paramFilesShareKey has no fields with the
+// tag header, this method does nothing, except calling ProcessParameter()
+func (p *paramFilesShareKey) ParseRequest(r *http.Request) error {
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramFilesShareKey struct
+func (p *paramFilesShareKey) New() requestParser {
+	return &paramFilesShareKey{}
+}
+
 // ParseRequest parses the header file. As paramFilesListSingle has no fields with the
 // tag header, this method does nothing, except calling ProcessParameter()
 func (p *paramFilesListSingle) ParseRequest(r *http.Request) error {
@@ -869,6 +880,55 @@ func (p *paramE2eStore) New() requestParser {
 	return &paramE2eStore{}
 }
 
+// ParseRequest parses the header file. As paramShareRecipients has no fields with the
+// tag header, this method does nothing, except calling ProcessParameter()
+func (p *paramShareRecipients) ParseRequest(r *http.Request) error {
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramShareRecipients struct
+func (p *paramShareRecipients) New() requestParser {
+	return &paramShareRecipients{}
+}
+
+// ParseRequest reads r and saves the passed header values in the paramShareRecipientsList struct
+// In the end, ProcessParameter() is called
+func (p *paramShareRecipientsList) ParseRequest(r *http.Request) error {
+	var err error
+	var exists bool
+	p.foundHeaders = make(map[string]bool)
+
+	// RequestParser header value "resourceType", required: false
+	exists, err = checkHeaderExists(r, "resourceType", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["resourceType"] = exists
+	if exists {
+		p.ResourceType, err = parseHeaderInt(r, "resourceType")
+		if err != nil {
+			return fmt.Errorf("invalid value in header resourceType supplied")
+		}
+	}
+
+	// RequestParser header value "resourceId", required: true
+	exists, err = checkHeaderExists(r, "resourceId", true, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["resourceId"] = exists
+	if exists {
+		p.ResourceId = r.Header.Get("resourceId")
+	}
+
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramShareRecipientsList struct
+func (p *paramShareRecipientsList) New() requestParser {
+	return &paramShareRecipientsList{}
+}
+
 // ParseRequest reads r and saves the passed header values in the paramLogsDelete struct
 // In the end, ProcessParameter() is called
 func (p *paramLogsDelete) ParseRequest(r *http.Request) error {
@@ -1112,6 +1172,19 @@ func (p *paramChunkComplete) ParseRequest(r *http.Request) error {
 				return err
 			}
 			p.Password = string(decoded)
+		}
+	}
+
+	// RequestParser header value "generatedpassword", required: false
+	exists, err = checkHeaderExists(r, "generatedpassword", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["generatedpassword"] = exists
+	if exists {
+		p.GeneratedPassword, err = parseHeaderBool(r, "generatedpassword")
+		if err != nil {
+			return fmt.Errorf("invalid value in header generatedpassword supplied")
 		}
 	}
 

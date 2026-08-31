@@ -128,6 +128,15 @@ func validateAllRoutesExist(spec *OpenAPISpec) []string {
 				}
 			}
 
+			// /files/{id}/sharekey is (so far) the one route whose wildcard ID sits in the
+			// middle of the path rather than at the end (see paramFilesShareKey.
+			// ProcessParameter) - check that documented shape too before giving up.
+			if !found {
+				if _, exists := spec.Paths[checkPath+"/{id}/sharekey"]; exists {
+					found = true
+				}
+			}
+
 			if !found {
 				failures = append(failures, fmt.Sprintf(
 					"Route %s (wildcard) not found in OpenAPI spec (expected variations: %s, %s/{id})",
@@ -372,6 +381,12 @@ func findOpenAPIPath(spec *OpenAPISpec, route apiRoute) string {
 		// Try with {uuid}
 		if _, exists := spec.Paths[base+"/{uuid}"]; exists {
 			return base + "/{uuid}"
+		}
+
+		// Try the middle-wildcard shape used by /files/{id}/sharekey (see
+		// validateAllRoutesExist for why this needs its own variation).
+		if _, exists := spec.Paths[base+"/{id}/sharekey"]; exists {
+			return base + "/{id}/sharekey"
 		}
 	}
 

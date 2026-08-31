@@ -14,6 +14,12 @@ type FileBundle struct {
 	Name         string `json:"name" redis:"name"`                 // The name of the bundle
 	UserId       int    `json:"userid" redis:"userid"`             // The user ID of the owner
 	CreationDate int64  `json:"creationdate" redis:"creationdate"` // The timestamp of the bundle creation
+	// EncryptedSharePassword mirrors models.File.EncryptedSharePassword for bundles (folders),
+	// so a folder-level share key can be stored the same way once a caller populates it. Not
+	// currently written by any upload path (folder access today is derived from member files'
+	// PasswordHash, see AccessMode / isValidFolderPassword) - added for schema parity, expected
+	// to be populated by a follow-up that adds folder-level generated passwords.
+	EncryptedSharePassword []byte `json:"-" redis:"EncryptedSharePassword"`
 }
 
 // Populate scans all files and returns those belonging to this bundle

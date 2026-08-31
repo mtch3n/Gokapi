@@ -8,21 +8,23 @@ import (
 	"github.com/forceu/gokapi/internal/models"
 )
 
-const fileBundleColumns = "id, name, userid, creationdate"
+const fileBundleColumns = "id, name, userid, creationdate, EncryptedSharePassword"
 
 type schemaFileBundle struct {
-	Id           string
-	Name         string
-	UserId       int
-	CreationDate int64
+	Id                     string
+	Name                   string
+	UserId                 int
+	CreationDate           int64
+	EncryptedSharePassword []byte
 }
 
 func (s schemaFileBundle) toFileBundle() models.FileBundle {
 	return models.FileBundle{
-		Id:           s.Id,
-		Name:         s.Name,
-		UserId:       s.UserId,
-		CreationDate: s.CreationDate,
+		Id:                     s.Id,
+		Name:                   s.Name,
+		UserId:                 s.UserId,
+		CreationDate:           s.CreationDate,
+		EncryptedSharePassword: s.EncryptedSharePassword,
 	}
 }
 
@@ -33,7 +35,7 @@ func (p DatabaseProvider) GetFileBundle(id string) (models.FileBundle, bool) {
 	}
 	var rowResult schemaFileBundle
 	row := p.queryRow("SELECT "+fileBundleColumns+" FROM FileBundles WHERE id = $1", id)
-	err := row.Scan(&rowResult.Id, &rowResult.Name, &rowResult.UserId, &rowResult.CreationDate)
+	err := row.Scan(&rowResult.Id, &rowResult.Name, &rowResult.UserId, &rowResult.CreationDate, &rowResult.EncryptedSharePassword)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileBundle{}, false
@@ -52,7 +54,7 @@ func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
 	defer rows.Close()
 	for rows.Next() {
 		rowData := schemaFileBundle{}
-		err = rows.Scan(&rowData.Id, &rowData.Name, &rowData.UserId, &rowData.CreationDate)
+		err = rows.Scan(&rowData.Id, &rowData.Name, &rowData.UserId, &rowData.CreationDate, &rowData.EncryptedSharePassword)
 		helper.Check(err)
 		result = append(result, rowData.toFileBundle())
 	}
@@ -63,18 +65,19 @@ func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
 // SaveFileBundle stores the file bundle in the database
 func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 	newData := schemaFileBundle{
-		Id:           bundle.Id,
-		Name:         bundle.Name,
-		UserId:       bundle.UserId,
-		CreationDate: bundle.CreationDate,
+		Id:                     bundle.Id,
+		Name:                   bundle.Name,
+		UserId:                 bundle.UserId,
+		CreationDate:           bundle.CreationDate,
+		EncryptedSharePassword: bundle.EncryptedSharePassword,
 	}
 
 	_, err := p.exec(`INSERT INTO FileBundles
-					(id, name, userid, creationdate)
-					VALUES ($1, $2, $3, $4)
+					(id, name, userid, creationdate, EncryptedSharePassword)
+					VALUES ($1, $2, $3, $4, $5)
 					ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, userid = EXCLUDED.userid,
-						creationdate = EXCLUDED.creationdate`,
-		newData.Id, newData.Name, newData.UserId, newData.CreationDate)
+						creationdate = EXCLUDED.creationdate, EncryptedSharePassword = EXCLUDED.EncryptedSharePassword`,
+		newData.Id, newData.Name, newData.UserId, newData.CreationDate, newData.EncryptedSharePassword)
 	helper.Check(err)
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,10 +15,12 @@ import (
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/encryption"
+	"github.com/forceu/gokapi/internal/features"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/logging/serverstats"
 	"github.com/forceu/gokapi/internal/models"
+	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/storage"
 	"github.com/forceu/gokapi/internal/storage/chunking"
 	"github.com/forceu/gokapi/internal/storage/chunking/chunkreservation"
@@ -26,6 +29,7 @@ import (
 	"github.com/forceu/gokapi/internal/storage/presign"
 	"github.com/forceu/gokapi/internal/webserver/api/mutex/apimutex"
 	"github.com/forceu/gokapi/internal/webserver/api/mutex/e2emutex"
+	"github.com/forceu/gokapi/internal/webserver/authentication/avatar"
 	"github.com/forceu/gokapi/internal/webserver/authentication/downloadPasswordToken"
 	"github.com/forceu/gokapi/internal/webserver/authentication/users"
 	"github.com/forceu/gokapi/internal/webserver/errorHandling/errorcodes"
@@ -311,6 +315,28 @@ func apiCreateApiKey(w http.ResponseWriter, r requestParser, user models.User, _
 
 func apiGetCurrentUser(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
 	_, _ = w.Write([]byte(user.ToJson()))
+}
+
+// apiGetUserAvatar serves the caller's own cached OIDC profile picture. The picture is always a
+// PNG, because the avatar package re-encodes whatever the provider sent, and it is always served
+// from this origin so the production CSP's img-src 'self' covers it.
+func apiGetUserAvatar(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
+	path, ok := avatar.Path(user.Id)
+	if !ok {
+		// 204 rather than 404: "this account has no picture" is an ordinary answer for every
+		// internal account and for any provider that sends no picture claim, so the client
+		// should not have to tell it apart from a genuine error.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		sendError(w, http.StatusInternalServerError, errorcodes.InternalServer, "Could not read the profile picture")
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(content)
 }
 
 func apiGetUserList(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
@@ -785,7 +811,8 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 		request.IsE2E,
 		request.FileSize,
 		"",
-		request.BundleId)
+		request.BundleId,
+		request.GeneratedPassword)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
 		return
@@ -848,7 +875,7 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 	}
 	uploadParams, err := fileupload.CreateUploadConfig(0,
 		0, "", true, true,
-		false, request.FileSize, fileRequest.Id, "")
+		false, request.FileSize, fileRequest.Id, "", false)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
 		return
@@ -885,6 +912,17 @@ func apiConfigInfo(w http.ResponseWriter, _ requestParser, _ models.User, _ mode
 		MaxChunksize:              config.ChunkSize,
 		EndToEndEncryptionEnabled: config.Encryption.Level == encryption.EndToEndEncryption,
 	})
+	helper.Check(err)
+	_, _ = w.Write(result)
+}
+
+// apiGetFeatures returns the server's current effective capability set (see the features
+// package). Authenticated like every other /api/* route, but not gated on a specific
+// permission - it carries no per-user data, only server-wide flags.
+func apiGetFeatures(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
+	result, err := json.Marshal(struct {
+		Features features.Features `json:"features"`
+	}{Features: features.Get()})
 	helper.Check(err)
 	_, _ = w.Write(result)
 }
@@ -944,6 +982,37 @@ func apiListSingle(w http.ResponseWriter, r requestParser, user models.User, _ m
 	output, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
 	helper.Check(err)
 	result, err := json.Marshal(output)
+	helper.Check(err)
+	_, _ = w.Write(result)
+}
+
+// apiGetShareKey returns the decrypted, auto-generated share password stored for a file, if
+// the caller is authorised to view that file and one was actually stored. Authorisation mirrors
+// apiListSingle above exactly (owner, or the list-other-uploads permission) - the same "may see
+// this file at all" check the rest of the file-list/view surface uses, not a bit invented for
+// this endpoint.
+//
+// Every refusal reason - caller not authorised, unknown file id, feature toggle off, nothing
+// stored, master key unavailable - answers with the same not-found response. Distinguishing any
+// of them would let a caller probe, e.g., whether a file exists or has a stored key at all.
+func apiGetShareKey(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramFilesShareKey)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+	file, ok := storage.GetFile(request.Id)
+	if !ok || (file.UserId != user.Id && !user.HasPermission(models.UserPermListOtherUploads)) {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
+		return
+	}
+	password, ok := storage.GetSharePassword(file)
+	if !ok {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
+		return
+	}
+	result, err := json.Marshal(struct {
+		Key string `json:"key"`
+	}{Key: password})
 	helper.Check(err)
 	_, _ = w.Write(result)
 }
@@ -1078,7 +1147,8 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 		false, // is not being used by storage.DuplicateFile
 		0,     // is not being used by storage.DuplicateFile
 		"",
-		"")
+		"",
+		false) // a duplicated password is never treated as freshly auto-generated
 	if err != nil {
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
 		return
@@ -1302,6 +1372,242 @@ func updateApiKeyPermsOnUserPermChange(userId int, userPerm models.UserPermissio
 	}
 }
 
+// apiSetShareRecipients shares a resource with a list of email addresses,
+// replacing whatever list it had. An empty list clears it, which returns the
+// resource to its previous anonymous access mode.
+//
+// The uploader must own the resource, or hold the permission to edit other
+// people's uploads. Granting someone access to a file is a change to that
+// file, so it is gated exactly as editing it is.
+func apiSetShareRecipients(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramShareRecipients)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+
+	resource, ok := resolveShareResource(w, request.ResourceType, request.ResourceId, user)
+	if !ok {
+		return
+	}
+
+	// Clearing the list needs no mail connector, only granting does, so the
+	// empty case is handled before the fail-closed check in GrantAccess.
+	if len(request.Emails) == 0 {
+		database.DeleteShareGrants(request.ResourceType, request.ResourceId)
+		logging.LogShareRecipientsCleared(request.ResourceType, request.ResourceId, user)
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		_, _ = io.WriteString(w, `{"result":"OK","recipients":[]}`)
+		return
+	}
+
+	results, err := shareaccess.GrantAccess(resource, request.Emails, user.Id,
+		request.DownloadsAllowed, configuration.Get().ServerUrl)
+	if err != nil {
+		if errors.Is(err, shareaccess.ErrMailNotConfigured) {
+			sendError(w, http.StatusPreconditionFailed, errorcodes.NoPermission, err.Error())
+			return
+		}
+		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+		return
+	}
+	logging.LogShareRecipientsGranted(request.ResourceType, request.ResourceId, len(results), user)
+
+	type recipientOutput struct {
+		Email          string `json:"email"`
+		IsNewRecipient bool   `json:"isNewRecipient"`
+		MailError      string `json:"mailError,omitempty"`
+	}
+	output := make([]recipientOutput, 0, len(results))
+	for _, result := range results {
+		entry := recipientOutput{Email: result.Email, IsNewRecipient: result.IsNewRecipient}
+		if result.MailErr != nil {
+			// The grant was still created, so the uploader can resend rather
+			// than rebuild the share. Reporting the failure per address is what
+			// lets them see which one needs it.
+			entry.MailError = result.MailErr.Error()
+		}
+		output = append(output, entry)
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK", "recipients": output})
+}
+
+// apiListShareRecipients returns the addresses a resource is shared with,
+// along with how much of their allowance each has used.
+func apiListShareRecipients(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramShareRecipientsList)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+	if _, ok := resolveShareResource(w, request.ResourceType, request.ResourceId, user); !ok {
+		return
+	}
+
+	type recipientOutput struct {
+		Email            string `json:"email"`
+		DownloadsUsed    int    `json:"downloadsUsed"`
+		DownloadsAllowed int    `json:"downloadsAllowed"`
+		LastDownloadAt   int64  `json:"lastDownloadAt"`
+		IsBlocked        bool   `json:"isBlocked"`
+	}
+	output := make([]recipientOutput, 0)
+	for _, grant := range database.GetShareGrants(request.ResourceType, request.ResourceId) {
+		recipient, found := database.GetShareRecipient(grant.RecipientId)
+		if !found {
+			continue
+		}
+		output = append(output, recipientOutput{
+			Email:            recipient.Email,
+			DownloadsUsed:    grant.DownloadsUsed,
+			DownloadsAllowed: grant.DownloadsAllowed,
+			LastDownloadAt:   grant.LastDownloadAt,
+			IsBlocked:        recipient.IsBlocked,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK", "recipients": output})
+}
+
+// apiShareRecipientsSummary returns who every resource the caller can see is
+// shared with, in one call.
+//
+// The file list needs this per row. Asking /share/recipients/list per row would
+// be one request per file, so the walk here is driven off the recipient index
+// instead: an install shares with far fewer addresses than it holds resources,
+// and grants are already indexed by recipient.
+func apiShareRecipientsSummary(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
+	type recipientOutput struct {
+		Email            string `json:"email"`
+		DownloadsUsed    int    `json:"downloadsUsed"`
+		DownloadsAllowed int    `json:"downloadsAllowed"`
+		LastDownloadAt   int64  `json:"lastDownloadAt"`
+		IsBlocked        bool   `json:"isBlocked"`
+	}
+	type shareOutput struct {
+		ResourceType int               `json:"resourceType"`
+		ResourceId   string            `json:"resourceId"`
+		Recipients   []recipientOutput `json:"recipients"`
+	}
+	type resourceKey struct {
+		resourceType int
+		resourceId   string
+	}
+
+	grouped := make(map[resourceKey][]recipientOutput)
+	// A resource carrying several recipients would otherwise be re-resolved
+	// once per recipient.
+	visible := make(map[resourceKey]bool)
+	for _, recipient := range database.GetAllShareRecipients() {
+		for _, grant := range database.GetShareGrantsForRecipient(recipient.Id) {
+			key := resourceKey{grant.ResourceType, grant.ResourceId}
+			isVisible, checked := visible[key]
+			if !checked {
+				isVisible = mayUserSeeShareRecipients(grant.ResourceType, grant.ResourceId, user)
+				visible[key] = isVisible
+			}
+			if !isVisible {
+				continue
+			}
+			grouped[key] = append(grouped[key], recipientOutput{
+				Email:            recipient.Email,
+				DownloadsUsed:    grant.DownloadsUsed,
+				DownloadsAllowed: grant.DownloadsAllowed,
+				LastDownloadAt:   grant.LastDownloadAt,
+				IsBlocked:        recipient.IsBlocked,
+			})
+		}
+	}
+
+	output := make([]shareOutput, 0, len(grouped))
+	for key, recipients := range grouped {
+		output = append(output, shareOutput{
+			ResourceType: key.resourceType,
+			ResourceId:   key.resourceId,
+			Recipients:   recipients,
+		})
+	}
+	// Map iteration order is random, so without this the same data would
+	// serialise differently on every call.
+	sort.Slice(output, func(i, j int) bool {
+		if output[i].ResourceType != output[j].ResourceType {
+			return output[i].ResourceType < output[j].ResourceType
+		}
+		return output[i].ResourceId < output[j].ResourceId
+	})
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK", "shares": output})
+}
+
+// mayUserSeeShareRecipients reports whether the caller is allowed to know who a
+// resource is shared with. Same rule as listing the resource itself: its owner,
+// or a user who may list other people's uploads.
+func mayUserSeeShareRecipients(resourceType int, resourceId string, user models.User) bool {
+	switch resourceType {
+	case models.ShareResourceFile:
+		file, found := database.GetMetaDataById(resourceId)
+		return found && (file.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads))
+	case models.ShareResourceBundle:
+		bundle, found := database.GetFileBundle(resourceId)
+		return found && (bundle.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads))
+	case models.ShareResourceFileRequest:
+		fileRequest, found := database.GetFileRequest(resourceId)
+		return found && (fileRequest.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads))
+	default:
+		return false
+	}
+}
+
+// resolveShareResource looks up the resource and confirms the caller may change
+// who can reach it.
+//
+// A caller who may not is told "not found" rather than "forbidden", so the
+// endpoint cannot be used to discover which IDs exist.
+func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId string, user models.User) (shareaccess.Resource, bool) {
+	switch resourceType {
+	case models.ShareResourceFile:
+		file, found := database.GetMetaDataById(resourceId)
+		if !found || (file.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
+			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
+			return shareaccess.Resource{}, false
+		}
+		return shareaccess.Resource{
+			Type: resourceType, Id: resourceId, Name: file.Name,
+			ExpiresAt: shareExpiry(file.UnlimitedTime, file.ExpireAt),
+		}, true
+	case models.ShareResourceBundle:
+		bundle, found := database.GetFileBundle(resourceId)
+		if !found || (bundle.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
+			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
+			return shareaccess.Resource{}, false
+		}
+		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.Name}, true
+	case models.ShareResourceFileRequest:
+		fileRequest, found := database.GetFileRequest(resourceId)
+		if !found || (fileRequest.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
+			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
+			return shareaccess.Resource{}, false
+		}
+		return shareaccess.Resource{
+			Type: resourceType, Id: resourceId, Name: fileRequest.Name,
+			ExpiresAt: fileRequest.Expiry,
+		}, true
+	default:
+		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "Unknown resource type.")
+		return shareaccess.Resource{}, false
+	}
+}
+
+// shareExpiry reports when the resource stops existing, or 0 when it never
+// does. The access link is given the same lifetime, so it cannot outlive what
+// it points at.
+func shareExpiry(unlimitedTime bool, expireAt int64) int64 {
+	if unlimitedTime {
+		return 0
+	}
+	return expireAt
+}
+
 func apiResetPassword(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramUserResetPw)
 	if !ok {
@@ -1363,6 +1669,7 @@ func apiDeleteUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	logging.LogUserDeletion(userToDelete, user)
 
 	database.DeleteAllSessionsByUser(userToDelete.Id)
+	avatar.Delete(userToDelete.Id)
 
 	for _, apiKey := range database.GetAllApiKeys() {
 		if apiKey.UserId == userToDelete.Id {

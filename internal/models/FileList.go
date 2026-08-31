@@ -10,6 +10,42 @@ import (
 	"github.com/jinzhu/copier"
 )
 
+// Access modes reported to a client so it knows which download flow to run.
+// The server decides the mode; a client never infers it from a combination of
+// booleans. Adding a mode is therefore a server-side change that old clients
+// fail closed on, rather than one they silently misinterpret.
+const (
+	// AccessModePublic means anyone holding the link may download. No
+	// recipients and no password.
+	AccessModePublic = "public"
+	// AccessModePasscode means anyone holding the link and the one-off
+	// passcode may download. A password is set and there are no recipients.
+	AccessModePasscode = "passcode"
+	// AccessModeIdentity means only a signed-in user on the file's recipient
+	// list may download.
+	AccessModeIdentity = "identity"
+)
+
+// AccessMode returns which download flow applies to this file.
+//
+// hasRecipients is passed in rather than read from the file because the
+// recipient list lives in its own table: keeping it out of models.File means
+// there is no second copy of the ACL that can fall out of step with the grant
+// rows.
+//
+// A recipient list takes precedence over a password. Delivering two secrets
+// for one file is a worse experience and buys nothing once access is already
+// bound to an identity.
+func (f *File) AccessMode(hasRecipients bool) string {
+	if hasRecipients {
+		return AccessModeIdentity
+	}
+	if f.PasswordHash != "" {
+		return AccessModePasscode
+	}
+	return AccessModePublic
+}
+
 // File is a struct used for saving information about an uploaded file
 type File struct {
 	Id                      string         `json:"Id" redis:"Id"`                                 // The internal ID of the file
@@ -33,6 +69,13 @@ type File struct {
 	UnlimitedDownloads      bool           `json:"UnlimitedDownloads" redis:"UnlimitedDownloads"` // True if the uploader did not limit the downloads
 	UnlimitedTime           bool           `json:"UnlimitedTime" redis:"UnlimitedTime"`           // True if the uploader did not limit the time
 	InternalRedisEncryption []byte         `redis:"EncryptionRedis"`                              // This field is an internal field, used to store the EncryptionInfo in a Redis Hashmap
+	// EncryptedSharePassword holds the auto-generated share password, encrypted with the
+	// server master key (see encryption.EncryptString), so it can be retrieved later through
+	// /api/files/{id}/sharekey. Only ever populated when configuration.StoreShareKeys is
+	// enabled and the upload signalled the password was auto-generated, never for a
+	// user-typed password. Excluded from JSON output like other sensitive fields (see
+	// User.AuthProvider) - callers read the plaintext through the dedicated endpoint instead.
+	EncryptedSharePassword []byte `json:"-" redis:"EncryptedSharePassword"`
 }
 
 // FileApiOutput will be displayed for public outputs from the ID, hiding sensitive information

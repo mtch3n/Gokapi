@@ -33,6 +33,15 @@ func dbToMetadata(id string, input []any) (models.File, error) {
 		return models.File{}, err
 	}
 	result.Id = strings.Replace(id, prefixMetaData, "", 1)
+	// redigo has no concept of a NULL hash field: a file that never had a share password
+	// still round-trips EncryptedSharePassword as an empty, non-nil []byte rather than nil (an
+	// absent hash field scans to the zero value, and []byte's zero value is non-nil-empty once
+	// ScanStruct has touched it). Normalised to nil so callers (and equality checks) see the
+	// same "nothing stored" value the sqlite/postgres providers already return for a NULL
+	// column.
+	if len(result.EncryptedSharePassword) == 0 {
+		result.EncryptedSharePassword = nil
+	}
 	return unmarshalEncryptionInfo(result)
 }
 

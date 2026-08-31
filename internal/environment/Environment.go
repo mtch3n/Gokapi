@@ -32,6 +32,9 @@ type Environment struct {
 	DataDir string `env:"DATA_DIR" envDefault:"data" persistent:"true"`
 	// Disables the API menu and generation of API keys for non-admin users
 	DisableApiMenu bool `env:"DISABLE_API_MENU" envDefault:"false"`
+	// Disables the built-in web interface, including the anonymous download and hotlink pages, if set to true.
+	// Only the API and the endpoints required by a standalone client remain registered
+	DisableBuiltinUI bool `env:"DISABLE_BUILTIN_UI" envDefault:"false"`
 	// Disables the CORS check on startup and during setup, if set to true
 	DisableCorsCheck bool `env:"DISABLE_CORS_CHECK" envDefault:"false"`
 	// Disables automatically adding Docker subnet to trusted proxies, if set to true
@@ -95,6 +98,11 @@ type Environment struct {
 	// Disables the creation of hotlinks, if set to true. Existing hotlinks are purged on startup,
 	// so that no password-free URL keeps serving a file after this is enabled
 	DisableHotlinks bool `env:"DISABLE_HOTLINKS" envDefault:"false"`
+	// Sets the master encryption key, encoded as base64 of exactly 32 raw bytes, e.g. supplied
+	// by an external secret store. If set, the key is used instead of the cipher stored in the
+	// config file and setup does not persist a cipher. May only be set if the encryption level
+	// uses a stored key
+	EncryptionKeyB64 string `env:"ENCRYPTION_KEY_B64"`
 	// Sets the AWS bucket name
 	AwsBucket string `env:"AWS_BUCKET"`
 	// Sets the AWS region name

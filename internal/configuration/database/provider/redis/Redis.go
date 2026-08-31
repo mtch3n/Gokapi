@@ -413,6 +413,15 @@ return 1
 	return resultInt == 1
 }
 
+// deleteHashmapField removes a single field from a hash, leaving the rest of
+// the hash intact.
+func (p DatabaseProvider) deleteHashmapField(id string, field string) {
+	conn := p.pool.Get()
+	defer conn.Close()
+	_, err := conn.Do("HDEL", p.dbPrefix+id, field)
+	helper.Check(err)
+}
+
 func (p DatabaseProvider) setHashmapField(id string, field string, content any) {
 	conn := p.pool.Get()
 	defer conn.Close()

@@ -187,11 +187,17 @@
 						<select name="showfilename_sel" id="showfilename_sel" style="width:350px;" class="select form-control">
 								<option value="0" selected>No</option>
 								<option value="1">Yes</option>
+						</select><br>
+
+							  <label for="storesharekeys_sel">Store auto-generated share passwords encrypted, so they can be retrieved later</label>
+						<select name="storesharekeys_sel" id="storesharekeys_sel" style="width:350px;" class="select form-control">
+								<option value="0" selected>No</option>
+								<option value="1">Yes</option>
 						</select>
 					</div>
 				</div>
 			</div>
-			
+
 			<!-- Step 3 Webserver 2 -->
 			<div class="wizard-card wizard-card-overlay" data-cardname="webserver2">
 				<h3 style="display:none">Webserver 2/2</h3>
@@ -793,6 +799,9 @@ function TestAWS(button, isManual) {
 	{{ end }}
 	{{ if .Settings.IncludeFilename }}
 				document.getElementById("showfilename_sel").selectedIndex = 1;
+	{{ end }}
+	{{ if .Settings.StoreShareKeys }}
+				document.getElementById("storesharekeys_sel").selectedIndex = 1;
 	{{ end }}
 				document.getElementById("port").value = "{{ .Port }}";
 				document.getElementById("url").value = "{{ .Settings.ServerUrl }}";

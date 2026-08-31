@@ -12,53 +12,55 @@ import (
 
 const metaDataColumns = `Id, Name, Size, SHA1, ExpireAt, SizeBytes, DownloadsRemaining, DownloadCount,
 	PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption, UnlimitedDownloads, UnlimitedTime,
-	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId`
+	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId, EncryptedSharePassword`
 
 type schemaMetaData struct {
-	Id                 string
-	Name               string
-	Size               string
-	SHA1               string
-	ExpireAt           int64
-	SizeBytes          int64
-	DownloadsRemaining int
-	DownloadCount      int
-	PasswordHash       string
-	HotlinkId          string
-	ContentType        string
-	AwsBucket          string
-	Encryption         []byte
-	UnlimitedDownloads int
-	UnlimitedTime      int
-	UserId             int
-	UploadDate         int64
-	PendingDeletion    int64
-	UploadRequestId    string
-	BundleId           string
+	Id                     string
+	Name                   string
+	Size                   string
+	SHA1                   string
+	ExpireAt               int64
+	SizeBytes              int64
+	DownloadsRemaining     int
+	DownloadCount          int
+	PasswordHash           string
+	HotlinkId              string
+	ContentType            string
+	AwsBucket              string
+	Encryption             []byte
+	UnlimitedDownloads     int
+	UnlimitedTime          int
+	UserId                 int
+	UploadDate             int64
+	PendingDeletion        int64
+	UploadRequestId        string
+	BundleId               string
+	EncryptedSharePassword []byte
 }
 
 func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 	result := models.File{
-		Id:                 rowData.Id,
-		Name:               rowData.Name,
-		Size:               rowData.Size,
-		SHA1:               rowData.SHA1,
-		ExpireAt:           rowData.ExpireAt,
-		SizeBytes:          rowData.SizeBytes,
-		DownloadsRemaining: rowData.DownloadsRemaining,
-		DownloadCount:      rowData.DownloadCount,
-		PasswordHash:       rowData.PasswordHash,
-		HotlinkId:          rowData.HotlinkId,
-		ContentType:        rowData.ContentType,
-		AwsBucket:          rowData.AwsBucket,
-		Encryption:         models.EncryptionInfo{},
-		UnlimitedDownloads: rowData.UnlimitedDownloads == 1,
-		UnlimitedTime:      rowData.UnlimitedTime == 1,
-		UserId:             rowData.UserId,
-		UploadDate:         rowData.UploadDate,
-		PendingDeletion:    rowData.PendingDeletion,
-		UploadRequestId:    rowData.UploadRequestId,
-		BundleId:           rowData.BundleId,
+		Id:                     rowData.Id,
+		Name:                   rowData.Name,
+		Size:                   rowData.Size,
+		SHA1:                   rowData.SHA1,
+		ExpireAt:               rowData.ExpireAt,
+		SizeBytes:              rowData.SizeBytes,
+		DownloadsRemaining:     rowData.DownloadsRemaining,
+		DownloadCount:          rowData.DownloadCount,
+		PasswordHash:           rowData.PasswordHash,
+		HotlinkId:              rowData.HotlinkId,
+		ContentType:            rowData.ContentType,
+		AwsBucket:              rowData.AwsBucket,
+		Encryption:             models.EncryptionInfo{},
+		UnlimitedDownloads:     rowData.UnlimitedDownloads == 1,
+		UnlimitedTime:          rowData.UnlimitedTime == 1,
+		UserId:                 rowData.UserId,
+		UploadDate:             rowData.UploadDate,
+		PendingDeletion:        rowData.PendingDeletion,
+		UploadRequestId:        rowData.UploadRequestId,
+		BundleId:               rowData.BundleId,
+		EncryptedSharePassword: rowData.EncryptedSharePassword,
 	}
 
 	buf := bytes.NewBuffer(rowData.Encryption)
@@ -72,7 +74,7 @@ func scanMetaData(scan func(dest ...any) error, rowData *schemaMetaData) error {
 		&rowData.DownloadsRemaining, &rowData.DownloadCount, &rowData.PasswordHash, &rowData.HotlinkId,
 		&rowData.ContentType, &rowData.AwsBucket, &rowData.Encryption, &rowData.UnlimitedDownloads,
 		&rowData.UnlimitedTime, &rowData.UserId, &rowData.UploadDate, &rowData.PendingDeletion,
-		&rowData.UploadRequestId, &rowData.BundleId)
+		&rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword)
 }
 
 // GetAllMetadata returns a map of all available files
@@ -116,23 +118,24 @@ func (p DatabaseProvider) GetMetaDataById(id string) (models.File, bool) {
 // SaveMetaData stores the metadata of a file to the disk
 func (p DatabaseProvider) SaveMetaData(file models.File) {
 	newData := schemaMetaData{
-		Id:                 file.Id,
-		Name:               file.Name,
-		Size:               file.Size,
-		SHA1:               file.SHA1,
-		ExpireAt:           file.ExpireAt,
-		SizeBytes:          file.SizeBytes,
-		DownloadsRemaining: file.DownloadsRemaining,
-		DownloadCount:      file.DownloadCount,
-		PasswordHash:       file.PasswordHash,
-		HotlinkId:          file.HotlinkId,
-		ContentType:        file.ContentType,
-		AwsBucket:          file.AwsBucket,
-		UserId:             file.UserId,
-		UploadDate:         file.UploadDate,
-		PendingDeletion:    file.PendingDeletion,
-		UploadRequestId:    file.UploadRequestId,
-		BundleId:           file.BundleId,
+		Id:                     file.Id,
+		Name:                   file.Name,
+		Size:                   file.Size,
+		SHA1:                   file.SHA1,
+		ExpireAt:               file.ExpireAt,
+		SizeBytes:              file.SizeBytes,
+		DownloadsRemaining:     file.DownloadsRemaining,
+		DownloadCount:          file.DownloadCount,
+		PasswordHash:           file.PasswordHash,
+		HotlinkId:              file.HotlinkId,
+		ContentType:            file.ContentType,
+		AwsBucket:              file.AwsBucket,
+		UserId:                 file.UserId,
+		UploadDate:             file.UploadDate,
+		PendingDeletion:        file.PendingDeletion,
+		UploadRequestId:        file.UploadRequestId,
+		BundleId:               file.BundleId,
+		EncryptedSharePassword: file.EncryptedSharePassword,
 	}
 
 	if file.UnlimitedDownloads {
@@ -150,8 +153,9 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 
 	_, err = p.exec(`INSERT INTO FileMetaData (Id, Name, Size, SHA1, ExpireAt, SizeBytes,
 					DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
-					UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+					UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId,
+					EncryptedSharePassword)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 					ON CONFLICT (Id) DO UPDATE SET Name = EXCLUDED.Name, Size = EXCLUDED.Size, SHA1 = EXCLUDED.SHA1,
 						ExpireAt = EXCLUDED.ExpireAt, SizeBytes = EXCLUDED.SizeBytes,
 						DownloadsRemaining = EXCLUDED.DownloadsRemaining, DownloadCount = EXCLUDED.DownloadCount,
@@ -160,11 +164,12 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 						Encryption = EXCLUDED.Encryption, UnlimitedDownloads = EXCLUDED.UnlimitedDownloads,
 						UnlimitedTime = EXCLUDED.UnlimitedTime, UserId = EXCLUDED.UserId,
 						UploadDate = EXCLUDED.UploadDate, PendingDeletion = EXCLUDED.PendingDeletion,
-						UploadRequestId = EXCLUDED.UploadRequestId, BundleId = EXCLUDED.BundleId`,
+						UploadRequestId = EXCLUDED.UploadRequestId, BundleId = EXCLUDED.BundleId,
+						EncryptedSharePassword = EXCLUDED.EncryptedSharePassword`,
 		newData.Id, newData.Name, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
 		newData.DownloadsRemaining, newData.DownloadCount, newData.PasswordHash, newData.HotlinkId, newData.ContentType,
 		newData.AwsBucket, newData.Encryption, newData.UnlimitedDownloads, newData.UnlimitedTime, newData.UserId,
-		newData.UploadDate, newData.PendingDeletion, newData.UploadRequestId, newData.BundleId)
+		newData.UploadDate, newData.PendingDeletion, newData.UploadRequestId, newData.BundleId, newData.EncryptedSharePassword)
 	helper.Check(err)
 }
 

@@ -23,6 +23,11 @@ type Configuration struct {
 	PicturesAlwaysLocal bool                 `json:"PicturesAlwaysLocal"`
 	SaveIp              bool                 `json:"SaveIp"`
 	IncludeFilename     bool                 `json:"IncludeFilename"`
+	// StoreShareKeys, when true, opts the server into keeping an encrypted copy of an
+	// auto-generated share password so an authorised caller can retrieve it later (see
+	// /api/files/{id}/sharekey). Defaults to false: without this flag, no plaintext or
+	// encrypted password is ever persisted beyond the PasswordHash used to verify it.
+	StoreShareKeys bool `json:"StoreShareKeys"`
 }
 
 // Encryption holds information about the encryption used on this file

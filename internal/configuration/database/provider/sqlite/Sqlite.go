@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 18
+const DatabaseSchemeVersion = 20
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -171,6 +171,89 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		// this schema change with no valid IsOauth value.
 		p.DeleteAllSessions()
 	}
+	// < v2.5.0
+	// External share recipients: their own tables, deliberately not the Users
+	// table. Same idempotency guard style as the v17 and v18 steps, since
+	// Upgrade re-runs every step below the stored version on every boot and
+	// the version is only bumped once the whole ladder completes.
+	if currentDbVersion < 19 {
+		// Each CREATE is guarded on its own rather than behind one check on the
+		// first table. go-sqlite3 runs a multi-statement exec sequentially and
+		// without a transaction, so a process death partway through would leave
+		// the single guard permanently satisfied while the remaining tables
+		// were never created, and every grant operation would then panic on
+		// every boot. That is the same bricked-database mode the v17 step above
+		// documents.
+		if !p.tableExists("ShareRecipients") {
+			err := p.rawSqlite(`CREATE TABLE "ShareRecipients" (
+				"id"			INTEGER NOT NULL,
+				"email"			TEXT NOT NULL UNIQUE,
+				"createdat"		INTEGER NOT NULL,
+				"lastloginat"	INTEGER NOT NULL DEFAULT 0,
+				"isblocked"		INTEGER NOT NULL DEFAULT 0,
+				PRIMARY KEY("id" AUTOINCREMENT)
+			);`)
+			helper.Check(err)
+		}
+		if !p.tableExists("ShareGrants") {
+			err := p.rawSqlite(`CREATE TABLE "ShareGrants" (
+				"resourcetype"		INTEGER NOT NULL,
+				"resourceid"		TEXT NOT NULL,
+				"recipientid"		INTEGER NOT NULL,
+				"grantedat"			INTEGER NOT NULL,
+				"grantedby"			INTEGER NOT NULL,
+				"downloadsused"		INTEGER NOT NULL DEFAULT 0,
+				"downloadsallowed"	INTEGER NOT NULL DEFAULT 0,
+				"lastdownloadat"	INTEGER NOT NULL DEFAULT 0,
+				PRIMARY KEY("resourcetype","resourceid","recipientid")
+			);
+			CREATE INDEX "idx_sharegrants_recipient" ON "ShareGrants" ("recipientid");`)
+			helper.Check(err)
+		}
+		if !p.tableExists("ShareLoginTokens") {
+			err := p.rawSqlite(`CREATE TABLE "ShareLoginTokens" (
+				"tokenhash"		TEXT NOT NULL UNIQUE,
+				"recipientid"	INTEGER NOT NULL,
+				"resourcetype"	INTEGER NOT NULL,
+				"resourceid"	TEXT NOT NULL,
+				"createdat"		INTEGER NOT NULL,
+				"expiresat"		INTEGER NOT NULL,
+				"firstusedat"	INTEGER NOT NULL DEFAULT 0,
+				"isrevoked"		INTEGER NOT NULL DEFAULT 0,
+				"requestedip"	TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY("tokenhash")
+			);
+			CREATE INDEX "idx_sharelogintokens_recipient" ON "ShareLoginTokens" ("recipientid");`)
+			helper.Check(err)
+		}
+	}
+	// < v2.6.0
+	// Optional encrypted storage of an auto-generated share password (see
+	// configuration.StoreShareKeys and encryption.EncryptString). Existing rows simply have no
+	// value, which is indistinguishable from "no key stored" - the same state they were already
+	// in. Same idempotency guard style as the v17 step above.
+	if currentDbVersion < 20 {
+		if !p.columnExists("FileMetaData", "EncryptedSharePassword") {
+			err := p.rawSqlite(`ALTER TABLE FileMetaData ADD COLUMN "EncryptedSharePassword" BLOB;`)
+			helper.Check(err)
+		}
+		if !p.columnExists("FileBundles", "EncryptedSharePassword") {
+			err := p.rawSqlite(`ALTER TABLE FileBundles ADD COLUMN "EncryptedSharePassword" BLOB;`)
+			helper.Check(err)
+		}
+	}
+}
+
+// tableExists returns true if the given table is present. Used to make a
+// CREATE TABLE migration step idempotent.
+func (p DatabaseProvider) tableExists(table string) bool {
+	var name string
+	row := p.sqliteDb.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", table)
+	err := row.Scan(&name)
+	if err != nil {
+		return false
+	}
+	return name == table
 }
 
 // columnExists returns true if the given table has a column with the given name. Used to make
@@ -304,6 +387,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"PendingDeletion"	INTEGER NOT NULL,
 			"UploadRequestId"	TEXT NOT NULL,
 			"BundleId"	TEXT NOT NULL,
+			"EncryptedSharePassword"	BLOB,
 			PRIMARY KEY("Id")
 		);
 		CREATE TABLE "Hotlinks" (
@@ -349,11 +433,45 @@ func (p DatabaseProvider) createNewDatabase() error {
 				"value"	INTEGER,
 				PRIMARY KEY("id" AUTOINCREMENT)
 			);
-		CREATE TABLE "FileBundles" (
+		CREATE TABLE "ShareRecipients" (
+			"id"			INTEGER NOT NULL,
+			"email"			TEXT NOT NULL UNIQUE,
+			"createdat"		INTEGER NOT NULL,
+			"lastloginat"	INTEGER NOT NULL DEFAULT 0,
+			"isblocked"		INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY("id" AUTOINCREMENT)
+		);
+		CREATE TABLE "ShareGrants" (
+			"resourcetype"	INTEGER NOT NULL,
+			"resourceid"	TEXT NOT NULL,
+			"recipientid"	INTEGER NOT NULL,
+			"grantedat"		INTEGER NOT NULL,
+			"grantedby"		INTEGER NOT NULL,
+			"downloadsused"		INTEGER NOT NULL DEFAULT 0,
+			"downloadsallowed"	INTEGER NOT NULL DEFAULT 0,
+			"lastdownloadat"	INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY("resourcetype","resourceid","recipientid")
+		);
+		CREATE INDEX "idx_sharegrants_recipient" ON "ShareGrants" ("recipientid");
+		CREATE TABLE "ShareLoginTokens" (
+			"tokenhash"		TEXT NOT NULL UNIQUE,
+			"recipientid"	INTEGER NOT NULL,
+			"resourcetype"	INTEGER NOT NULL,
+			"resourceid"	TEXT NOT NULL,
+			"createdat"		INTEGER NOT NULL,
+			"expiresat"		INTEGER NOT NULL,
+			"firstusedat"	INTEGER NOT NULL DEFAULT 0,
+			"isrevoked"		INTEGER NOT NULL DEFAULT 0,
+			"requestedip"	TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY("tokenhash")
+		);
+		CREATE INDEX "idx_sharelogintokens_recipient" ON "ShareLoginTokens" ("recipientid");
+				CREATE TABLE "FileBundles" (
 			"id"	TEXT NOT NULL UNIQUE,
 			"name"	TEXT NOT NULL,
 			"userid"	INTEGER NOT NULL,
 			"creationdate"	INTEGER NOT NULL,
+			"EncryptedSharePassword"	BLOB,
 			PRIMARY KEY("id")
 		);`
 	err := p.rawSqlite(sqlStmt)

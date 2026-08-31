@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -48,18 +49,52 @@ func IsDecryptionAvailable() bool {
 const blockSize = 32
 const nonceSize = 12
 
+// envMasterKey is the name of the environment variable that can supply the master key
+// externally, e.g. resolved from a secret store into the environment before startup
+const envMasterKey = "GOKAPI_ENCRYPTION_KEY_B64"
+
 // Init needs to be called to load the master key into memory or ask the user for the password
 func Init(config models.Configuration) {
+	externalKey, err := getExternalKey(config.Encryption.Level)
+	if err != nil {
+		log.Fatal(err)
+	}
 	switch config.Encryption.Level {
 	case NoEncryption:
 		return
 	case LocalEncryptionStored, FullEncryptionStored:
+		if externalKey != nil {
+			initWithCipher(externalKey)
+			return
+		}
 		initWithCipher(config.Encryption.Cipher)
 	case LocalEncryptionInput, FullEncryptionInput:
 		initWithPassword(config.Encryption.Salt, config.Encryption.Checksum, config.Encryption.ChecksumSalt)
 	case EndToEndEncryption:
 		return
 	}
+}
+
+// getExternalKey reads the master key from the environment variable envMasterKey and returns
+// nil if the variable is not set. An error is returned if the key is invalid or the variable
+// is set at an encryption level that does not use a stored key, as a silently ignored or
+// wrong key would make all stored files unreadable
+func getExternalKey(encLevel int) ([]byte, error) {
+	value := os.Getenv(envMasterKey)
+	if value == "" {
+		return nil, nil
+	}
+	if encLevel != LocalEncryptionStored && encLevel != FullEncryptionStored {
+		return nil, fmt.Errorf("%s is set, but encryption level %d does not use a stored master key. Unset the variable or rerun setup with --reconfigure", envMasterKey, encLevel)
+	}
+	key, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not valid base64: %v", envMasterKey, err)
+	}
+	if len(key) != blockSize {
+		return nil, fmt.Errorf("%s has to decode to exactly %d bytes, but decodes to %d bytes", envMasterKey, blockSize, len(key))
+	}
+	return key, nil
 }
 
 func initWithPassword(saltPw, expectedChecksum, saltChecksum string) {
@@ -223,6 +258,51 @@ func GetEncryptWriter(cipherKey []byte, input io.Writer) (*sio.EncWriter, error)
 	nonce := make([]byte, stream.NonceSize()) // Zero nonce: safe iff caller supplies a key never paired with more than one distinct plaintext (same invariant as Encrypt)
 	return stream.EncryptWriter(input, nonce, nil), nil
 
+}
+
+// ErrMasterKeyUnavailable is returned by EncryptString/DecryptString when the server master key
+// has not been loaded into memory (see IsDecryptionAvailable) - e.g. encryption is disabled, or
+// the instance is configured for end-to-end encryption, where the server never holds a key
+// capable of decrypting anything itself.
+var ErrMasterKeyUnavailable = errors.New("master key not available")
+
+// EncryptString encrypts an arbitrary plaintext string with the server master key, using
+// AES-GCM with a fresh random nonce prepended to the returned ciphertext. Unlike the
+// zero-nonce helpers above (safe only because each is paired with a freshly generated,
+// single-use file key), this is called repeatedly against the one long-lived master key, so a
+// random nonce is required on every call. Returns ErrMasterKeyUnavailable if the master key
+// has not been loaded (see IsDecryptionAvailable).
+func EncryptString(plaintext string) ([]byte, error) {
+	if !IsDecryptionAvailable() {
+		return nil, ErrMasterKeyUnavailable
+	}
+	nonce, err := getRandomData(nonceSize)
+	if err != nil {
+		return nil, err
+	}
+	cipherText, err := EncryptDecryptBytes([]byte(plaintext), getMasterCipher(), nonce, true)
+	if err != nil {
+		return nil, err
+	}
+	return append(nonce, cipherText...), nil
+}
+
+// DecryptString reverses EncryptString. Returns ErrMasterKeyUnavailable if the master key has
+// not been loaded (see IsDecryptionAvailable).
+func DecryptString(data []byte) (string, error) {
+	if !IsDecryptionAvailable() {
+		return "", ErrMasterKeyUnavailable
+	}
+	if len(data) < nonceSize {
+		return "", errors.New("encrypted data is shorter than the nonce size")
+	}
+	nonce := data[:nonceSize]
+	cipherText := data[nonceSize:]
+	plainBytes, err := EncryptDecryptBytes(cipherText, getMasterCipher(), nonce, false)
+	if err != nil {
+		return "", err
+	}
+	return string(plainBytes), nil
 }
 
 func generateNewFileKey(encInfo *models.EncryptionInfo) ([]byte, error) {

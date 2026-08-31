@@ -1,0 +1,314 @@
+// Package shareaccess is the service layer for sharing a resource with named
+// email recipients.
+//
+// It owns the whole lifecycle: resolving an email list to recipients, issuing
+// the access links, mailing them, resending a lost one, and validating a link
+// on the way back in. Putting all of that behind one package is what lets the
+// "no mail connector means no email sharing" rule be structural: every path
+// that creates a grant goes through GrantAccess, and GrantAccess refuses.
+package shareaccess
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/mail"
+	"strings"
+	"time"
+
+	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/helper"
+	gokapimail "github.com/forceu/gokapi/internal/mail"
+	"github.com/forceu/gokapi/internal/models"
+)
+
+// tokenLength is the number of characters in a raw access token. At the
+// alphabet used by helper.GenerateRandomString this is far beyond guessing
+// range, which matters because the token alone grants access.
+const tokenLength = 48
+
+var (
+	// ErrMailNotConfigured is returned when email sharing is attempted with no
+	// mail connector. Creating the grants anyway would produce a share that
+	// nobody can ever open, because the access link would have no way out.
+	ErrMailNotConfigured = errors.New("shareaccess: sharing by email needs a mail connector, see GOKAPI_MAIL_PROVIDER")
+	// ErrNoRecipients is returned when the email list is empty.
+	ErrNoRecipients = errors.New("shareaccess: no recipients given")
+	// ErrCooldown is returned when a link was reissued too recently.
+	ErrCooldown = errors.New("shareaccess: a link was sent recently, please wait before requesting another")
+	// ErrInvalidToken covers every reason a token does not grant access:
+	// unknown, revoked, expired, no matching grant, or a blocked recipient.
+	// The reasons are deliberately not distinguished to a caller that will
+	// render them, so a probe cannot learn which files exist or who was sent
+	// one.
+	ErrInvalidToken = errors.New("shareaccess: this link is not valid")
+	// ErrDownloadsExhausted is returned when the recipient has used their
+	// whole allowance. Unlike the above it is safe to show, because the holder
+	// of the link has already proved they are the recipient.
+	ErrDownloadsExhausted = errors.New("shareaccess: no downloads remaining for this recipient")
+)
+
+// hashToken reduces a raw token to what is stored. Only this value ever
+// reaches the database, so a disclosure of the database cannot be replayed
+// into a working link.
+func hashToken(rawToken string) string {
+	sum := sha256.Sum256([]byte(rawToken))
+	return hex.EncodeToString(sum[:])
+}
+
+// Resource names what is being shared, so callers pass one value rather than
+// a type and an ID that could drift apart.
+type Resource struct {
+	Type int
+	Id   string
+	// Name is shown in the email so the recipient knows what is waiting.
+	Name string
+	// ExpiresAt is the resource's own expiry. The access link is given the
+	// same lifetime, so a link can never outlive what it points at. Zero means
+	// the resource does not expire, in which case the link is capped.
+	ExpiresAt int64
+}
+
+// linkExpiry returns when an access link for this resource should stop
+// working.
+func (r Resource) linkExpiry(now time.Time) int64 {
+	capped := now.Add(models.ShareLinkMaxValiditySeconds * time.Second).Unix()
+	if r.ExpiresAt <= 0 || r.ExpiresAt > capped {
+		return capped
+	}
+	return r.ExpiresAt
+}
+
+// GrantResult reports what GrantAccess did for one address.
+type GrantResult struct {
+	Email string
+	// IsNewRecipient is true when the address had never been shared with
+	// before, which the interface uses to tell the uploader that a new
+	// external contact now exists.
+	IsNewRecipient bool
+	// MailErr is non-nil when the grant was created but the link could not be
+	// delivered. The grant is deliberately kept: the uploader can resend
+	// rather than having to rebuild the whole share.
+	MailErr error
+}
+
+// GrantAccess shares a resource with a list of email addresses.
+//
+// It replaces the whole recipient list, so removing an address from the list
+// revokes it. Every recipient is mailed their own access link.
+//
+// It refuses outright when no mail connector is configured. That check is here,
+// at the single entry point for creating grants, rather than in the HTTP
+// handler, so a future second caller cannot forget it.
+func GrantAccess(resource Resource, emails []string, grantedBy int, downloadsAllowed int, baseUrl string) ([]GrantResult, error) {
+	if !gokapimail.IsEnabled() {
+		return nil, ErrMailNotConfigured
+	}
+	if !models.IsValidShareResourceType(resource.Type) || resource.Id == "" {
+		return nil, errors.New("shareaccess: invalid resource")
+	}
+
+	normalised, err := normaliseEmails(emails)
+	if err != nil {
+		return nil, err
+	}
+	if len(normalised) == 0 {
+		return nil, ErrNoRecipients
+	}
+
+	now := time.Now()
+	recipientIds := make([]int, 0, len(normalised))
+	results := make([]GrantResult, 0, len(normalised))
+	recipients := make([]models.ShareRecipient, 0, len(normalised))
+
+	for _, email := range normalised {
+		recipient, existed := database.GetShareRecipientByEmail(email)
+		if !existed {
+			recipient = models.ShareRecipient{Email: email, CreatedAt: now.Unix()}
+			recipient.Id = database.SaveShareRecipient(recipient)
+		}
+		recipientIds = append(recipientIds, recipient.Id)
+		recipients = append(recipients, recipient)
+		results = append(results, GrantResult{Email: email, IsNewRecipient: !existed})
+	}
+
+	// Grants are written before any mail goes out. A link that arrives before
+	// its grant exists would be refused, which is the one ordering that
+	// produces a support call; the reverse merely means a resend is needed.
+	database.SetShareGrants(resource.Type, resource.Id, recipientIds, grantedBy, downloadsAllowed)
+
+	for i, recipient := range recipients {
+		if err := issueAndSend(resource, recipient, baseUrl, "", now); err != nil {
+			results[i].MailErr = err
+		}
+	}
+	return results, nil
+}
+
+// ResendLink issues a replacement access link for one recipient.
+//
+// The previous links for this recipient and resource are retired first, so a
+// resend does not leave another live credential in an older mail. A cooldown
+// applies, because an unthrottled resend is a way to flood an inbox that the
+// requester does not own.
+func ResendLink(resource Resource, email string, baseUrl string, requestedIp string) error {
+	if !gokapimail.IsEnabled() {
+		return ErrMailNotConfigured
+	}
+	normalisedEmail := database.NormaliseRecipientEmail(email)
+	recipient, ok := database.GetShareRecipientByEmail(normalisedEmail)
+	// An unknown address, a blocked recipient and an address with no grant on
+	// this resource are all reported identically by the caller, so that the
+	// resend endpoint cannot be used to test whether a person was sent a file.
+	if !ok || recipient.IsBlocked {
+		return ErrInvalidToken
+	}
+	if !database.HasShareGrant(resource.Type, resource.Id, recipient.Id) {
+		return ErrInvalidToken
+	}
+
+	now := time.Now()
+	lastIssued := database.GetLastShareLoginTokenTime(recipient.Id, resource.Type, resource.Id)
+	if lastIssued > 0 && now.Unix()-lastIssued < models.ShareLinkCooldownSeconds {
+		return ErrCooldown
+	}
+	return issueAndSend(resource, recipient, baseUrl, requestedIp, now)
+}
+
+// issueAndSend retires any previous link, stores a new one and mails it.
+func issueAndSend(resource Resource, recipient models.ShareRecipient, baseUrl, requestedIp string, now time.Time) error {
+	database.RevokeShareLoginTokens(recipient.Id, resource.Type, resource.Id)
+
+	rawToken := helper.GenerateRandomString(tokenLength)
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    hashToken(rawToken),
+		RecipientId:  recipient.Id,
+		ResourceType: resource.Type,
+		ResourceId:   resource.Id,
+		CreatedAt:    now.Unix(),
+		ExpiresAt:    resource.linkExpiry(now),
+		RequestedIp:  requestedIp,
+	})
+
+	return gokapimail.Send(context.Background(), buildMessage(resource, recipient, rawToken, baseUrl))
+}
+
+// ValidateToken resolves a raw token to the recipient it belongs to, checking
+// that it still grants access to this resource.
+//
+// The grant is re-checked here rather than trusted from the token, so that
+// removing a recipient from the list, or blocking them, takes effect on the
+// next request instead of waiting for the link to expire.
+func ValidateToken(rawToken string, resourceType int, resourceId string) (models.ShareRecipient, error) {
+	if rawToken == "" {
+		return models.ShareRecipient{}, ErrInvalidToken
+	}
+	token, ok := database.GetShareLoginToken(hashToken(rawToken))
+	if !ok || token.IsRevoked {
+		return models.ShareRecipient{}, ErrInvalidToken
+	}
+	if token.ExpiresAt < time.Now().Unix() {
+		return models.ShareRecipient{}, ErrInvalidToken
+	}
+	// A link is bound to the one resource it was issued for, so a token for a
+	// file cannot be replayed against a different file or a bundle.
+	if token.ResourceType != resourceType || token.ResourceId != resourceId {
+		return models.ShareRecipient{}, ErrInvalidToken
+	}
+	if !database.HasShareGrant(resourceType, resourceId, token.RecipientId) {
+		return models.ShareRecipient{}, ErrInvalidToken
+	}
+	recipient, ok := database.GetShareRecipient(token.RecipientId)
+	if !ok || recipient.IsBlocked {
+		return models.ShareRecipient{}, ErrInvalidToken
+	}
+
+	database.MarkShareLoginTokenUsed(token.TokenHash, time.Now().Unix())
+	if recipient.LastLoginAt == 0 {
+		recipient.LastLoginAt = time.Now().Unix()
+		database.SaveShareRecipient(recipient)
+	}
+	return recipient, nil
+}
+
+// ConsumeDownload records one download against the recipient's own allowance.
+// It returns ErrDownloadsExhausted when nothing is left, in which case the
+// caller must not serve the resource.
+func ConsumeDownload(resourceType int, resourceId string, recipientId int) error {
+	if database.IncreaseShareGrantDownloadCount(resourceType, resourceId, recipientId) {
+		return nil
+	}
+	return ErrDownloadsExhausted
+}
+
+// normaliseEmails lower-cases, trims, validates and de-duplicates an address
+// list. A malformed address is rejected outright rather than silently dropped,
+// so an uploader who mistypes is told, instead of believing a share went to
+// someone it never reached.
+func normaliseEmails(emails []string) ([]string, error) {
+	seen := make(map[string]bool, len(emails))
+	result := make([]string, 0, len(emails))
+	for _, raw := range emails {
+		normalised := database.NormaliseRecipientEmail(raw)
+		if normalised == "" {
+			continue
+		}
+		if _, err := mail.ParseAddress(normalised); err != nil {
+			return nil, fmt.Errorf("shareaccess: %q is not a valid email address", raw)
+		}
+		if seen[normalised] {
+			continue
+		}
+		seen[normalised] = true
+		result = append(result, normalised)
+	}
+	return result, nil
+}
+
+// buildMessage composes the notification. It carries the access link itself,
+// so the recipient reaches the resource in one click with nothing to type.
+func buildMessage(resource Resource, recipient models.ShareRecipient, rawToken, baseUrl string) gokapimail.Message {
+	link := BuildAccessUrl(baseUrl, resource, rawToken)
+	what := resource.Name
+	if what == "" {
+		what = "A file"
+	}
+	var body strings.Builder
+	fmt.Fprintf(&body, "%s has been shared with you.\r\n\r\n", what)
+	body.WriteString("Open it here:\r\n")
+	body.WriteString(link + "\r\n\r\n")
+	if resource.ExpiresAt > 0 {
+		fmt.Fprintf(&body, "This link stops working on %s.\r\n",
+			time.Unix(resource.ExpiresAt, 0).UTC().Format("2 January 2006 15:04 UTC"))
+	}
+	body.WriteString("The link is personal to this address. Do not forward it.\r\n")
+	return gokapimail.Message{
+		To: []string{recipient.Email},
+		// The resource name is deliberately absent from the subject. A subject
+		// line is rendered in notification popups and lock screens, and this
+		// system carries health-adjacent filenames.
+		Subject: "A secure file has been shared with you",
+		Text:    body.String(),
+	}
+}
+
+// BuildAccessUrl assembles the link mailed to a recipient.
+func BuildAccessUrl(baseUrl string, resource Resource, rawToken string) string {
+	prefix := "s"
+	switch resource.Type {
+	case models.ShareResourceBundle:
+		prefix = "f"
+	case models.ShareResourceFileRequest:
+		prefix = "r"
+	}
+	return fmt.Sprintf("%s%s/%s?token=%s", ensureTrailingSlash(baseUrl), prefix, resource.Id, rawToken)
+}
+
+func ensureTrailingSlash(url string) string {
+	if url == "" || strings.HasSuffix(url, "/") {
+		return url
+	}
+	return url + "/"
+}

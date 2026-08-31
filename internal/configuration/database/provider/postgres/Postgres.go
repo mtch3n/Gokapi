@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 18
+const DatabaseSchemeVersion = 20
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -162,6 +162,54 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		// password session from now on - skipping the OAuth recheck interval that is supposed to
 		// re-verify its group membership on every renewal.
 		p.DeleteAllSessions()
+	}
+	// < v2.5.0
+	// External share recipients: their own tables, deliberately not the Users
+	// table. IF NOT EXISTS keeps this idempotent, which matters because
+	// Upgrade re-runs every step below the stored version on every boot.
+	if currentDbVersion < 19 {
+		_, err := p.exec(`CREATE TABLE IF NOT EXISTS ShareRecipients (
+			id			SERIAL PRIMARY KEY,
+			email		TEXT NOT NULL UNIQUE,
+			createdat	BIGINT NOT NULL,
+			lastloginat	BIGINT NOT NULL DEFAULT 0,
+			isblocked	BOOLEAN NOT NULL DEFAULT false
+		);
+		CREATE TABLE IF NOT EXISTS ShareGrants (
+			resourcetype		INTEGER NOT NULL,
+			resourceid			TEXT NOT NULL,
+			recipientid			INTEGER NOT NULL,
+			grantedat			BIGINT NOT NULL,
+			grantedby			INTEGER NOT NULL,
+			downloadsused		INTEGER NOT NULL DEFAULT 0,
+			downloadsallowed	INTEGER NOT NULL DEFAULT 0,
+			lastdownloadat		BIGINT NOT NULL DEFAULT 0,
+			PRIMARY KEY(resourcetype, resourceid, recipientid)
+		);
+		CREATE INDEX IF NOT EXISTS idx_sharegrants_recipient ON ShareGrants (recipientid);
+		CREATE TABLE IF NOT EXISTS ShareLoginTokens (
+			tokenhash		TEXT PRIMARY KEY,
+			recipientid		INTEGER NOT NULL,
+			resourcetype	INTEGER NOT NULL,
+			resourceid		TEXT NOT NULL,
+			createdat		BIGINT NOT NULL,
+			expiresat		BIGINT NOT NULL,
+			firstusedat		BIGINT NOT NULL DEFAULT 0,
+			isrevoked		BOOLEAN NOT NULL DEFAULT false,
+			requestedip		TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS idx_sharelogintokens_recipient ON ShareLoginTokens (recipientid);`)
+		helper.Check(err)
+	}
+	// < v2.6.0
+	// Optional encrypted storage of an auto-generated share password (see
+	// configuration.StoreShareKeys and encryption.EncryptString). IF NOT EXISTS keeps this
+	// idempotent; existing rows simply have no value, which is indistinguishable from "no key
+	// stored" - the same state they were already in.
+	if currentDbVersion < 20 {
+		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS EncryptedSharePassword BYTEA;
+		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS EncryptedSharePassword BYTEA;`)
+		helper.Check(err)
 	}
 }
 
@@ -282,6 +330,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			PendingDeletion	BIGINT NOT NULL,
 			UploadRequestId	TEXT NOT NULL,
 			BundleId	TEXT NOT NULL,
+			EncryptedSharePassword	BYTEA,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Hotlinks (
@@ -332,11 +381,43 @@ func (p DatabaseProvider) createNewDatabase() error {
 			Version	INTEGER NOT NULL,
 			PRIMARY KEY(Id)
 		);
-		CREATE TABLE IF NOT EXISTS FileBundles (
+		CREATE TABLE IF NOT EXISTS ShareRecipients (
+			id			SERIAL PRIMARY KEY,
+			email		TEXT NOT NULL UNIQUE,
+			createdat	BIGINT NOT NULL,
+			lastloginat	BIGINT NOT NULL DEFAULT 0,
+			isblocked	BOOLEAN NOT NULL DEFAULT false
+		);
+		CREATE TABLE IF NOT EXISTS ShareGrants (
+			resourcetype		INTEGER NOT NULL,
+			resourceid			TEXT NOT NULL,
+			recipientid			INTEGER NOT NULL,
+			grantedat			BIGINT NOT NULL,
+			grantedby			INTEGER NOT NULL,
+			downloadsused		INTEGER NOT NULL DEFAULT 0,
+			downloadsallowed	INTEGER NOT NULL DEFAULT 0,
+			lastdownloadat		BIGINT NOT NULL DEFAULT 0,
+			PRIMARY KEY(resourcetype, resourceid, recipientid)
+		);
+		CREATE INDEX IF NOT EXISTS idx_sharegrants_recipient ON ShareGrants (recipientid);
+		CREATE TABLE IF NOT EXISTS ShareLoginTokens (
+			tokenhash		TEXT PRIMARY KEY,
+			recipientid		INTEGER NOT NULL,
+			resourcetype	INTEGER NOT NULL,
+			resourceid		TEXT NOT NULL,
+			createdat		BIGINT NOT NULL,
+			expiresat		BIGINT NOT NULL,
+			firstusedat		BIGINT NOT NULL DEFAULT 0,
+			isrevoked		BOOLEAN NOT NULL DEFAULT false,
+			requestedip		TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS idx_sharelogintokens_recipient ON ShareLoginTokens (recipientid);
+				CREATE TABLE IF NOT EXISTS FileBundles (
 			id	TEXT NOT NULL UNIQUE,
 			name	TEXT NOT NULL,
 			userid	INTEGER NOT NULL,
 			creationdate	BIGINT NOT NULL,
+			EncryptedSharePassword	BYTEA,
 			PRIMARY KEY(id)
 		);`
 	err := p.rawPostgres(sqlStmt)

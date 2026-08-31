@@ -82,6 +82,16 @@ func TestEncryptionSetup(t *testing.T) {
 	test.IsEqualBool(t, e2eConfig.DeleteEncryptedStorage, false)
 	test.IsEqualBool(t, e2eConfig.DeleteEnd2EndEncryption, false)
 
+	// If the master key is supplied externally, no cipher may be persisted
+	os.Setenv("GOKAPI_ENCRYPTION_KEY_B64", "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=")
+	formObjects, err = input.toFormObject()
+	test.IsNil(t, err)
+	config, _, _, _, err = toConfiguration(&formObjects)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Encryption.Level, 1)
+	test.IsEqualInt(t, len(config.Encryption.Cipher), 0)
+	os.Unsetenv("GOKAPI_ENCRYPTION_KEY_B64")
+
 	input.EncryptionLevel.Value = "2"
 	input.EncryptionPassword.Value = "testpw12"
 	formObjects, err = input.toFormObject()
@@ -471,6 +481,7 @@ func TestIntegration(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(settings.Port, ":53842"), true)
 	test.IsEqualBool(t, settings.UseSsl, false)
 	test.IsEqualBool(t, settings.SaveIp, false)
+	test.IsEqualBool(t, settings.StoreShareKeys, false)
 	test.IsEqualString(t, settings.ServerUrl, "http://127.0.0.1:53842/")
 	test.IsEqualString(t, settings.RedirectUrl, "https://github.com/Forceu/Gokapi/")
 	cconfig, ok := cloudconfig.Load()
@@ -547,6 +558,7 @@ func TestIntegration(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(settings.Port, ":53842"), true)
 	test.IsEqualBool(t, settings.UseSsl, true)
 	test.IsEqualBool(t, settings.SaveIp, true)
+	test.IsEqualBool(t, settings.StoreShareKeys, true)
 	test.IsEqualString(t, settings.ServerUrl, "http://127.0.0.1:53842/")
 	test.IsEqualString(t, settings.RedirectUrl, "https://test.com")
 	test.IsEqualBool(t, settings.PicturesAlwaysLocal, false)
@@ -594,6 +606,7 @@ type setupValues struct {
 	ExtUrl                        setupEntry `form:"url"`
 	RedirectUrl                   setupEntry `form:"url_redirection"`
 	IncludeFilename               setupEntry `form:"showfilename_sel" isBool:"true"`
+	StoreShareKeys                setupEntry `form:"storesharekeys_sel" isBool:"true"`
 	AuthenticationMode            setupEntry `form:"authentication_sel" isInt:"true"`
 	AuthUsername                  setupEntry `form:"auth_username"`
 	AuthPassword                  setupEntry `form:"auth_pw"`
@@ -740,6 +753,7 @@ func createInputInternalAuth() setupValues {
 	values.EncryptionLevel.Value = "0"
 	values.PicturesAlwaysLocal.Value = "nochange"
 	values.SaveIp.Value = "0"
+	values.StoreShareKeys.Value = "0"
 	values.OAuthOnlyRegisteredUsers.Value = "false"
 	values.OAuthRestrictGroups.Value = "false"
 	values.OAuthRecheckInterval.Value = "12"
@@ -772,6 +786,7 @@ func createInputHeaderAuth() setupValues {
 	values.OAuthRestrictGroups.Value = "false"
 	values.OAuthRecheckInterval.Value = "12"
 	values.IncludeFilename.Value = "0"
+	values.StoreShareKeys.Value = "1"
 	values.DatabaseType.Value = "0"
 	values.SqliteLocation.Value = "./test/gokapi.sqlite"
 	values.RedisUseSsl.Value = "0"

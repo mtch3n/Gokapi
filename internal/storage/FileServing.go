@@ -305,6 +305,7 @@ func createNewMetaData(hash string, fileHeader chunking.FileHeader, userId int, 
 		UploadRequestId:    params.FileRequestId,
 		BundleId:           params.BundleId,
 	}
+	file.EncryptedSharePassword = encryptSharePasswordIfEnabled(params)
 	if params.IsEndToEndEncrypted {
 		file.Encryption = models.EncryptionInfo{IsEndToEndEncrypted: true, IsEncrypted: true}
 		file.Size = helper.ByteCountSI(params.RealSize)
@@ -319,6 +320,45 @@ func createNewMetaData(hash string, fileHeader chunking.FileHeader, userId int, 
 	}
 	AddHotlink(&file)
 	return file
+}
+
+// encryptSharePasswordIfEnabled returns the encrypted form of params.Password to store on the
+// new file's EncryptedSharePassword, or nil if it must not be stored.
+//
+// Storing it requires all of: the operator opted in (configuration.StoreShareKeys), the upload
+// actually signalled the password was auto-generated rather than typed by the uploader
+// (params.GeneratedPassword - a manual password must never be persisted this way), a password
+// was set at all, and the server master key is actually available to encrypt it with
+// (encryption.IsDecryptionAvailable - e.g. false for NoEncryption or EndToEndEncryption
+// instances, which never hold a server-side key). Any encryption failure is treated the same as
+// "master key unavailable": the feature no-ops rather than failing the upload.
+func encryptSharePasswordIfEnabled(params models.UploadParameters) []byte {
+	if !configuration.Get().StoreShareKeys || !params.GeneratedPassword || params.Password == "" {
+		return nil
+	}
+	encrypted, err := encryption.EncryptString(params.Password)
+	if err != nil {
+		return nil
+	}
+	return encrypted
+}
+
+// GetSharePassword returns the decrypted, auto-generated share password stored for file, if
+// any. The bool return is false whenever the plaintext cannot or must not be returned - the
+// feature toggle is off, no key was ever stored for this file (e.g. it had a manual password,
+// or was uploaded before the feature was enabled), or the server master key is unavailable -
+// all collapsed into the same signal so a caller cannot distinguish "off" from "no master key"
+// from "nothing stored" (see the /api/files/{id}/sharekey endpoint, which must not become an
+// oracle for any of those).
+func GetSharePassword(file models.File) (string, bool) {
+	if !configuration.Get().StoreShareKeys || len(file.EncryptedSharePassword) == 0 {
+		return "", false
+	}
+	plaintext, err := encryption.DecryptString(file.EncryptedSharePassword)
+	if err != nil {
+		return "", false
+	}
+	return plaintext, true
 }
 
 // createNewId returns a random ID
@@ -535,6 +575,12 @@ func IsAbleHotlink(file models.File) bool {
 		return false
 	}
 	if file.PasswordHash != "" {
+		return false
+	}
+	// A hotlink is an unauthenticated direct URL to the bytes, so it is a way
+	// around the recipient list entirely. Refused for the same reason an
+	// encrypted or password-protected file is.
+	if database.IsShareRestricted(models.ShareResourceFile, file.Id) {
 		return false
 	}
 	if strings.Contains(strings.ToLower(file.ContentType), "image/svg") {

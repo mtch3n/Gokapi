@@ -200,9 +200,18 @@ func HandlerCallback(w http.ResponseWriter, r *http.Request) {
 			" email address set in your authentication user backend.", nil)
 		return
 	}
+	// The picture claim is optional and purely cosmetic: a provider that omits it, or sends
+	// something unparseable, must not affect the login at all.
+	var pictureClaim struct {
+		Picture string `json:"picture"`
+	}
+	if err := userInfo.Claims(&pictureClaim); err != nil {
+		log.Println("oauth: could not read the picture claim, continuing without a profile picture:", err)
+	}
 	info := authentication.OAuthUserInfo{
 		Subject:    userInfo.Subject,
 		Email:      userInfo.Email,
+		PictureUrl: pictureClaim.Picture,
 		ClaimsSent: userInfo,
 	}
 	err = authentication.CheckOauthUserAndRedirect(w, r, info)

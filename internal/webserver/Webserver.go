@@ -32,7 +32,9 @@ import (
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/logging/serverstats"
+	"github.com/forceu/gokapi/internal/mail"
 	"github.com/forceu/gokapi/internal/models"
+	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/storage"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/storage/filerequest"
@@ -99,56 +101,10 @@ func Start() {
 	webserverDir, _ := fs.Sub(staticFolderEmbedded, "web/static")
 	var err error
 
-	mux := http.NewServeMux()
 	loadCustomCssJsInfo(webserverDir)
 	loadExpiryImage()
 
-	mux.Handle("/", filesystemHandler(webserverDir))
-	mux.HandleFunc("/auth/token", requireLogin(handleGenerateAuthToken, false, false))
-	mux.HandleFunc("/admin", requireLogin(showAdminMenu, true, false))
-	mux.HandleFunc("/api/", processApi)
-	mux.HandleFunc("/apiKeys", requireLogin(showApiAdmin, true, false))
-	mux.HandleFunc("/changePassword", requireLogin(changePassword, true, true))
-	mux.HandleFunc("/d", showDownload)
-	mux.HandleFunc("/downloadFile", downloadFile)
-	mux.HandleFunc("/downloadPresigned", requireLogin(downloadPresigned, false, false))
-	mux.HandleFunc("/e2eSetup", requireLogin(showE2ESetup, true, false))
-	mux.HandleFunc("/error", showError)
-	mux.HandleFunc("/filerequests", requireLogin(showUploadRequest, true, false))
-	mux.HandleFunc("/forgotpw", forgotPassword)
-	mux.HandleFunc("/h/", showHotlink)
-	mux.HandleFunc("/hotlink/", showHotlink) // backward compatibility
-	mux.HandleFunc("/index", showIndex)
-	mux.HandleFunc("/login", showLogin)
-	mux.HandleFunc("/logs", requireLogin(showLogs, true, false))
-	mux.HandleFunc("/logout", doLogout)
-	mux.HandleFunc("/publicUpload", showPublicUpload)
-	mux.HandleFunc("/pubapi/config", pubApiConfig)
-	mux.HandleFunc("/pubapi/file", pubApiFileMetadata)
-	mux.HandleFunc("/pubapi/filepassword", pubApiFilePassword)
-	mux.HandleFunc("/pubapi/folder", pubApiFolder)
-	mux.HandleFunc("/pubapi/folderpassword", pubApiFolderPassword)
-	mux.HandleFunc("/pubapi/folderzip", pubApiFolderZip)
-	mux.HandleFunc("/pubapi/uploadrequest", pubApiUploadRequest)
-	mux.HandleFunc("/uploadChunk", requireLogin(uploadChunk, false, false))
-	mux.HandleFunc("/uploadStatus", requireLogin(sse.GetStatusSSE, false, false))
-	mux.HandleFunc("/users", requireLogin(showUserAdmin, true, false))
-	mux.Handle("/main.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveDownloadWasm)))
-	mux.Handle("/e2e.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveE2EWasm)))
-	mux.HandleFunc("/d/{id}/{filename}", redirectFromFilename)
-	mux.HandleFunc("/dh/{id}/{filename}", downloadFileWithNameInUrl)
-
-	addMuxForCustomContent(mux)
-
-	authConfig := configuration.Get().Authentication
-	isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
-	if authConfig.Method == models.AuthenticationOAuth2 || isHybrid {
-		oauth.Init(configuration.Get().ServerUrl, authConfig, isHybrid)
-		if oauth.IsAvailable() {
-			mux.HandleFunc("/oauth-login", oauth.HandlerLogin)
-			mux.HandleFunc("/oauth-callback", oauth.HandlerCallback)
-		}
-	}
+	mux := createMux(webserverDir, configuration.GetEnvironment().DisableBuiltinUI)
 
 	fmt.Println("Binding webserver to " + configuration.Get().Port)
 	srv = http.Server{
@@ -179,6 +135,96 @@ func Start() {
 			log.Fatal(err)
 		}
 	}
+}
+
+// createMux registers all routes. The routes are split into two groups, because the stock
+// Gokapi interface has been replaced by a standalone SPA served from a reverse proxy: with
+// disableBuiltinUI set, only the endpoints that SPA (and the API) actually call are exposed.
+// The stock pages are not merely dead weight then, they are an attack surface: /d, /h/ and
+// the other anonymous download templates hand out file bytes without going through the
+// identity-restricted share checks the SPA flow relies on, so they must be absent, not
+// just unlinked.
+func createMux(webserverDir fs.FS, disableBuiltinUI bool) *http.ServeMux {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/auth/token", requireLogin(handleGenerateAuthToken, false, false))
+	mux.HandleFunc("/api/", processApi)
+	mux.HandleFunc("/downloadFile", downloadFile)
+	mux.HandleFunc("/downloadPresigned", requireLogin(downloadPresigned, false, false))
+	// The error page stays available in both modes: the download endpoints above redirect
+	// to it for invalid or denied requests, and without it those redirects would dead-end
+	// in a 404 that looks like a broken server rather than a denied request. With the
+	// built-in UI off it renders without the stock CSS (served from "/"), which is
+	// acceptable for a page whose only job is to state that a link did not work.
+	mux.HandleFunc("/error", showError)
+	mux.HandleFunc("/login", showLogin)
+	mux.HandleFunc("/logout", doLogout)
+	mux.HandleFunc("/pubapi/config", pubApiConfig)
+	mux.HandleFunc("/pubapi/error", pubApiError)
+	mux.HandleFunc("/pubapi/file", pubApiFileMetadata)
+	mux.HandleFunc("/pubapi/filepassword", pubApiFilePassword)
+	mux.HandleFunc("/pubapi/folder", pubApiFolder)
+	mux.HandleFunc("/pubapi/folderpassword", pubApiFolderPassword)
+	mux.HandleFunc("/pubapi/folderzip", pubApiFolderZip)
+	mux.HandleFunc("/pubapi/uploadrequest", pubApiUploadRequest)
+	mux.HandleFunc("/pubapi/share/resend", pubApiShareResend)
+	mux.HandleFunc("/uploadChunk", requireLogin(uploadChunk, false, false))
+	mux.HandleFunc("/uploadStatus", requireLogin(sse.GetStatusSSE, false, false))
+	mux.Handle("/main.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveDownloadWasm)))
+	mux.Handle("/e2e.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveE2EWasm)))
+
+	if disableBuiltinUI {
+		// With the stock UI off, "/" still answers, but only as a liveness endpoint:
+		// the container HEALTHCHECK probes it, and an unregistered "/" would report a
+		// healthy server as unhealthy. It deliberately does NOT serve the stock static
+		// assets. ServeMux routes every unclaimed path to the "/" pattern, so anything
+		// other than exactly "/" must still 404 here -- otherwise the stock routes
+		// removed below (/admin, /d, /h/, ...) would start answering 200 again, which
+		// is the attack surface this mode exists to remove.
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("OK"))
+		})
+	}
+
+	if !disableBuiltinUI {
+		// "/" is the stock static asset server, and in SPA deployments the reverse
+		// proxy owns "/", so it is only registered here in built-in-UI mode.
+		mux.Handle("/", filesystemHandler(webserverDir))
+		mux.HandleFunc("/admin", requireLogin(showAdminMenu, true, false))
+		mux.HandleFunc("/apiKeys", requireLogin(showApiAdmin, true, false))
+		mux.HandleFunc("/changePassword", requireLogin(changePassword, true, true))
+		mux.HandleFunc("/d", showDownload)
+		mux.HandleFunc("/e2eSetup", requireLogin(showE2ESetup, true, false))
+		mux.HandleFunc("/filerequests", requireLogin(showUploadRequest, true, false))
+		mux.HandleFunc("/forgotpw", forgotPassword)
+		mux.HandleFunc("/h/", showHotlink)
+		mux.HandleFunc("/hotlink/", showHotlink) // backward compatibility
+		mux.HandleFunc("/index", showIndex)
+		mux.HandleFunc("/logs", requireLogin(showLogs, true, false))
+		mux.HandleFunc("/publicUpload", showPublicUpload)
+		mux.HandleFunc("/users", requireLogin(showUserAdmin, true, false))
+		mux.HandleFunc("/d/{id}/{filename}", redirectFromFilename)
+		mux.HandleFunc("/dh/{id}/{filename}", downloadFileWithNameInUrl)
+	}
+
+	addMuxForCustomContent(mux)
+
+	authConfig := configuration.Get().Authentication
+	isHybrid := authConfig.Method == models.AuthenticationInternal && authConfig.OAuthEnabledAlongsideInternal
+	if authConfig.Method == models.AuthenticationOAuth2 || isHybrid {
+		oauth.Init(configuration.Get().ServerUrl, authConfig, isHybrid)
+		if oauth.IsAvailable() {
+			mux.HandleFunc("/oauth-login", oauth.HandlerLogin)
+			mux.HandleFunc("/oauth-callback", oauth.HandlerCallback)
+		}
+	}
+	return mux
 }
 
 func filesystemHandler(webserverDir fs.FS) http.HandlerFunc {
@@ -1195,12 +1241,83 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	if savedFile.PasswordHash != "" {
+	// A file that is a member of a restricted bundle carries no grant of its own; the
+	// bundle's recipient ACL must cascade to it, or holding the member's individual file id
+	// would bypass the bundle restriction entirely. This runs regardless of whether the file
+	// itself is also independently restricted, and before anything else below, so a
+	// non-recipient never learns more than "not found".
+	if savedFile.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, savedFile.BundleId) {
+		if !mayAccessShare(w, r, models.ShareResourceBundle, savedFile.BundleId) {
+			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
+				"no valid recipient access for the file's restricted bundle"); err != nil {
+				respondAuditWriteFailed(w)
+				return
+			}
+			if isRootUrl {
+				redirectOnIncorrectId(w, r, "error")
+			} else {
+				redirectOnIncorrectId(w, r, "../../error")
+			}
+			return
+		}
+	}
+	// An identity-restricted file is refused before the passcode branch below,
+	// because a recipient list supersedes a passcode entirely. Refused as
+	// "not found" rather than "forbidden": a 403 would confirm that this ID
+	// names a real file to anyone probing IDs.
+	if database.IsShareRestricted(models.ShareResourceFile, savedFile.Id) {
+		recipientId := recipientFor(w, r, models.ShareResourceFile, savedFile.Id)
+		if recipientId == 0 {
+			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
+				"no valid recipient access for a restricted file"); err != nil {
+				respondAuditWriteFailed(w)
+				return
+			}
+			if isRootUrl {
+				redirectOnIncorrectId(w, r, "error")
+			} else {
+				redirectOnIncorrectId(w, r, "../../error")
+			}
+			return
+		}
+		// The allowance is spent per recipient, so one recipient exhausting
+		// theirs does not consume anyone else's.
+		if shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, recipientId) != nil {
+			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
+				"recipient download allowance exhausted"); err != nil {
+				respondAuditWriteFailed(w)
+				return
+			}
+			if isRootUrl {
+				redirectOnIncorrectId(w, r, "error")
+			} else {
+				redirectOnIncorrectId(w, r, "../../error")
+			}
+			return
+		}
+	} else if savedFile.PasswordHash != "" {
 		if !(isValidPwCookie(r, savedFile)) {
 			if isRootUrl {
 				redirect(w, r, "d?id="+savedFile.Id)
 			} else {
 				redirect(w, r, "../../d?id="+savedFile.Id)
+			}
+			return
+		}
+	}
+	// The bundle's own allowance is spent only once every other check has passed and the file
+	// is actually about to be served, mirroring how pubApiFolderZip meters the bundle.
+	if savedFile.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, savedFile.BundleId) {
+		if !consumeShareDownload(r, models.ShareResourceBundle, savedFile.BundleId) {
+			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
+				"bundle download allowance exhausted"); err != nil {
+				respondAuditWriteFailed(w)
+				return
+			}
+			if isRootUrl {
+				redirectOnIncorrectId(w, r, "error")
+			} else {
+				redirectOnIncorrectId(w, r, "../../error")
 			}
 			return
 		}
@@ -1254,19 +1371,40 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 		expiresAt = 0
 	}
 
-	// Build the response, hiding filename if password-protected and not authenticated
+	accessMode := shareAccessMode(file)
+	// An identity-restricted file exchanges a token in the URL for a cookie
+	// here, so a recipient arriving from the mailed link is recognised before
+	// the page has made any other request.
+	isAuthorisedRecipient := accessMode != models.AccessModeIdentity ||
+		recipientFor(w, r, models.ShareResourceFile, keyId) != 0
+	// A file that is a member of a restricted bundle carries no grant of its own; the
+	// bundle's recipient ACL must cascade here too, or holding the member's individual file id
+	// would bypass the bundle restriction and leak its metadata. This is additive to the
+	// file's own restriction check above, not a replacement for it.
+	if file.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, file.BundleId) {
+		isAuthorisedRecipient = isAuthorisedRecipient && mayAccessShare(w, r, models.ShareResourceBundle, file.BundleId)
+	}
+
+	// The filename is withheld until the caller has proved it may have the
+	// file. It is health-adjacent, so leaking it to anyone holding the ID
+	// would defeat the point of restricting the file at all.
 	name := file.Name
 	contentType := file.ContentType
-	if file.PasswordHash != "" && !isValidPwCookie(r, file) {
+	if (file.PasswordHash != "" && !isValidPwCookie(r, file)) || !isAuthorisedRecipient {
 		name = ""
 		contentType = ""
 	}
 
 	response := map[string]interface{}{
-		"id":                       keyId,
-		"name":                     name,
-		"size":                     file.Size,
+		"id":   keyId,
+		"name": name,
+		"size": file.Size,
+		// accessMode is the single value a client branches on:
+		// "public", "passcode" or "identity". requiresPassword is kept for
+		// clients written before it existed.
+		"accessMode":               accessMode,
 		"requiresPassword":         file.PasswordHash != "",
+		"isAuthorised":             isAuthorisedRecipient,
 		"expiresAt":                expiresAt,
 		"downloadsRemaining":       downloadsRemaining,
 		"isE2E":                    file.Encryption.IsEndToEndEncrypted,
@@ -1361,7 +1499,7 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := queryUrl(w, r, "key", errorHandling.TypeInvalidFileRequest)
+	apiKey := r.Header.Get("apikey")
 	if apiKey == "" {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
@@ -1381,10 +1519,37 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A receipt of what this request has already collected, so someone returning to the link
+	// can see what they sent before instead of an empty page. Names and sizes only: no file id
+	// and no download route, so this cannot be turned into a way to retrieve the contents.
+	// Everyone holding the link sees the same list - a request link is a shared address, not a
+	// per-person identity.
+	receivedFiles := make([]map[string]interface{}, 0, len(request.Files))
+	sortedFiles := make([]models.File, len(request.Files))
+	copy(sortedFiles, request.Files)
+	// Newest first, then by name, since Populate builds this from a map and has no order.
+	sort.Slice(sortedFiles, func(i, j int) bool {
+		if sortedFiles[i].UploadDate != sortedFiles[j].UploadDate {
+			return sortedFiles[i].UploadDate > sortedFiles[j].UploadDate
+		}
+		return sortedFiles[i].Name < sortedFiles[j].Name
+	})
+	for _, file := range sortedFiles {
+		receivedFiles = append(receivedFiles, map[string]interface{}{
+			"name":       file.Name,
+			"sizeBytes":  file.SizeBytes,
+			"uploadDate": file.UploadDate,
+		})
+	}
+
 	// Check if the request has reached max files
 	if !request.IsUnlimitedFiles() && request.UploadedFiles >= request.MaxFiles {
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "{\"valid\":false,\"reason\":\"full\"}")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"valid":         false,
+			"reason":        "full",
+			"receivedFiles": receivedFiles,
+		})
 		return
 	}
 
@@ -1405,6 +1570,7 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		"maxSizeMB":      request.MaxSize,
 		"chunkSize":      config.ChunkSize,
 		"expiry":         request.Expiry,
+		"receivedFiles":  receivedFiles,
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1430,9 +1596,19 @@ func pubApiFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all files and compute servable members
+	// An identity-restricted bundle is refused as "not found", the same convention
+	// serveFile uses for a restricted file: a 200 with requiresPassword/etc would
+	// still confirm the id names a real bundle to anyone probing it.
+	if !mayAccessShare(w, r, models.ShareResourceBundle, bundle.Id) {
+		respondPubApiNotFound(w, r)
+		return
+	}
+
+	// Get all files and compute servable members, then narrow to the ones the
+	// requester may individually access - a member can carry its own, separate
+	// restriction independent of the bundle's.
 	allFiles := database.GetAllMetadata()
-	memberFiles := servableBundleMembers(bundle.Id, allFiles)
+	memberFiles := accessibleBundleMembers(w, r, servableBundleMembers(bundle.Id, allFiles))
 
 	// Check if folder is password protected (ANY member has a password)
 	isProtected := false
@@ -1504,9 +1680,17 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// See the identical check in pubApiFolder: a restricted bundle is refused as
+	// "not found" for a non-authorised requester, before anything about it - even
+	// whether it is password protected - is revealed.
+	if !mayAccessShare(w, r, models.ShareResourceBundle, bundle.Id) {
+		respondPubApiNotFound(w, r)
+		return
+	}
+
 	// Get all files and find all servable members that have a password
 	allFiles := database.GetAllMetadata()
-	members := servableBundleMembers(bundle.Id, allFiles)
+	members := accessibleBundleMembers(w, r, servableBundleMembers(bundle.Id, allFiles))
 	var passwordFiles []models.File
 	for _, file := range members {
 		if file.PasswordHash != "" {
@@ -1592,6 +1776,13 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// See the identical check in pubApiFolder: a restricted bundle is refused as
+	// "not found" for a non-authorised requester, before any bytes are served.
+	if !mayAccessShare(w, r, models.ShareResourceBundle, bundle.Id) {
+		respondPubApiNotFound(w, r)
+		return
+	}
+
 	// Get all files once, do exactly one database scan
 	allFiles := database.GetAllMetadata()
 
@@ -1607,8 +1798,9 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		requestedIds = strings.Split(idsParam, ",")
 	}
 
-	// Filter files: start with servable members
-	members := servableBundleMembers(bundle.Id, allFiles)
+	// Filter files: start with servable members the requester may individually access -
+	// a member can carry its own restriction independent of the bundle's.
+	members := accessibleBundleMembers(w, r, servableBundleMembers(bundle.Id, allFiles))
 	var filesToServe []models.File
 
 	for _, file := range members {
@@ -1659,8 +1851,33 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// Serve single file raw, or multiple files as zip
 	if len(filesToServe) == 1 {
 		file := filesToServe[0]
+		// The bundle download as a whole is metered once per request, not once per member,
+		// since the restriction and the allowance are on the bundle. Checked and consumed
+		// first, before the member's own counter is touched, so an exhausted bundle
+		// allowance never burns the member's own allowance for a file that is never
+		// delivered.
+		if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
+			respondPubApiNotFound(w, r)
+			return
+		}
+		// A member that is itself identity-restricted spends its own recipient
+		// allowance, same as a direct single-file download would.
+		if !consumeShareDownload(r, models.ShareResourceFile, file.Id) {
+			respondPubApiNotFound(w, r)
+			return
+		}
 		// Serve raw file
 		serveBundleFile(w, r, file)
+		return
+	}
+
+	// The bundle download as a whole is metered once per request, not once per member, since
+	// the restriction and the allowance are on the bundle. Checked and consumed first, before
+	// any member's per-file counter or per-member recipient allowance is touched, so an
+	// exhausted bundle allowance never burns a member's counters for a zip that is never
+	// delivered.
+	if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
+		respondPubApiNotFound(w, r)
 		return
 	}
 
@@ -1686,6 +1903,12 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			database.IncreaseDownloadCount(file.Id, false)
+		}
+		// A member that is itself identity-restricted also spends its own
+		// recipient allowance; exclude it from the archive like any other
+		// exhausted member rather than failing the whole zip.
+		if !consumeShareDownload(r, models.ShareResourceFile, file.Id) {
+			continue
 		}
 		filesToServeInZip = append(filesToServeInZip, file)
 	}
@@ -1739,8 +1962,8 @@ func servableBundleMembers(bundleId string, allFiles map[string]models.File) []m
 
 // Check if folder is password protected and if a valid cookie exists
 func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle, allFiles map[string]models.File) bool {
-	// Check if any servable member has a password
-	members := servableBundleMembers(bundle.Id, allFiles)
+	// Check if any servable, individually-accessible member has a password
+	members := accessibleBundleMembers(w, r, servableBundleMembers(bundle.Id, allFiles))
 	isProtected := false
 	for _, file := range members {
 		if file.PasswordHash != "" {
@@ -1789,6 +2012,70 @@ func writeFolderPwCookie(w http.ResponseWriter, bundle models.FileBundle) {
 	})
 }
 
+// Handling of /pubapi/error
+// Public, unauthenticated endpoint that resolves the "e" token on an /error URL
+// into JSON, so a standalone SPA can render the failure in its own design.
+//
+// The copy lives here rather than in the client because the stock /error
+// template already owns it, and two copies of an error taxonomy drift: a new
+// generic type added to errorHandling would silently render as a blank card in
+// the SPA. The client decides only how it looks, never what it says.
+//
+// This matters most with the built-in UI disabled. /error still resolves (the
+// download endpoints redirect to it), but without the stock CSS, and in an SPA
+// deployment the reverse proxy answers /error with the app shell instead. A
+// failed OAuth login would otherwise land on a route the SPA does not know and
+// be swallowed by its catch-all redirect, turning a stated reason into a
+// silent bounce back to the file list.
+func pubApiError(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	// Error tokens are single-use in practice and expire after five minutes, so
+	// a cached response would outlive the thing it describes.
+	w.Header().Set("Cache-Control", "no-store")
+
+	displayed := errorHandling.Get(r)
+
+	title := displayed.Title
+	message := displayed.Message
+	// Offering "log in as a different user" only makes sense when the failure
+	// was an identity decision. On a dead download link it would invite a
+	// login that cannot change the outcome.
+	canRetryLogin := false
+
+	if displayed.IsGeneric {
+		switch displayed.ErrorId {
+		case errorHandling.TypeFileNotFound:
+			title = "File not found"
+			message = "The link may have expired or the file has been downloaded too many times."
+		case errorHandling.TypeInvalidFileRequest:
+			title = "Unable to upload files"
+			message = "The upload request has expired, its file limit has been reached, or the URL is not valid."
+		case errorHandling.TypeE2ECipher:
+			title = "Missing or invalid decryption key"
+			message = "This file is encrypted, but no key was provided or the key is invalid. Ask the sender for the complete link, including the part after the # symbol."
+		case errorHandling.TypeOAuthNotAuthorised:
+			title = "Unauthorised user"
+			message = "Sign-in with the identity provider succeeded, but this account is not permitted to use this server."
+			canRetryLogin = true
+		}
+	} else if displayed.ErrorId == errorHandling.TypeOAuthNonGeneric {
+		if title == "" {
+			title = "Sign-in failed"
+		}
+		canRetryLogin = true
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"title":   title,
+		"message": message,
+		// The provider's own wording, kept separate so the client can present
+		// it as quoted machine output rather than as this server's prose.
+		"providerMessage": displayed.OAuthProviderMessage,
+		"canRetryLogin":   canRetryLogin,
+	})
+}
+
 // Handling of /pubapi/config
 // Public, unauthenticated endpoint that returns non-sensitive configuration values as JSON.
 // Used by standalone client SPAs to determine server behavior and capabilities.
@@ -1814,7 +2101,10 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 	// Determine if hotlinks are enabled globally
 	// Hotlinks are disabled if: DisableHotlinks flag is set (env-level gate)
 	// File-level gates (RequiresClientDecryption, password, content type) are checked per-file by storage.IsAbleHotlink
-	hotlinksEnabled := !env.DisableHotlinks
+	// DisableBuiltinUI also disables them, since /h/ is the only door hotlinks are served
+	// through and it is not registered then; advertising the feature would let clients
+	// create hotlinks whose URLs can never resolve
+	hotlinksEnabled := !env.DisableHotlinks && !env.DisableBuiltinUI
 
 	response := map[string]interface{}{
 		"publicName": config.PublicName,
@@ -1828,6 +2118,12 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 			"fileRequests":  true,
 			"e2eEncryption": config.Encryption.Level == encryption.EndToEndEncryption,
 			"hotlinks":      hotlinksEnabled,
+			// Sharing to a list of email addresses depends on being able to
+			// mail each recipient their access link. With no mail connector
+			// configured there is no way to deliver one, so the option is
+			// reported as unavailable and the interface hides it, rather than
+			// letting an uploader create a share nobody can ever reach.
+			"emailRecipients": mail.IsEnabled(),
 		},
 		"limits": map[string]interface{}{
 			"maxFileSizeMB":      config.MaxFileSizeMB,
@@ -1971,4 +2267,100 @@ type publicUploadView struct {
 	PrivacyNotice  string
 	CustomContent  customStatic
 	FileRequest    *models.FileRequest
+}
+
+// Handling of /pubapi/share/resend
+// Public, unauthenticated endpoint that mails a recipient a fresh access link
+// for one resource, for when the first one was lost.
+//
+// Every outcome that is not a successful send returns the SAME response. An
+// unknown address, an address with no grant on this resource, a blocked
+// recipient and an unrestricted resource must be indistinguishable, or this
+// endpoint becomes a way to ask "was this person sent this file", which is
+// exactly the fact the feature exists to protect.
+func pubApiShareResend(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, `{"error":"method not allowed"}`)
+		return
+	}
+
+	var request struct {
+		ResourceType int    `json:"resourceType"`
+		ResourceId   string `json:"resourceId"`
+		Email        string `json:"email"`
+	}
+	const maxBodySize = 8 * 1024
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&request); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid request"}`)
+		return
+	}
+
+	// A uniform acknowledgement, sent whatever actually happened below.
+	respondAccepted := func() {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"result":"OK"}`)
+	}
+
+	if request.ResourceId == "" || request.Email == "" ||
+		!models.IsValidShareResourceType(request.ResourceType) {
+		respondAccepted()
+		return
+	}
+
+	resource, ok := describeShareResource(request.ResourceType, request.ResourceId)
+	if !ok {
+		respondAccepted()
+		return
+	}
+
+	err := shareaccess.ResendLink(resource, request.Email,
+		configuration.Get().ServerUrl, logging.GetIpAddress(r))
+	// The cooldown is the one refusal worth distinguishing: it is not a secret,
+	// the caller has already proved nothing either way, and without it a
+	// recipient clicking twice would be told the send succeeded while no mail
+	// arrives.
+	if errors.Is(err, shareaccess.ErrCooldown) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":"A link was sent recently. Please wait a moment before asking for another."}`)
+		return
+	}
+	respondAccepted()
+}
+
+// describeShareResource looks up a resource for the public resend path. Unlike
+// the admin equivalent it performs no ownership check, because the caller is
+// anonymous; authorisation is the grant check inside ResendLink.
+func describeShareResource(resourceType int, resourceId string) (shareaccess.Resource, bool) {
+	switch resourceType {
+	case models.ShareResourceFile:
+		file, found := database.GetMetaDataById(resourceId)
+		if !found {
+			return shareaccess.Resource{}, false
+		}
+		expiry := file.ExpireAt
+		if file.UnlimitedTime {
+			expiry = 0
+		}
+		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: file.Name, ExpiresAt: expiry}, true
+	case models.ShareResourceBundle:
+		bundle, found := database.GetFileBundle(resourceId)
+		if !found {
+			return shareaccess.Resource{}, false
+		}
+		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.Name}, true
+	case models.ShareResourceFileRequest:
+		fileRequest, found := database.GetFileRequest(resourceId)
+		if !found {
+			return shareaccess.Resource{}, false
+		}
+		return shareaccess.Resource{Type: resourceType, Id: resourceId,
+			Name: fileRequest.Name, ExpiresAt: fileRequest.Expiry}, true
+	default:
+		return shareaccess.Resource{}, false
+	}
 }

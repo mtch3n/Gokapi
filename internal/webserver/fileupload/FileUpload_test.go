@@ -311,7 +311,7 @@ func TestCreateUploadConfigEnforcesExpiry(t *testing.T) {
 	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
 
 	// The file-request path asks for an unlimited lifetime; it must not get one
-	config, err := CreateUploadConfig(0, 0, "", true, true, false, 0, "somerequest", "")
+	config, err := CreateUploadConfig(0, 0, "", true, true, false, 0, "somerequest", "", false)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.UnlimitedTime, false)
 	test.IsEqualInt(t, config.Expiry, 7)
@@ -329,20 +329,20 @@ func TestCreateUploadConfigRejectsE2EWhenNotConfigured(t *testing.T) {
 	for _, level := range []int{encryption.NoEncryption, encryption.LocalEncryptionStored,
 		encryption.LocalEncryptionInput, encryption.FullEncryptionStored, encryption.FullEncryptionInput} {
 		configuration.Get().Encryption.Level = level
-		_, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "", "")
+		_, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "", "", false)
 		test.IsNotNil(t, err)
 		test.IsEqualBool(t, errors.Is(err, ErrE2ENotConfigured), true)
 	}
 
 	configuration.Get().Encryption.Level = encryption.EndToEndEncryption
-	config, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "", "")
+	config, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "", "", false)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.IsEndToEndEncrypted, true)
 	test.IsEqualInt64(t, config.RealSize, 100)
 
 	// Unchanged behaviour: isEnd2End=false never triggers the check, regardless of level.
 	configuration.Get().Encryption.Level = encryption.NoEncryption
-	config, err = CreateUploadConfig(1, 14, "", false, false, false, 0, "", "")
+	config, err = CreateUploadConfig(1, 14, "", false, false, false, 0, "", "", false)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.IsEndToEndEncrypted, false)
 }

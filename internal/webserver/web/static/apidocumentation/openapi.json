@@ -45,6 +45,10 @@
     },
     {
       "name": "logs"
+    },
+    {
+      "name": "share",
+      "description": "Sharing resources with named external recipients"
     }
   ],
   "paths": {
@@ -503,6 +507,15 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "generatedpassword",
+            "in": "header",
+            "description": "Signals that the password header was generated client-side rather than typed by the uploader. Only meaningful together with a non-empty password header. When the server has StoreShareKeys enabled and this is true, the password is stored encrypted with the server master key so it can be retrieved later via GET /files/{id}/sharekey; a manually typed password (this header omitted or false) is never stored this way.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           },
           {
@@ -2176,6 +2189,35 @@
         }
       }
     },
+    "/user/avatar": {
+      "get": {
+        "tags": [
+          "user"
+        ],
+        "summary": "Get the calling user's cached profile picture",
+        "description": "Returns the profile picture that was cached from the OIDC provider's picture claim the last time this user signed in with OAuth, always re-encoded as a PNG. Answers 204 when the user has no cached picture, which is the normal case for an account that signs in with a password. Requires any valid API key (no specific permission required)",
+        "operationId": "getuseravatar",
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No profile picture is stored for this user"
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication"
+          }
+        }
+      }
+    },
     "/user/list": {
       "get": {
         "tags": [
@@ -2523,6 +2565,235 @@
           }
         }
       }
+    },
+    "/share/recipients": {
+      "post": {
+        "tags": [
+          "share"
+        ],
+        "summary": "Shares a resource with a list of email addresses",
+        "description": "Replaces the recipient list of a file, folder or file request. Each address is resolved to an external share recipient, created if unknown, and is emailed a personal access link. Passing an empty list clears the recipient list, returning the resource to anonymous link access. Requires API permission EDIT. To change a resource that was not uploaded by the user, the user needs the user permission EDIT. Returns 412 if no mail connector is configured, since an access link could then not be delivered and the share would be unreachable.",
+        "operationId": "setShareRecipients",
+        "security": [
+          {
+            "apikey": [
+              "EDIT"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "resourceType",
+                  "resourceId",
+                  "emails"
+                ],
+                "properties": {
+                  "resourceType": {
+                    "type": "integer",
+                    "description": "0 = file, 1 = folder, 2 = file request"
+                  },
+                  "resourceId": {
+                    "type": "string",
+                    "description": "The ID of the resource being shared"
+                  },
+                  "emails": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The addresses allowed to access the resource. An empty array clears the list"
+                  },
+                  "downloadsAllowed": {
+                    "type": "integer",
+                    "description": "Per-recipient download allowance. 0 means unlimited"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operation successful"
+          },
+          "400": {
+            "description": "Invalid parameter supplied, for example a malformed email address"
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "404": {
+            "description": "Invalid resource ID supplied"
+          },
+          "412": {
+            "description": "No mail connector is configured, so an access link cannot be delivered"
+          }
+        }
+      }
+    },
+    "/share/recipients/summary": {
+      "get": {
+        "tags": [
+          "share"
+        ],
+        "summary": "Lists who every visible resource is shared with",
+        "description": "Returns one entry per file, folder or file request the caller may list that has named recipients, each with the addresses it is shared with and how much of their individual download allowance they have used. Resources shared by link only are omitted. Requires API permission VIEW.",
+        "operationId": "summariseShareRecipients",
+        "security": [
+          {
+            "apikey": [
+              "VIEW"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful"
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          }
+        }
+      }
+    },
+    "/share/recipients/list": {
+      "get": {
+        "tags": [
+          "share"
+        ],
+        "summary": "Lists the recipients a resource is shared with",
+        "description": "Returns the email addresses a file, folder or file request is shared with, along with how much of their individual download allowance each has used. Requires API permission VIEW.",
+        "operationId": "listShareRecipients",
+        "security": [
+          {
+            "apikey": [
+              "VIEW"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "resourceId",
+            "in": "header",
+            "description": "The ID of the resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "resourceType",
+            "in": "header",
+            "description": "0 = file, 1 = folder, 2 = file request",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful"
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "404": {
+            "description": "Invalid resource ID supplied"
+          }
+        }
+      }
+    },
+    "/features": {
+      "get": {
+        "tags": [
+          "info"
+        ],
+        "summary": "Get server-wide capability flags",
+        "description": "Returns the server's currently effective, extensible feature set, e.g. whether generated share passwords are stored encrypted for later retrieval. A flag reports the effective capability, not a raw config echo - e.g. storeShareKeys is only true when both the operator opted in and the server encryption master key is actually available. Requires any valid API key (no specific permission required).",
+        "operationId": "getfeatures",
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "features": {
+                      "type": "object",
+                      "properties": {
+                        "storeShareKeys": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication"
+          }
+        }
+      }
+    },
+    "/files/{id}/sharekey": {
+      "get": {
+        "tags": [
+          "files"
+        ],
+        "summary": "Get the stored share password for a file",
+        "description": "Returns the decrypted, auto-generated share password stored for a file, if the server has StoreShareKeys enabled and one was actually stored for this file (only ever true for a password the SPA generated, never a manually typed one). Requires API permission VIEW; to view a file uploaded by another user, the caller also needs the user permission LIST. Every refusal - unknown ID, no permission, feature disabled, nothing stored, master key unavailable - answers identically with 404, so the response can never be used to probe which of those applies.",
+        "operationId": "getsharekey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID of file to be requested"
+          }
+        ],
+        "security": [
+          {
+            "apikey": [
+              "VIEW"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "404": {
+            "description": "File not found, no key stored for it, or the feature is unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2775,7 +3046,11 @@
           "outcome": {
             "type": "string",
             "description": "Result of the action (success, failure, or denied)",
-            "enum": ["success", "failure", "denied"],
+            "enum": [
+              "success",
+              "failure",
+              "denied"
+            ],
             "example": "success"
           },
           "ip": {

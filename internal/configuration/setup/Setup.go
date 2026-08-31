@@ -544,6 +544,10 @@ func parseServerSettings(result *models.Configuration, formObjects *[]jsonFormOb
 	if err != nil {
 		return err
 	}
+	result.StoreShareKeys, err = getFormValueBool(formObjects, "storesharekeys_sel")
+	if err != nil {
+		return err
+	}
 
 	result.Authentication.Method, err = getFormValueInt(formObjects, "authentication_sel")
 	if err != nil {
@@ -650,11 +654,14 @@ func parseEncryptionAndDelete(result *models.Configuration, formObjects *[]jsonF
 
 	result.Encryption = models.Encryption{}
 	if encLevel == encryption.LocalEncryptionStored || encLevel == encryption.FullEncryptionStored {
-		cipher, err := encryption.GetRandomCipher()
-		if err != nil {
-			return configuration.End2EndReconfigParameters{}, err
+		// If the master key is supplied externally, no cipher is persisted to the config file
+		if environment.New().EncryptionKeyB64 == "" {
+			cipher, err := encryption.GetRandomCipher()
+			if err != nil {
+				return configuration.End2EndReconfigParameters{}, err
+			}
+			result.Encryption.Cipher = cipher
 		}
-		result.Encryption.Cipher = cipher
 	}
 
 	masterPw, err := getFormValueString(formObjects, "enc_pw")

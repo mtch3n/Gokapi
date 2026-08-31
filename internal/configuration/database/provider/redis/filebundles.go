@@ -19,6 +19,11 @@ func dbToFileBundle(input []any) (models.FileBundle, error) {
 	if err != nil {
 		return models.FileBundle{}, err
 	}
+	// See the identical normalisation in metadata.go's dbToMetadata: redigo scans an absent
+	// hash field to an empty, non-nil []byte rather than nil.
+	if len(result.EncryptedSharePassword) == 0 {
+		result.EncryptedSharePassword = nil
+	}
 	return result, nil
 }
 

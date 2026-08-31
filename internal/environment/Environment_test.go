@@ -64,6 +64,26 @@ func TestEnvLoad(t *testing.T) {
 	os.Unsetenv("GOKAPI_MAX_FILESIZE")
 }
 
+func TestEncryptionKeyB64(t *testing.T) {
+	os.Unsetenv("GOKAPI_ENCRYPTION_KEY_B64")
+	env := New()
+	test.IsEqualString(t, env.EncryptionKeyB64, "")
+	os.Setenv("GOKAPI_ENCRYPTION_KEY_B64", "dGVzdA==")
+	env = New()
+	test.IsEqualString(t, env.EncryptionKeyB64, "dGVzdA==")
+	os.Unsetenv("GOKAPI_ENCRYPTION_KEY_B64")
+}
+
+func TestDisableBuiltinUi(t *testing.T) {
+	os.Unsetenv("GOKAPI_DISABLE_BUILTIN_UI")
+	env := New()
+	test.IsEqualBool(t, env.DisableBuiltinUI, false)
+	os.Setenv("GOKAPI_DISABLE_BUILTIN_UI", "true")
+	env = New()
+	test.IsEqualBool(t, env.DisableBuiltinUI, true)
+	os.Unsetenv("GOKAPI_DISABLE_BUILTIN_UI")
+}
+
 func TestDisableHotlinks(t *testing.T) {
 	os.Unsetenv("GOKAPI_DISABLE_HOTLINKS")
 	env := New()

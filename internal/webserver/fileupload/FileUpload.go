@@ -151,7 +151,7 @@ var ErrE2ENotConfigured = errors.New("end-to-end encryption is not enabled on th
 // CreateUploadConfig populates a new models.UploadParameters struct.
 // It returns ErrE2ENotConfigured if isEnd2End is set while the server's
 // encryption level is not encryption.EndToEndEncryption.
-func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string, bundleId string) (models.UploadParameters, error) {
+func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string, bundleId string, generatedPassword bool) (models.UploadParameters, error) {
 	settings := configuration.Get()
 	if isEnd2End && settings.Encryption.Level != encryption.EndToEndEncryption {
 		return models.UploadParameters{}, ErrE2ENotConfigured
@@ -162,6 +162,7 @@ func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlim
 		Expiry:              expiryDays,
 		ExpiryTimestamp:     time.Now().Add(time.Duration(expiryDays) * time.Hour * 24).Unix(),
 		Password:            password,
+		GeneratedPassword:   generatedPassword,
 		ExternalUrl:         settings.ServerUrl,
 		MaxMemory:           settings.MaxMemory,
 		UnlimitedTime:       unlimitedTime,
@@ -177,7 +178,7 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	fileRequestId := values.Get("fileRequestId")
 	if fileRequestId != "" {
 		return CreateUploadConfig(0, 0, "",
-			true, true, false, 0, fileRequestId, "")
+			true, true, false, 0, fileRequestId, "", false)
 	}
 	allowedDownloads := values.Get("allowedDownloads")
 	expiryDays := values.Get("expiryDays")
@@ -219,7 +220,8 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 			return models.UploadParameters{}, err
 		}
 	}
-	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, validatedPassword, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "", "")
+	generatedPassword := values.Get("generatedpassword") == "true"
+	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, validatedPassword, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "", "", generatedPassword)
 }
 
 type formOrHeader interface {

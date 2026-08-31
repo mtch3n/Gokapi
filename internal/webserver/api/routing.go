@@ -47,6 +47,16 @@ var routes = []apiRoute{
 		RequestParser: nil,
 	},
 	{
+		// Server-wide capability flags (e.g. whether generated share passwords are stored, see
+		// internal/features). Authenticated like every other /api/* route (a valid session/API
+		// key is required), but deliberately not gated on any specific permission bit - this is
+		// not per-user data, so any signed-in caller may read it.
+		Url:           "/features",
+		ApiPerm:       models.ApiPermNone,
+		execution:     apiGetFeatures,
+		RequestParser: nil,
+	},
+	{
 		Url:            "/files/download/",
 		ApiPerm:        models.ApiPermDownload,
 		execution:      apiDownloadSingle,
@@ -118,6 +128,31 @@ var routes = []apiRoute{
 		RequestParser: &paramFilesModify{},
 	},
 	{
+		// Sharing a resource with named email addresses. Uses ApiPermEdit
+		// rather than a permission of its own: granting access to a resource
+		// is a change to that resource, and inventing a bit here would leave
+		// every existing key unable to do it.
+		Url:           "/share/recipients",
+		ApiPerm:       models.ApiPermEdit,
+		execution:     apiSetShareRecipients,
+		RequestParser: &paramShareRecipients{},
+	},
+	{
+		Url:           "/share/recipients/list",
+		ApiPerm:       models.ApiPermView,
+		execution:     apiListShareRecipients,
+		RequestParser: &paramShareRecipientsList{},
+	},
+	{
+		// No parameters: the caller gets the shares on every resource it may
+		// already list, which is what a file list needs to show who each row
+		// went to without a request per row.
+		Url:           "/share/recipients/summary",
+		ApiPerm:       models.ApiPermView,
+		execution:     apiShareRecipientsSummary,
+		RequestParser: nil,
+	},
+	{
 		Url:           "/files/replace",
 		ApiPerm:       models.ApiPermReplace,
 		execution:     apiReplaceFile,
@@ -128,6 +163,18 @@ var routes = []apiRoute{
 		ApiPerm:       models.ApiPermDelete,
 		execution:     apiRestoreFile,
 		RequestParser: &paramFilesRestore{},
+	},
+	{
+		// /files/{id}/sharekey - the ID sits in the middle of the URL rather than at a fixed
+		// prefix like the other /files/* wildcard routes, so ID and suffix are both parsed in
+		// paramFilesShareKey.ProcessParameter. Registered after every other /files/* route so
+		// those more specific exact/prefix matches are always tried first (see getRouting) -
+		// this one only ever catches genuine {id}/sharekey requests.
+		Url:           "/files/",
+		ApiPerm:       models.ApiPermView,
+		execution:     apiGetShareKey,
+		HasWildcard:   true,
+		RequestParser: &paramFilesShareKey{},
 	},
 	{
 		Url:           "/auth/info",
@@ -169,6 +216,12 @@ var routes = []apiRoute{
 		Url:           "/user/me",
 		ApiPerm:       models.ApiPermNone,
 		execution:     apiGetCurrentUser,
+		RequestParser: nil,
+	},
+	{
+		Url:           "/user/avatar",
+		ApiPerm:       models.ApiPermNone,
+		execution:     apiGetUserAvatar,
 		RequestParser: nil,
 	},
 	{
@@ -361,6 +414,27 @@ type paramFilesListAll struct {
 }
 
 func (p *paramFilesListAll) ProcessParameter(_ *http.Request) error {
+	return nil
+}
+
+// paramFilesShareKey carries the ID parsed out of GET /files/{id}/sharekey. No header fields,
+// so the code generator emits a ParseRequest that only calls ProcessParameter (see
+// paramFilesListSingle above).
+type paramFilesShareKey struct {
+	Id string
+}
+
+func (p *paramFilesShareKey) ProcessParameter(r *http.Request) error {
+	url := parseRequestUrl(r)
+	trimmed := strings.TrimPrefix(url, "/files/")
+	if !strings.HasSuffix(trimmed, "/sharekey") {
+		return errors.New("invalid request")
+	}
+	id := strings.TrimSuffix(trimmed, "/sharekey")
+	if id == "" {
+		return errors.New("invalid request")
+	}
+	p.Id = id
 	return nil
 }
 
@@ -717,6 +791,50 @@ func (p *paramE2eStore) ProcessParameter(r *http.Request) error {
 	return json.Unmarshal(content, &p.EncryptedInfo)
 }
 
+// paramShareRecipients carries an email list for one resource. A JSON body
+// rather than headers, because the list is variable length and an address can
+// contain characters that do not survive a header cleanly.
+type paramShareRecipients struct {
+	ResourceType     int      `json:"resourceType"`
+	ResourceId       string   `json:"resourceId"`
+	Emails           []string `json:"emails"`
+	DownloadsAllowed int      `json:"downloadsAllowed"`
+	foundHeaders     map[string]bool
+}
+
+func (p *paramShareRecipients) ProcessParameter(r *http.Request) error {
+	// Bounded so a malformed or hostile request cannot force the server to
+	// buffer an unbounded body before it is even authorised to act.
+	const maxBodySize = 64 * 1024
+	bodyReader := http.MaxBytesReader(nil, r.Body, maxBodySize)
+	if err := json.NewDecoder(bodyReader).Decode(p); err != nil {
+		return err
+	}
+	if p.ResourceId == "" {
+		return errors.New("resourceId is required")
+	}
+	if !models.IsValidShareResourceType(p.ResourceType) {
+		return errors.New("unknown resourceType")
+	}
+	if p.DownloadsAllowed < 0 {
+		return errors.New("downloadsAllowed cannot be negative")
+	}
+	return nil
+}
+
+type paramShareRecipientsList struct {
+	ResourceType int    `header:"resourceType"`
+	ResourceId   string `header:"resourceId" required:"true"`
+	foundHeaders map[string]bool
+}
+
+func (p *paramShareRecipientsList) ProcessParameter(_ *http.Request) error {
+	if !models.IsValidShareResourceType(p.ResourceType) {
+		return errors.New("unknown resourceType")
+	}
+	return nil
+}
+
 type paramLogsDelete struct {
 	Timestamp    int64 `header:"timestamp"`
 	Request      *http.Request
@@ -775,14 +893,19 @@ func (p *paramChunkUploadRequestAdd) GetRequest() *http.Request {
 }
 
 type paramChunkComplete struct {
-	Uuid               string `header:"uuid" required:"true"`
-	FileName           string `header:"filename" required:"true" supportBase64:"true"`
-	FileSize           int64  `header:"filesize" required:"true"`
-	RealSize           int64  `header:"realsize" unpublished:"true"` // not published in API documentation
-	ContentType        string `header:"contenttype"`
-	AllowedDownloads   int    `header:"allowedDownloads"`
-	ExpiryDays         int    `header:"expiryDays"`
-	Password           string `header:"password" supportBase64:"true"`
+	Uuid             string `header:"uuid" required:"true"`
+	FileName         string `header:"filename" required:"true" supportBase64:"true"`
+	FileSize         int64  `header:"filesize" required:"true"`
+	RealSize         int64  `header:"realsize" unpublished:"true"` // not published in API documentation
+	ContentType      string `header:"contenttype"`
+	AllowedDownloads int    `header:"allowedDownloads"`
+	ExpiryDays       int    `header:"expiryDays"`
+	Password         string `header:"password" supportBase64:"true"`
+	// GeneratedPassword signals that Password was generated client-side by the SPA rather than
+	// typed by the uploader (its accessMode is "generated", not "manual"). Only meaningful
+	// together with a non-empty password; see fileupload.CreateUploadConfig and
+	// configuration.StoreShareKeys for how this gates encrypted storage of the password.
+	GeneratedPassword  bool   `header:"generatedpassword"`
 	BundleId           string `header:"bundleid"`
 	IsE2E              bool   `header:"isE2E" unpublished:"true"` // not published in API documentation
 	IsNonBlocking      bool   `header:"nonblocking"`

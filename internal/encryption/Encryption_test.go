@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/scrypt"
@@ -27,6 +29,7 @@ func TestGetRandomCipher(t *testing.T) {
 }
 
 func TestInit(t *testing.T) {
+	os.Unsetenv(envMasterKey)
 	config := models.Configuration{
 		Encryption: models.Encryption{
 			Level:  NoEncryption,
@@ -40,11 +43,67 @@ func TestInit(t *testing.T) {
 	Init(config)
 	test.IsNotNil(t, ramCipher)
 	test.IsNotNil(t, encryptedKey)
+	test.IsEqualByteSlice(t, getMasterCipher(), config.Encryption.Cipher)
 
 	config.Encryption.Level = FullEncryptionStored
 	Init(config)
 	test.IsNotNil(t, ramCipher)
 	test.IsNotNil(t, encryptedKey)
+	test.IsEqualByteSlice(t, getMasterCipher(), config.Encryption.Cipher)
+}
+
+func TestInitWithExternalKey(t *testing.T) {
+	defer os.Unsetenv(envMasterKey)
+	externalKey := []byte("abcdefghijklmnopqrstuvwxyz012345")
+	os.Setenv(envMasterKey, base64.StdEncoding.EncodeToString(externalKey))
+	config := models.Configuration{
+		Encryption: models.Encryption{
+			Level:  LocalEncryptionStored,
+			Cipher: []byte("01234567890123456789012345678901"),
+		},
+	}
+	Init(config)
+	// The external key has to be used instead of the config cipher
+	test.IsEqualByteSlice(t, getMasterCipher(), externalKey)
+
+	config.Encryption.Level = FullEncryptionStored
+	Init(config)
+	test.IsEqualByteSlice(t, getMasterCipher(), externalKey)
+}
+
+func TestGetExternalKey(t *testing.T) {
+	defer os.Unsetenv(envMasterKey)
+	os.Unsetenv(envMasterKey)
+	key, err := getExternalKey(LocalEncryptionStored)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, key == nil, true)
+
+	externalKey := []byte("abcdefghijklmnopqrstuvwxyz012345")
+	os.Setenv(envMasterKey, base64.StdEncoding.EncodeToString(externalKey))
+	key, err = getExternalKey(LocalEncryptionStored)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, key, externalKey)
+	key, err = getExternalKey(FullEncryptionStored)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, key, externalKey)
+
+	// Setting the variable at a level without a stored key has to be rejected
+	for _, level := range []int{NoEncryption, LocalEncryptionInput, FullEncryptionInput, EndToEndEncryption} {
+		_, err = getExternalKey(level)
+		test.IsNotNil(t, err)
+	}
+
+	os.Setenv(envMasterKey, "not-valid-base64!")
+	_, err = getExternalKey(LocalEncryptionStored)
+	test.IsNotNil(t, err)
+
+	os.Setenv(envMasterKey, base64.StdEncoding.EncodeToString([]byte("tooshort")))
+	_, err = getExternalKey(LocalEncryptionStored)
+	test.IsNotNil(t, err)
+
+	os.Setenv(envMasterKey, base64.StdEncoding.EncodeToString(append(externalKey, 'x')))
+	_, err = getExternalKey(FullEncryptionStored)
+	test.IsNotNil(t, err)
 }
 
 func TestPasswordChecksum(t *testing.T) {
@@ -272,4 +331,63 @@ func TestIsCorrectKey(t *testing.T) {
 	// Test if the key is correct
 	isCorrect := IsCorrectKey(*encInfo, file)
 	test.IsEqualBool(t, isCorrect, true)
+}
+
+// TestEncryptDecryptStringRoundTrip is the round-trip test for the share-password helper (see
+// storage.GetSharePassword): representative inputs - plain ASCII, unicode, a long string, and
+// the empty string - must all come back byte-for-byte identical, and two encryptions of the
+// same plaintext must not produce the same ciphertext (a fresh random nonce every call).
+func TestEncryptDecryptStringRoundTrip(t *testing.T) {
+	key, err := GetRandomCipher()
+	test.IsNil(t, err)
+	Init(models.Configuration{Encryption: models.Encryption{Level: FullEncryptionStored, Cipher: key}})
+
+	inputs := []string{
+		"simple-ascii-password",
+		"unicode: 日本語パスワード 🔒🔑 émoji café",
+		strings.Repeat("a-very-long-generated-share-password-segment-", 500),
+		"",
+	}
+	for _, plaintext := range inputs {
+		encrypted, err := EncryptString(plaintext)
+		test.IsNil(t, err)
+		decrypted, err := DecryptString(encrypted)
+		test.IsNil(t, err)
+		test.IsEqualString(t, decrypted, plaintext)
+	}
+
+	// Two encryptions of the same plaintext must differ (random nonce per call), yet both must
+	// still decrypt to the same value.
+	const samePlaintext = "same-password-twice"
+	encryptedA, err := EncryptString(samePlaintext)
+	test.IsNil(t, err)
+	encryptedB, err := EncryptString(samePlaintext)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, bytes.Equal(encryptedA, encryptedB), false)
+	decryptedA, err := DecryptString(encryptedA)
+	test.IsNil(t, err)
+	decryptedB, err := DecryptString(encryptedB)
+	test.IsNil(t, err)
+	test.IsEqualString(t, decryptedA, samePlaintext)
+	test.IsEqualString(t, decryptedB, samePlaintext)
+}
+
+// TestEncryptDecryptStringNoMasterKey covers the safe no-op path: DecryptString must fail
+// rather than panic or return garbage when handed a payload too short to contain a nonce, and
+// EncryptString/DecryptString both refuse to run once the master key has never been loaded.
+func TestEncryptDecryptStringNoMasterKey(t *testing.T) {
+	_, err := DecryptString([]byte("short"))
+	test.IsNotNil(t, err)
+
+	previousRamCipher, previousEncryptedKey := ramCipher, encryptedKey
+	defer func() { ramCipher, encryptedKey = previousRamCipher, previousEncryptedKey }()
+	ramCipher, encryptedKey = nil, nil
+
+	_, err = EncryptString("some-password")
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, err == ErrMasterKeyUnavailable, true)
+
+	_, err = DecryptString([]byte("0123456789012345678901234567890123456789"))
+	test.IsNotNil(t, err)
+	test.IsEqualBool(t, err == ErrMasterKeyUnavailable, true)
 }

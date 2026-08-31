@@ -106,6 +106,64 @@ type Database interface {
 	// DeleteUser deletes a user with the given ID
 	DeleteUser(id int)
 
+	// GetShareRecipientByEmail returns the recipient with this email, or false
+	// if no such recipient exists. The email must already be normalised.
+	GetShareRecipientByEmail(email string) (models.ShareRecipient, bool)
+	// GetShareRecipient returns the recipient with this ID, or false.
+	GetShareRecipient(id int) (models.ShareRecipient, bool)
+	// SaveShareRecipient stores a recipient. An Id of 0 creates a new row and
+	// returns the assigned ID; a non-zero Id updates in place.
+	SaveShareRecipient(recipient models.ShareRecipient) int
+	// GetAllShareRecipients returns every recipient, ordered by email.
+	GetAllShareRecipients() []models.ShareRecipient
+	// DeleteShareRecipient removes a recipient along with every grant, login
+	// token and session they hold.
+	DeleteShareRecipient(id int)
+
+	// SetShareGrants replaces the recipient list for one resource. An empty
+	// list clears it, returning the resource to an anonymous access mode.
+	// Replacing rather than appending is what makes removing an address
+	// actually revoke it instead of leaving a stale grant behind.
+	// downloadsAllowed is the per-recipient budget; 0 means unlimited.
+	SetShareGrants(resourceType int, resourceId string, recipientIds []int, grantedBy int, downloadsAllowed int)
+	// GetShareGrants returns every grant on a resource.
+	GetShareGrants(resourceType int, resourceId string) []models.ShareGrant
+	// HasShareGrant reports whether this recipient may reach this resource.
+	HasShareGrant(resourceType int, resourceId string, recipientId int) bool
+	// GetShareGrantsForRecipient returns every grant the recipient holds.
+	GetShareGrantsForRecipient(recipientId int) []models.ShareGrant
+	// DeleteShareGrants removes every grant on a resource. Called whenever the
+	// resource is removed, so a grant cannot outlive what it refers to.
+	DeleteShareGrants(resourceType int, resourceId string)
+
+	// IncreaseShareGrantDownloadCount atomically records one download by this
+	// recipient. It returns false when the recipient's allowance is already
+	// exhausted, in which case the caller must not serve the resource. The
+	// test and the increment happen in one statement, so two concurrent
+	// downloads cannot both pass a check that only one of them should.
+	IncreaseShareGrantDownloadCount(resourceType int, resourceId string, recipientId int) bool
+
+	// SaveShareLoginToken stores a magic link.
+	SaveShareLoginToken(token models.ShareLoginToken)
+	// GetShareLoginToken returns the token with this hash, or false.
+	GetShareLoginToken(tokenHash string) (models.ShareLoginToken, bool)
+	// MarkShareLoginTokenUsed records the first redemption, for audit. The
+	// link stays valid afterwards: it is reusable by design.
+	MarkShareLoginTokenUsed(tokenHash string, usedAt int64)
+	// GetLastShareLoginTokenTime returns the CreatedAt of the most recent link
+	// issued for this recipient and resource, or 0 if there is none. Drives
+	// the resend cooldown.
+	GetLastShareLoginTokenTime(recipientId int, resourceType int, resourceId string) int64
+	// RevokeShareLoginTokens retires every live link for this recipient and
+	// resource. Called when a replacement is issued, so an old mail stops
+	// working, and when access is withdrawn.
+	RevokeShareLoginTokens(recipientId int, resourceType int, resourceId string)
+	// GetAllShareLoginTokens returns every stored link. Used by Migrate, so a
+	// database move carries the recipients' live links with it.
+	GetAllShareLoginTokens() []models.ShareLoginToken
+	// CleanUpExpiredShareLoginTokens removes links that have expired.
+	CleanUpExpiredShareLoginTokens(now int64)
+
 	// GetFileRequest returns the FileRequest or false if not found
 	GetFileRequest(id string) (models.FileRequest, bool)
 	// GetAllFileRequests returns an array with all file requests, ordered by creation date

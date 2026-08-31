@@ -16,6 +16,7 @@ import (
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
+	"github.com/forceu/gokapi/internal/webserver/authentication/avatar"
 	"github.com/forceu/gokapi/internal/webserver/authentication/csrftoken"
 	"github.com/forceu/gokapi/internal/webserver/authentication/sessionmanager"
 	"github.com/forceu/gokapi/internal/webserver/authentication/users"
@@ -225,8 +226,12 @@ func extractOauthGroups(userInfo OAuthUserClaims, groupScope string) ([]string, 
 
 // OAuthUserInfo is used to make testing easier. This results in an additional parameter for the subject unfortunately
 type OAuthUserInfo struct {
-	Subject    string
-	Email      string
+	Subject string
+	Email   string
+	// PictureUrl is the provider's "picture" claim, empty when the provider sends none. It is
+	// never handed to the browser: the image is fetched and cached server-side, see the avatar
+	// package.
+	PictureUrl string
 	ClaimsSent OAuthUserClaims
 }
 
@@ -258,6 +263,7 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 		}
 		if ok {
 			sessionmanager.CreateSession(w, true, authSettings.OAuthRecheckInterval, user.Id)
+			avatar.StoreAsync(user.Id, userInfo.PictureUrl)
 			logging.LogValidLogin(userInfo.Email, userInfo.Subject, logging.GetIpAddress(r))
 			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 			return nil
@@ -277,34 +283,38 @@ func CheckOauthUserAndRedirect(w http.ResponseWriter, r *http.Request, userInfo 
 }
 
 // getOrCreateUser handles provider-aware user binding.
-// For OAuth/OIDC (provider == models.AuthProviderGoogle): this is an ALLOW-LIST. A row is only
-// ever authenticated through this path if it was deliberately provisioned for OIDC, i.e. its
-// stored AuthProvider is already models.AuthProviderGoogle. An empty, "internal", or any other
-// AuthProvider is rejected outright - this is what stops a Google login for the super admin's
-// (or any internal user's) email address from silently taking over that account. Within a row
-// that is allowed, the OidcSubject is either bound on first use (a row that was provisioned for
-// OIDC but never logged in yet) or must match exactly on every later login; a mismatch (e.g. a
-// corporate email address reassigned to a different person in Google) is rejected too.
-// For internal/header auth: matches by username only, unchanged.
+//
+// For OAuth/OIDC (provider == models.AuthProviderGoogle): any account an admin has added may
+// sign in through SSO. There is no per-account opt-in, because an account is added by an admin
+// in the first place - being in the user list IS the allow-list, and OnlyRegisteredUsers keeps
+// an unknown email address from creating one. What is still enforced is identity continuity:
+// the OIDC subject is bound to the row on the first SSO login and must match exactly on every
+// later one, so a corporate mailbox reassigned to a different person in the provider cannot
+// inherit the previous owner's account.
+//
+// Note that this means a verified email address at the provider is trusted to identify the
+// account of the same name. That is sound when the provider is a directory the operator
+// controls (a Google Workspace domain only ever issues its own identities, and
+// checkEmailVerified rejects an unverified address), and it is why OAuthGroups exists for
+// narrowing further.
+//
+// For internal/header auth: matches by username only. A row deliberately provisioned for Google
+// through the authprovider header on user/create is still refused here, since the header door is
+// not an OIDC subject check and nothing else would catch it.
 //
 // errTakeoverRejected is returned (never as a hard failure the caller propagates as an HTTP
 // error - CheckOauthUserAndRedirect treats it the same as any other "not authorized" outcome)
 // specifically so the caller can log the rejection distinctly from an ordinary failed login, see
 // logging.LogOauthTakeoverRejected.
-var errTakeoverRejected = errors.New("oauth login rejected: account was not provisioned for this authentication provider")
+var errTakeoverRejected = errors.New("oauth login rejected: the presented identity does not match the account")
 
 func getOrCreateUser(username, provider, oidcSubject string) (models.User, bool, error) {
 	user, ok := database.GetUserByName(username)
 	if ok {
 		if provider == models.AuthProviderGoogle {
-			if user.AuthProvider != models.AuthProviderGoogle {
-				// Not a row deliberately provisioned for OIDC: reject regardless of whether
-				// AuthProvider is empty, "internal", or anything else. This is the account
-				// takeover guard.
-				return models.User{}, false, errTakeoverRejected
-			}
 			if user.OidcSubject == "" {
-				// First-time binding on a row that was deliberately provisioned for OIDC.
+				// First SSO login for this account: bind the subject that will identify it
+				// from now on.
 				user.OidcSubject = oidcSubject
 				database.SaveUser(user, false)
 			} else if user.OidcSubject != oidcSubject {

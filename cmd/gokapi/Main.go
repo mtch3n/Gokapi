@@ -25,6 +25,7 @@ import (
 	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/environment/flagparser"
 	"github.com/forceu/gokapi/internal/logging"
+	"github.com/forceu/gokapi/internal/mail"
 	"github.com/forceu/gokapi/internal/storage"
 	"github.com/forceu/gokapi/internal/storage/filesystem"
 	"github.com/forceu/gokapi/internal/storage/filesystem/s3filesystem/aws"
@@ -64,6 +65,7 @@ func main() {
 	checkIfUserExists()
 	encryption.Init(*configuration.Get())
 	authentication.Init(configuration.Get().Authentication)
+	initMail()
 	createSsl(passedFlags)
 	initCloudConfig(passedFlags)
 	storage.CleanUp(true)
@@ -72,7 +74,7 @@ func main() {
 	serverstats.Init()
 	go webserver.Start()
 
-	c := make(chan os.Signal)
+	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
 	shutdown()
@@ -239,3 +241,19 @@ const logo = `
 ██    ██ ██    ██ ██  ██  ██   ██ ██      ██ 
  ██████   ██████  ██   ██ ██   ██ ██      ██ 
                                              `
+
+// initMail builds the outbound mail connector from the GOKAPI_MAIL_*
+// environment. A misconfiguration is reported and then tolerated rather than
+// being fatal: a file exchange that cannot send a notification is degraded,
+// not broken, and a typo in a mail variable must not turn into an outage. Any
+// caller that depends on delivery receives mail.ErrNotConfigured instead.
+func initMail() {
+	err := mail.Init()
+	if err != nil {
+		fmt.Println("Warning: outbound mail is disabled, " + err.Error())
+		return
+	}
+	if mail.IsEnabled() {
+		fmt.Println("Outbound " + mail.Describe(mail.Get(), mail.GetConfig()))
+	}
+}

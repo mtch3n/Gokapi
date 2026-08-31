@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
+	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/test"
@@ -1192,7 +1195,13 @@ func TestPublicApiUploadRequestValid(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreq123456&key=testkey123")
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreq123456", nil)
+	if err != nil {
+		t.Errorf("Failed to build request: %v", err)
+		return
+	}
+	req.Header.Set("apikey", "testkey123")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -1222,6 +1231,46 @@ func TestPublicApiUploadRequestValid(t *testing.T) {
 	}
 }
 
+// TestPublicApiUploadRequestKeyInQueryStringRejected tests that GET /pubapi/uploadrequest
+// no longer accepts the API key via the `key` query parameter (it must be sent as the
+// `apikey` request header instead, so it never lands in access logs).
+func TestPublicApiUploadRequestKeyInQueryStringRejected(t *testing.T) {
+	t.Parallel()
+
+	testRequest := models.FileRequest{
+		Id:       "testuploadreqquery12",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Test Upload Request",
+		ApiKey:   "testkey123",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqquery12&key=testkey123")
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404 when key is only in query string, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if error, ok := response["error"]; !ok || error != "not found" {
+		t.Errorf("Expected error 'not found', got %v", error)
+	}
+}
+
 // TestPublicApiUploadRequestExpired tests GET /pubapi/uploadrequest for an expired request
 func TestPublicApiUploadRequestExpired(t *testing.T) {
 	t.Parallel()
@@ -1240,7 +1289,13 @@ func TestPublicApiUploadRequestExpired(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=expireduploadreq1234&key=expiredkey123")
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=expireduploadreq1234", nil)
+	if err != nil {
+		t.Errorf("Failed to build request: %v", err)
+		return
+	}
+	req.Header.Set("apikey", "expiredkey123")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -1282,7 +1337,13 @@ func TestPublicApiUploadRequestWrongKey(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqkey1234&key=wrongkey")
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqkey1234", nil)
+	if err != nil {
+		t.Errorf("Failed to build request: %v", err)
+		return
+	}
+	req.Header.Set("apikey", "wrongkey")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -1376,6 +1437,394 @@ func TestPublicApiFolderNotFound(t *testing.T) {
 
 	if error, ok := response["error"]; !ok || error != "not found" {
 		t.Errorf("Expected error 'not found', got %v", error)
+	}
+}
+
+// TestPublicApiFolderRestrictedDeniedToAnonymous is a regression test for a broken-access-control
+// bug: recipient/identity access control (mayAccessShare / IsShareRestricted with
+// ShareResourceBundle) was enforced on single-file downloads (serveFile, pubApiFileMetadata) but
+// never on the folder/bundle endpoints. As a result a bundle restricted to a named recipient was
+// still fully readable and downloadable by anyone holding the bundle id.
+//
+// This asserts both /pubapi/folder and /pubapi/folderzip deny an anonymous request against a
+// restricted bundle, routed to the same generic "not found" response the single-file path uses
+// (so the request never confirms the id names a real bundle), and that the restricted member's
+// filename is never leaked in the denial.
+func TestPublicApiFolderRestrictedDeniedToAnonymous(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestFolderRestricted_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	fileId := helper.GenerateRandomString(16)
+	secretFileName := "secret_restricted_file.txt"
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               secretFileName,
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "restricted-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	// Restricts the bundle to one named recipient, the same mechanism the admin
+	// "set share recipients" API (shareaccess.GrantAccess) uses under the hood.
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	client := &http.Client{}
+
+	folderResp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle.Id)
+	if err != nil {
+		t.Fatalf("Failed to request folder: %v", err)
+	}
+	defer folderResp.Body.Close()
+	folderBody, _ := io.ReadAll(folderResp.Body)
+
+	if folderResp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected /pubapi/folder for a restricted bundle to be denied as not found, got status %d, body %s", folderResp.StatusCode, folderBody)
+	}
+	if strings.Contains(string(folderBody), secretFileName) {
+		t.Errorf("Restricted bundle member name leaked to an anonymous request: %s", folderBody)
+	}
+
+	zipResp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id)
+	if err != nil {
+		t.Fatalf("Failed to request folderzip: %v", err)
+	}
+	defer zipResp.Body.Close()
+	zipBody, _ := io.ReadAll(zipResp.Body)
+
+	if zipResp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected /pubapi/folderzip for a restricted bundle to be denied as not found, got status %d", zipResp.StatusCode)
+	}
+	if zipResp.Header.Get("Content-Type") == "application/zip" || len(zipBody) > 0 && zipResp.Header.Get("Content-Disposition") != "" {
+		t.Errorf("Restricted bundle bytes were served to an anonymous request, Content-Type=%s Content-Disposition=%s",
+			zipResp.Header.Get("Content-Type"), zipResp.Header.Get("Content-Disposition"))
+	}
+}
+
+// testShareAccessCookie mints a valid access cookie for a recipient the same way
+// recipientFor does for a token exchange, so a test can act as an already-authorised
+// recipient without a mail round-trip.
+func testShareAccessCookie(resourceType int, resourceId string, recipientId int) test.Cookie {
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "http://127.0.0.1:53843/", nil)
+	shareaccess.WriteCookie(recorder, req, resourceType, resourceId, recipientId)
+	cookies := recorder.Result().Cookies()
+	return test.Cookie{Name: cookies[0].Name, Value: cookies[0].Value}
+}
+
+// TestSingleFileCascadesRestrictedBundleDeniesAnonymous is a regression test for a
+// broken-access-control bug: serveFile (/d, /dh, /downloadFile) and pubApiFileMetadata
+// (/pubapi/file) checked only a file's own restriction, never whether the file is a member
+// of a restricted bundle. A file with no grant of its own could therefore be pulled straight
+// out of a restricted bundle by anyone holding the member's individual file id, bypassing the
+// bundle's recipient ACL entirely.
+//
+// This asserts an anonymous caller is denied on both doors, routed to the same "not found"
+// convention the file-level restriction already uses, and that the member's name is never
+// leaked through the metadata endpoint.
+func TestSingleFileCascadesRestrictedBundleDeniesAnonymous(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestCascade_Denied_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	fileId := helper.GenerateRandomString(16)
+	secretFileName := "secret_cascade_member.txt"
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               secretFileName,
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "cascade-recipient-denied@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	// Restricts the bundle only - the member file itself carries no grant of its own.
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+		filebundle.Delete(bundle)
+	})
+
+	// /downloadFile must deny the same way an unknown id would.
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:         "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		RedirectUrl: "error",
+	})
+
+	// /pubapi/file must not leak the member's name or content type.
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + fileId)
+	if err != nil {
+		t.Fatalf("Failed to request file metadata: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if name, ok := response["name"]; !ok || name != "" {
+		t.Errorf("Expected withheld name, got %v", name)
+	}
+	if contentType, ok := response["contentType"]; !ok || contentType != "" {
+		t.Errorf("Expected withheld contentType, got %v", contentType)
+	}
+	if isAuthorised, ok := response["isAuthorised"]; !ok || isAuthorised != false {
+		t.Errorf("Expected isAuthorised false, got %v", isAuthorised)
+	}
+}
+
+// TestSingleFileCascadesRestrictedBundleAllowsRecipient is the positive counterpart of
+// TestSingleFileCascadesRestrictedBundleDeniesAnonymous: an authorised bundle recipient can
+// still reach a member file directly through the single-file door, and doing so spends the
+// bundle's own per-recipient allowance, mirroring how pubApiFolderZip meters the bundle.
+func TestSingleFileCascadesRestrictedBundleAllowsRecipient(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestCascade_Allowed_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "member.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "cascade-recipient-allowed@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 5)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+		filebundle.Delete(bundle)
+	})
+
+	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
+
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		RequiredContent: []string{"789"},
+		Cookies:         []test.Cookie{cookie},
+	})
+
+	grants := database.GetShareGrants(models.ShareResourceBundle, bundle.Id)
+	found := false
+	for _, grant := range grants {
+		if grant.RecipientId == recipientId {
+			found = true
+			if grant.DownloadsUsed != 1 {
+				t.Errorf("Expected bundle allowance to be spent once, DownloadsUsed=%d", grant.DownloadsUsed)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("Expected a grant for recipient %d", recipientId)
+	}
+}
+
+// TestSingleFileNoCascadeWhenBundleUnrestrictedOrAbsent is a regression test: a member of an
+// unrestricted bundle, and a file that belongs to no bundle at all, must behave exactly as
+// before the cascade fix - openly downloadable and with metadata fully visible, since
+// IsShareRestricted(ShareResourceBundle, ...) is false in both cases and the new check must
+// no-op.
+func TestSingleFileNoCascadeWhenBundleUnrestrictedOrAbsent(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestCascade_Unrestricted_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	memberFileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 memberFileId,
+		Name:               "unrestricted_member.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	noBundleFileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 noBundleFileId,
+		Name:               "no_bundle_file.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "c4f9375f9834b4e7f0a528cc65c055702bf5f24a",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+
+	t.Cleanup(func() {
+		database.DeleteMetaData(memberFileId)
+		database.DeleteMetaData(noBundleFileId)
+		filebundle.Delete(bundle)
+	})
+
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + memberFileId,
+		RequiredContent: []string{"789"},
+	})
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + noBundleFileId,
+		RequiredContent: []string{"456"},
+	})
+
+	client := &http.Client{}
+	for _, id := range []string{memberFileId} {
+		resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + id)
+		if err != nil {
+			t.Fatalf("Failed to request file metadata: %v", err)
+		}
+		var response map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		resp.Body.Close()
+		if name, ok := response["name"]; !ok || name == "" {
+			t.Errorf("Expected visible name for id %s, got %v", id, name)
+		}
+	}
+}
+
+// TestFolderZipBundleAllowanceCheckedBeforeMemberCounters is a regression test for a
+// correctness nit: pubApiFolderZip used to burn every member's per-file download count (and
+// each individually-restricted member's own recipient allowance) in the zip-building loop,
+// and only afterwards checked and consumed the bundle's own allowance. If the bundle allowance
+// turned out to be exhausted, the handler returned not-found having already spent member
+// counters for a zip that was never delivered.
+//
+// This asserts that when the bundle's allowance for the requesting recipient is already
+// exhausted, /pubapi/folderzip denies the request as not-found and leaves every member's
+// DownloadCount completely untouched.
+func TestFolderZipBundleAllowanceCheckedBeforeMemberCounters(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestZipOrdering_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	file1Id := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 file1Id,
+		Name:               "zip_member_one.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+	file2Id := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 file2Id,
+		Name:               "zip_member_two.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "c4f9375f9834b4e7f0a528cc65c055702bf5f24a",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "zip-ordering-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	// Grant exactly one bundle download, then immediately spend it, so the recipient's bundle
+	// allowance is already exhausted by the time the request under test arrives.
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 1)
+	if !database.IncreaseShareGrantDownloadCount(models.ShareResourceBundle, bundle.Id, recipientId) {
+		t.Fatalf("Failed to pre-exhaust the bundle allowance for the test fixture")
+	}
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(file1Id)
+		database.DeleteMetaData(file2Id)
+		filebundle.Delete(bundle)
+	})
+
+	countsBefore := map[string]int{}
+	for _, id := range []string{file1Id, file2Id} {
+		file, ok := database.GetMetaDataById(id)
+		if !ok {
+			t.Fatalf("Fixture file %s vanished before the request", id)
+		}
+		countsBefore[id] = file.DownloadCount
+	}
+
+	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.Header.Set("Cookie", cookie.Name+"="+cookie.Value)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to request folderzip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected /pubapi/folderzip to deny an exhausted bundle allowance as not found, got status %d", resp.StatusCode)
+	}
+
+	for _, id := range []string{file1Id, file2Id} {
+		file, ok := database.GetMetaDataById(id)
+		if !ok {
+			t.Fatalf("Fixture file %s vanished after the request", id)
+		}
+		if file.DownloadCount != countsBefore[id] {
+			t.Errorf("Expected DownloadCount for %s to stay at %d, got %d", id, countsBefore[id], file.DownloadCount)
+		}
 	}
 }
 
@@ -1941,5 +2390,94 @@ func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
 	}
 	if strings.Contains(disposition, "file_request_upload.txt") {
 		t.Errorf("File-request member must not be served, but Content-Disposition referenced it: %q", disposition)
+	}
+}
+
+// routePattern resolves the registered pattern for a request path, or "" for no match.
+// Asserting on mux.Handler rather than on live responses keeps the check about
+// registration itself: a route that is not registered cannot be reached by any method,
+// header trick or auth state, which is the guarantee GOKAPI_DISABLE_BUILTIN_UI exists for.
+// The one exception is "/", which stays registered as a liveness endpoint; paths that
+// fall through to it are asserted on their response code instead.
+func routePattern(mux *http.ServeMux, path string) string {
+	_, pattern := mux.Handler(httptest.NewRequest("GET", path, nil))
+	return pattern
+}
+
+func TestCreateMuxDisableBuiltinUi(t *testing.T) {
+	webserverDir, _ := fs.Sub(staticFolderEmbedded, "web/static")
+
+	// Endpoints the standalone SPA and API clients call, keyed by a request path that
+	// must resolve to them. These must survive disabling the built-in UI. The oauth
+	// routes are absent here only because the test configuration uses internal auth,
+	// under which they are never registered in either mode.
+	requiredRoutes := map[string]string{
+		"/api/auth/create":       "/api/",
+		"/auth/token":            "/auth/token",
+		"/login":                 "/login",
+		"/logout":                "/logout",
+		"/error":                 "/error",
+		"/downloadFile":          "/downloadFile",
+		"/downloadPresigned":     "/downloadPresigned",
+		"/uploadChunk":           "/uploadChunk",
+		"/uploadStatus":          "/uploadStatus",
+		"/main.wasm":             "/main.wasm",
+		"/e2e.wasm":              "/e2e.wasm",
+		"/pubapi/config":         "/pubapi/config",
+		"/pubapi/file":           "/pubapi/file",
+		"/pubapi/filepassword":   "/pubapi/filepassword",
+		"/pubapi/folder":         "/pubapi/folder",
+		"/pubapi/folderpassword": "/pubapi/folderpassword",
+		"/pubapi/folderzip":      "/pubapi/folderzip",
+		"/pubapi/uploadrequest":  "/pubapi/uploadrequest",
+		"/pubapi/share/resend":   "/pubapi/share/resend",
+	}
+	// The stock UI surface, including the anonymous download doors, keyed the same way
+	uiRoutes := map[string]string{
+		"/admin":              "/admin",
+		"/apiKeys":            "/apiKeys",
+		"/users":              "/users",
+		"/logs":               "/logs",
+		"/filerequests":       "/filerequests",
+		"/e2eSetup":           "/e2eSetup",
+		"/index":              "/index",
+		"/forgotpw":           "/forgotpw",
+		"/changePassword":     "/changePassword",
+		"/publicUpload":       "/publicUpload",
+		"/d":                  "/d",
+		"/h/someid":           "/h/",
+		"/hotlink/someid":     "/hotlink/",
+		"/d/someid/file.txt":  "/d/{id}/{filename}",
+		"/dh/someid/file.txt": "/dh/{id}/{filename}",
+	}
+
+	muxDefault := createMux(webserverDir, false)
+	muxNoUi := createMux(webserverDir, true)
+
+	for path, expected := range requiredRoutes {
+		test.IsEqualString(t, routePattern(muxDefault, path), expected)
+		test.IsEqualString(t, routePattern(muxNoUi, path), expected)
+	}
+	// "/" is the one stock path that stays registered with the UI off: the container
+	// HEALTHCHECK probes it, so it answers a plain-text OK. It must never serve the
+	// stock static assets.
+	test.IsEqualString(t, routePattern(muxDefault, "/"), "/")
+	test.IsEqualString(t, routePattern(muxNoUi, "/"), "/")
+	rootRec := httptest.NewRecorder()
+	muxNoUi.ServeHTTP(rootRec, httptest.NewRequest("GET", "/", nil))
+	test.IsEqualInt(t, rootRec.Code, http.StatusOK)
+	test.IsEqualString(t, strings.TrimSpace(rootRec.Body.String()), "OK")
+
+	for path, expected := range uiRoutes {
+		test.IsEqualString(t, routePattern(muxDefault, path), expected)
+		// With the UI off these paths no longer have a route of their own. Go's
+		// ServeMux funnels every unclaimed path to the "/" pattern, so registering the
+		// liveness endpoint means the assertion has to be behavioural rather than about
+		// registration: the handler refuses anything that is not exactly "/", so these
+		// must answer 404 and can never serve a stock page.
+		test.IsEqualString(t, routePattern(muxNoUi, path), "/")
+		rec := httptest.NewRecorder()
+		muxNoUi.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		test.IsEqualInt(t, rec.Code, http.StatusNotFound)
 	}
 }

@@ -795,3 +795,48 @@ func GetIpAddress(r *http.Request) string {
 
 	return ip
 }
+
+// shareResourceLabel renders a resource type for a log line.
+func shareResourceLabel(resourceType int) string {
+	switch resourceType {
+	case models.ShareResourceBundle:
+		return "folder"
+	case models.ShareResourceFileRequest:
+		return "file request"
+	default:
+		return "file"
+	}
+}
+
+// LogShareRecipientsGranted records that a resource was shared with a set of
+// named email addresses. The addresses themselves are deliberately not written
+// here: the count answers "was access granted", while who received it is
+// already recoverable from the grant rows, and the log is the more widely read
+// of the two. Non-blocking.
+func LogShareRecipientsGranted(resourceType int, resourceId string, recipientCount int, actor models.User) {
+	createLogEntry(categoryEdit, fmt.Sprintf("%s %s shared with %d recipient(s) by %s (user #%d)",
+		shareResourceLabel(resourceType), resourceId, recipientCount, actor.Name, actor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "share.recipients.granted",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
+		Detail: fmt.Sprintf("%s %s, %d recipient(s)",
+			shareResourceLabel(resourceType), resourceId, recipientCount),
+	})
+}
+
+// LogShareRecipientsCleared records that a resource's recipient list was
+// emptied, which returns it to an anonymous access mode. Worth its own event
+// because it is a widening of access, not merely an edit. Non-blocking.
+func LogShareRecipientsCleared(resourceType int, resourceId string, actor models.User) {
+	createLogEntry(categoryEdit, fmt.Sprintf("%s %s recipient list cleared by %s (user #%d)",
+		shareResourceLabel(resourceType), resourceId, actor.Name, actor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "share.recipients.cleared",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
+		Detail:   fmt.Sprintf("%s %s", shareResourceLabel(resourceType), resourceId),
+	})
+}

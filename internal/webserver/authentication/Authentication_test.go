@@ -261,28 +261,39 @@ func TestIsValidOauthUser(t *testing.T) {
 	test.IsEqualBool(t, isValidOauthUser(info, []string{"testgroup", "othergroup"}), false)
 }
 
-// TestGetOrCreateUserAllowList exercises the account-takeover guard directly. Before the fix,
-// getOrCreateUser was a DENY-LIST that only rejected AuthProvider == "internal" and silently let
-// through an empty AuthProvider (the value every pre-existing row had, since SaveUser writes an
-// explicit column list and EditSuperAdmin never set the field) and a mismatched OidcSubject on an
-// already-bound row. Each case below must be rejected except the two explicitly marked accepted.
+// TestGetOrCreateUserAllowList covers what the OIDC door does and does not accept. Being in the
+// user list is the allow-list: any account an admin added may sign in through SSO, whatever its
+// AuthProvider, including the empty value every pre-2.x row carries. What is enforced is
+// identity continuity - the OIDC subject binds on first use and must match exactly afterwards -
+// and OnlyRegisteredUsers, which keeps an unknown address from creating an account.
 func TestGetOrCreateUserAllowList(t *testing.T) {
 	Init(modelOauth)
 
+	// Accepted: a pre-existing row with no AuthProvider set at all.
 	database.SaveUser(models.User{Name: "blankprovider@test.com", UserLevel: models.UserLevelUser, AuthProvider: ""}, true)
-	_, ok, err := getOrCreateUser("blankprovider@test.com", models.AuthProviderGoogle, "sub-blank")
-	test.IsEqualBool(t, errors.Is(err, errTakeoverRejected), true)
-	test.IsEqualBool(t, ok, false)
+	blankUser, ok, err := getOrCreateUser("blankprovider@test.com", models.AuthProviderGoogle, "sub-blank")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, true)
+	boundBlank, found := database.GetUserByName("blankprovider@test.com")
+	test.IsEqualBool(t, found, true)
+	test.IsEqualString(t, boundBlank.OidcSubject, "sub-blank")
+	test.IsEqualInt(t, blankUser.Id, boundBlank.Id)
 
+	// Accepted: an ordinary password account, added by an admin, signing in with SSO for the
+	// first time. This is the common case - an account is not provisioned per door.
 	database.SaveUser(models.User{Name: "internalprovider@test.com", UserLevel: models.UserLevelSuperAdmin, AuthProvider: models.AuthProviderInternal}, true)
 	_, ok, err = getOrCreateUser("internalprovider@test.com", models.AuthProviderGoogle, "sub-internal")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, ok, true)
+
+	// Rejected: that same account, now presenting a different subject.
+	_, ok, err = getOrCreateUser("internalprovider@test.com", models.AuthProviderGoogle, "sub-internal-other")
 	test.IsEqualBool(t, errors.Is(err, errTakeoverRejected), true)
 	test.IsEqualBool(t, ok, false)
 
 	database.SaveUser(models.User{Name: "googleprovider@test.com", UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderGoogle}, true)
 
-	// Accepted: row was deliberately provisioned for Google, no subject bound yet - binds on
-	// first use.
+	// Accepted: row provisioned for Google, no subject bound yet - binds on first use.
 	user, ok, err := getOrCreateUser("googleprovider@test.com", models.AuthProviderGoogle, "sub-google")
 	test.IsNil(t, err)
 	test.IsEqualBool(t, ok, true)

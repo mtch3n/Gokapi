@@ -108,8 +108,89 @@ func Migrate(configOld, configNew models.DbConnection) {
 	for _, request := range requests {
 		dbNew.SaveFileRequest(request)
 	}
+	// File bundles were not copied before this change, so a migrated database
+	// lost every folder while keeping the member files. Copied here because
+	// bundles are also one of the resource types a share grant can point at,
+	// and a grant on a bundle that no longer exists is unreachable.
+	for _, bundle := range dbOld.GetAllFileBundles() {
+		dbNew.SaveFileBundle(bundle)
+	}
+	migrateShareAccess(dbOld, dbNew)
 	dbOld.Close()
 	dbNew.Close()
+}
+
+// migrateShareAccess copies external recipients, their grants and their live
+// links.
+//
+// Omitting the grants would be a silent fail-open, not merely lost data:
+// whether a resource is restricted is derived from having any grant at all
+// (see IsShareRestricted), so a migrated database with no grant rows reports
+// every previously identity-restricted file as unrestricted, and its share
+// link becomes anonymously downloadable.
+//
+// The recipient IDs are remapped rather than reused. The destination assigns
+// its own IDs (SERIAL in Postgres, AUTOINCREMENT in SQLite, INCR in Redis), so
+// carrying the source IDs across would attach grants to whichever unrelated
+// recipient happened to land on that number.
+func migrateShareAccess(dbOld, dbNew dbabstraction.Database) {
+	idMapping := make(map[int]int)
+	for _, recipient := range dbOld.GetAllShareRecipients() {
+		sourceId := recipient.Id
+		recipient.Id = 0
+		idMapping[sourceId] = dbNew.SaveShareRecipient(recipient)
+	}
+
+	// Grants are grouped per resource, because SetShareGrants replaces the
+	// whole list for a resource rather than appending one at a time.
+	type resourceKey struct {
+		resourceType int
+		resourceId   string
+	}
+	grouped := make(map[resourceKey][]models.ShareGrant)
+	for sourceId := range idMapping {
+		for _, grant := range dbOld.GetShareGrantsForRecipient(sourceId) {
+			key := resourceKey{grant.ResourceType, grant.ResourceId}
+			grouped[key] = append(grouped[key], grant)
+		}
+	}
+	for key, grants := range grouped {
+		recipientIds := make([]int, 0, len(grants))
+		for _, grant := range grants {
+			if newId, ok := idMapping[grant.RecipientId]; ok {
+				recipientIds = append(recipientIds, newId)
+			}
+		}
+		if len(recipientIds) == 0 {
+			continue
+		}
+		dbNew.SetShareGrants(key.resourceType, key.resourceId, recipientIds,
+			grants[0].GrantedBy, grants[0].DownloadsAllowed)
+		// SetShareGrants resets the counters, so the downloads each recipient
+		// has already taken are restored afterwards. Without this a migration
+		// would hand every recipient a fresh allowance.
+		for _, grant := range grants {
+			newId, ok := idMapping[grant.RecipientId]
+			if !ok {
+				continue
+			}
+			for i := 0; i < grant.DownloadsUsed; i++ {
+				dbNew.IncreaseShareGrantDownloadCount(key.resourceType, key.resourceId, newId)
+			}
+		}
+	}
+
+	// Links are carried over too. Dropping them would fail closed rather than
+	// open, but every recipient's mailed link would stop working at once with
+	// no bulk way to reissue them.
+	for _, token := range dbOld.GetAllShareLoginTokens() {
+		newId, ok := idMapping[token.RecipientId]
+		if !ok {
+			continue
+		}
+		token.RecipientId = newId
+		dbNew.SaveShareLoginToken(token)
+	}
 }
 
 // RunGarbageCollection runs the databases GC
@@ -315,6 +396,110 @@ func UpdateUserLastOnline(id int) {
 // DeleteUser deletes a user with the given ID
 func DeleteUser(id int) {
 	db.DeleteUser(id)
+}
+
+// GetShareRecipientByEmail returns the recipient with this email, or false.
+func GetShareRecipientByEmail(email string) (models.ShareRecipient, bool) {
+	return db.GetShareRecipientByEmail(NormaliseRecipientEmail(email))
+}
+
+// GetShareRecipient returns the recipient with this ID, or false.
+func GetShareRecipient(id int) (models.ShareRecipient, bool) {
+	return db.GetShareRecipient(id)
+}
+
+// SaveShareRecipient stores a recipient, returning the row's ID.
+func SaveShareRecipient(recipient models.ShareRecipient) int {
+	recipient.Email = NormaliseRecipientEmail(recipient.Email)
+	return db.SaveShareRecipient(recipient)
+}
+
+// GetAllShareRecipients returns every recipient, ordered by email.
+func GetAllShareRecipients() []models.ShareRecipient {
+	return db.GetAllShareRecipients()
+}
+
+// DeleteShareRecipient removes a recipient and everything that points at them.
+func DeleteShareRecipient(id int) {
+	db.DeleteShareRecipient(id)
+}
+
+// NormaliseRecipientEmail lower-cases and trims an address, so that the same
+// mailbox typed with different casing resolves to one recipient rather than
+// several. Normalisation happens here, at the single boundary into the
+// database, so no caller can bypass it.
+func NormaliseRecipientEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// SetShareGrants replaces the recipient list for one resource.
+// downloadsAllowed is the per-recipient budget; 0 means unlimited.
+func SetShareGrants(resourceType int, resourceId string, recipientIds []int, grantedBy int, downloadsAllowed int) {
+	db.SetShareGrants(resourceType, resourceId, recipientIds, grantedBy, downloadsAllowed)
+}
+
+// IncreaseShareGrantDownloadCount atomically records one download by this
+// recipient, returning false when their allowance is exhausted.
+func IncreaseShareGrantDownloadCount(resourceType int, resourceId string, recipientId int) bool {
+	return db.IncreaseShareGrantDownloadCount(resourceType, resourceId, recipientId)
+}
+
+// GetShareGrants returns every grant on a resource.
+func GetShareGrants(resourceType int, resourceId string) []models.ShareGrant {
+	return db.GetShareGrants(resourceType, resourceId)
+}
+
+// HasShareGrant reports whether this recipient may reach this resource.
+func HasShareGrant(resourceType int, resourceId string, recipientId int) bool {
+	return db.HasShareGrant(resourceType, resourceId, recipientId)
+}
+
+// GetShareGrantsForRecipient returns every grant the recipient holds.
+func GetShareGrantsForRecipient(recipientId int) []models.ShareGrant {
+	return db.GetShareGrantsForRecipient(recipientId)
+}
+
+// DeleteShareGrants removes every grant on a resource.
+func DeleteShareGrants(resourceType int, resourceId string) {
+	db.DeleteShareGrants(resourceType, resourceId)
+}
+
+// IsShareRestricted reports whether the resource has a recipient list, and is
+// therefore reachable only by a recipient holding a grant.
+func IsShareRestricted(resourceType int, resourceId string) bool {
+	return len(db.GetShareGrants(resourceType, resourceId)) > 0
+}
+
+// SaveShareLoginToken stores a magic link.
+func SaveShareLoginToken(token models.ShareLoginToken) {
+	db.SaveShareLoginToken(token)
+}
+
+// GetShareLoginToken returns the token with this hash, or false.
+func GetShareLoginToken(tokenHash string) (models.ShareLoginToken, bool) {
+	return db.GetShareLoginToken(tokenHash)
+}
+
+// MarkShareLoginTokenUsed records the first redemption, for audit only.
+func MarkShareLoginTokenUsed(tokenHash string, usedAt int64) {
+	db.MarkShareLoginTokenUsed(tokenHash, usedAt)
+}
+
+// GetLastShareLoginTokenTime returns when the most recent link for this
+// recipient and resource was issued, or 0 if there is none.
+func GetLastShareLoginTokenTime(recipientId int, resourceType int, resourceId string) int64 {
+	return db.GetLastShareLoginTokenTime(recipientId, resourceType, resourceId)
+}
+
+// RevokeShareLoginTokens retires every live link for this recipient and
+// resource.
+func RevokeShareLoginTokens(recipientId int, resourceType int, resourceId string) {
+	db.RevokeShareLoginTokens(recipientId, resourceType, resourceId)
+}
+
+// CleanUpExpiredShareLoginTokens removes links that have expired.
+func CleanUpExpiredShareLoginTokens(now int64) {
+	db.CleanUpExpiredShareLoginTokens(now)
 }
 
 // GetSuperAdmin returns the models.User data for the super admin

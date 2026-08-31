@@ -52,6 +52,62 @@ func TestInit(t *testing.T) {
 	Connect(models.DbConnection{Type: 2})
 }
 
+// shareDatabases is the provider list used by the share-recipient tests. It is
+// separate from availableDatabases because the older cross-provider tests
+// switch on db.GetType() with a `default: t.Fatal` and so accept exactly two
+// providers; widening the shared list would break them for reasons unrelated
+// to what they test.
+//
+// Postgres joins this list when GOKAPI_TEST_POSTGRES_URL is set. Without it,
+// Postgres was the only provider never exercised by any cross-provider test,
+// which is how a Postgres schema missing three columns, plus four queries
+// using SQLite's "?" placeholders instead of "$n", reached a green test run.
+//
+// Start the database with:
+//
+//	docker run -d --name gokapi-test-pg -p 127.0.0.1:15432:5432 \
+//	  -e POSTGRES_USER=gokapi -e POSTGRES_PASSWORD=testpw \
+//	  -e POSTGRES_DB=gokapi_test postgres:17-alpine
+//	export GOKAPI_TEST_POSTGRES_URL="postgres://gokapi:testpw@127.0.0.1:15432/gokapi_test?sslmode=disable"
+func shareDatabases(t *testing.T) []dbabstraction.Database {
+	t.Helper()
+	result := append([]dbabstraction.Database{}, availableDatabases...)
+
+	url := os.Getenv("GOKAPI_TEST_POSTGRES_URL")
+	if url == "" {
+		t.Log("GOKAPI_TEST_POSTGRES_URL is not set, the Postgres provider is not covered by this run")
+		return result
+	}
+	config, err := ParseUrl(url, false)
+	if err != nil {
+		t.Fatalf("GOKAPI_TEST_POSTGRES_URL is not a valid connection string: %v", err)
+	}
+	previous := db
+	Connect(config)
+	postgresDb := db
+	db = previous
+	return append(result, postgresDb)
+}
+
+// runShareTypes runs the function against every provider that implements the
+// share tables, leaving each one clean afterwards so ordering between tests
+// cannot matter.
+func runShareTypes(t *testing.T, functionToRun func()) {
+	t.Helper()
+	previous := db
+	defer func() { db = previous }()
+	for _, database := range shareDatabases(t) {
+		db = database
+		for _, recipient := range GetAllShareRecipients() {
+			DeleteShareRecipient(recipient.Id)
+		}
+		functionToRun()
+		for _, recipient := range GetAllShareRecipients() {
+			DeleteShareRecipient(recipient.Id)
+		}
+	}
+}
+
 func TestApiKeys(t *testing.T) {
 	runAllTypesCompareOutput(t, func() any { return GetAllApiKeys() }, map[string]models.ApiKey{})
 	newApiKey := models.ApiKey{
@@ -360,6 +416,368 @@ func TestUsers(t *testing.T) {
 	user.Name = ""
 	defer test.ExpectPanic(t)
 	SaveUser(user, true)
+}
+
+// Runs against every available provider, so the SQLite tables and the Redis
+// hash-plus-reverse-index have to agree on the same observable behaviour.
+func TestShareRecipientsAndGrants(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		const bundle = models.ShareResourceBundle
+
+		// A resource with no grants is unrestricted. This is the path every
+		// share that existed before the feature takes.
+		test.IsEqualBool(t, IsShareRestricted(file, "res-none"), false)
+
+		// Email is normalised on the way in, so the same mailbox typed with
+		// different casing is one recipient, not several.
+		id := SaveShareRecipient(models.ShareRecipient{Email: "  Alice@Example.COM ", CreatedAt: 100})
+		test.IsEqualBool(t, id > 0, true)
+		alice, ok := GetShareRecipientByEmail("ALICE@example.com")
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualString(t, alice.Email, "alice@example.com")
+		test.IsEqualInt(t, alice.Id, id)
+
+		bobId := SaveShareRecipient(models.ShareRecipient{Email: "bob@example.com", CreatedAt: 100})
+		_, ok = GetShareRecipientByEmail("nobody@example.com")
+		test.IsEqualBool(t, ok, false)
+
+		SetShareGrants(file, "res-a", []int{id, bobId}, 7, 0)
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-a")), 2)
+		test.IsEqualBool(t, IsShareRestricted(file, "res-a"), true)
+		test.IsEqualBool(t, HasShareGrant(file, "res-a", id), true)
+		test.IsEqualBool(t, HasShareGrant(file, "res-a", 9999), false)
+
+		// grantedBy is recorded, since the audit question is "who gave this
+		// person access".
+		test.IsEqualInt(t, GetShareGrants(file, "res-a")[0].GrantedBy, 7)
+
+		// The resource type is part of the identity: a bundle sharing an ID
+		// with a file must not inherit its grants.
+		test.IsEqualBool(t, HasShareGrant(bundle, "res-a", id), false)
+
+		// Replacing the list revokes, rather than merely adding.
+		SetShareGrants(file, "res-a", []int{bobId}, 7, 0)
+		test.IsEqualBool(t, HasShareGrant(file, "res-a", id), false)
+		test.IsEqualBool(t, HasShareGrant(file, "res-a", bobId), true)
+
+		// Duplicates collapse.
+		SetShareGrants(file, "res-b", []int{bobId, bobId, bobId}, 7, 0)
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-b")), 1)
+		test.IsEqualInt(t, len(GetShareGrantsForRecipient(bobId)), 2)
+
+		// Blocking revokes at once without touching the grant rows, so the
+		// audit trail of what was granted survives.
+		bob, _ := GetShareRecipient(bobId)
+		bob.IsBlocked = true
+		SaveShareRecipient(bob)
+		test.IsEqualBool(t, HasShareGrant(file, "res-a", bobId), false)
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-a")), 1)
+		bob.IsBlocked = false
+		SaveShareRecipient(bob)
+		test.IsEqualBool(t, HasShareGrant(file, "res-a", bobId), true)
+
+		// Clearing returns the resource to an anonymous access mode.
+		SetShareGrants(file, "res-b", []int{}, 7, 0)
+		test.IsEqualBool(t, IsShareRestricted(file, "res-b"), false)
+
+		DeleteShareGrants(file, "res-a")
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-a")), 0)
+
+		// Deleting a recipient removes them and every grant they held.
+		SetShareGrants(file, "res-c", []int{bobId}, 7, 0)
+		DeleteShareRecipient(bobId)
+		_, ok = GetShareRecipient(bobId)
+		test.IsEqualBool(t, ok, false)
+		test.IsEqualBool(t, HasShareGrant(file, "res-c", bobId), false)
+
+		DeleteShareRecipient(id)
+		DeleteShareGrants(file, "res-c")
+	})
+}
+
+// The download allowance is per recipient, not per resource, so two recipients
+// on the same file each get their own budget rather than racing for one pool.
+func TestShareGrantDownloadCounter(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		carol := SaveShareRecipient(models.ShareRecipient{Email: "carol@example.com", CreatedAt: 1})
+		dave := SaveShareRecipient(models.ShareRecipient{Email: "dave@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "res-count", []int{carol, dave}, 1, 2)
+
+		// Each recipient spends only their own allowance.
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", carol), true)
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", carol), true)
+		// Carol is now exhausted, and the database refuses rather than going
+		// past the limit.
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", carol), false)
+		// Dave is untouched by Carol spending hers.
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", dave), true)
+
+		for _, grant := range GetShareGrants(file, "res-count") {
+			if grant.RecipientId == carol {
+				test.IsEqualInt(t, grant.DownloadsUsed, 2)
+				test.IsEqualBool(t, grant.HasDownloadsLeft(), false)
+				test.IsEqualBool(t, grant.LastDownloadAt > 0, true)
+			}
+			if grant.RecipientId == dave {
+				test.IsEqualInt(t, grant.DownloadsUsed, 1)
+				test.IsEqualBool(t, grant.HasDownloadsLeft(), true)
+			}
+		}
+
+		// An allowance of 0 means unlimited.
+		SetShareGrants(file, "res-unlimited", []int{carol}, 1, 0)
+		for i := 0; i < 5; i++ {
+			test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-unlimited", carol), true)
+		}
+
+		// A recipient with no grant is refused.
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", 4242), false)
+
+		DeleteShareRecipient(carol)
+		DeleteShareRecipient(dave)
+		DeleteShareGrants(file, "res-count")
+		DeleteShareGrants(file, "res-unlimited")
+	})
+}
+
+// The link is reusable by design: a single-use link would be burned by mail
+// scanners such as Outlook Safe Links before the recipient ever clicked it,
+// and the per-recipient download allowance already presumes repeat visits.
+func TestShareLoginTokenIsReusable(t *testing.T) {
+	runShareTypes(t, func() {
+		token := models.ShareLoginToken{
+			TokenHash:    "hash-reusable",
+			RecipientId:  55,
+			ResourceType: models.ShareResourceFile,
+			ResourceId:   "res-token",
+			CreatedAt:    1000,
+			ExpiresAt:    2000,
+		}
+		SaveShareLoginToken(token)
+
+		stored, ok := GetShareLoginToken("hash-reusable")
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt64(t, stored.FirstUsedAt, 0)
+		test.IsEqualBool(t, stored.IsRevoked, false)
+
+		// Redemption records the FIRST use and leaves the link usable.
+		MarkShareLoginTokenUsed("hash-reusable", 1500)
+		stored, _ = GetShareLoginToken("hash-reusable")
+		test.IsEqualInt64(t, stored.FirstUsedAt, 1500)
+		test.IsEqualBool(t, stored.IsRevoked, false)
+
+		// A later use does not overwrite the first, so the audit trail shows
+		// when the link was actually collected.
+		MarkShareLoginTokenUsed("hash-reusable", 1800)
+		stored, _ = GetShareLoginToken("hash-reusable")
+		test.IsEqualInt64(t, stored.FirstUsedAt, 1500)
+
+		_, ok = GetShareLoginToken("no-such-hash")
+		test.IsEqualBool(t, ok, false)
+	})
+}
+
+// A resend must retire the previous link, or every resend would leave another
+// live bearer credential sitting in an inbox.
+func TestShareLoginTokenResend(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		test.IsEqualInt64(t, GetLastShareLoginTokenTime(77, file, "res-resend"), 0)
+
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "resend-first", RecipientId: 77, ResourceType: file,
+			ResourceId: "res-resend", CreatedAt: 5000, ExpiresAt: 9000})
+		test.IsEqualInt64(t, GetLastShareLoginTokenTime(77, file, "res-resend"), 5000)
+
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "resend-second", RecipientId: 77, ResourceType: file,
+			ResourceId: "res-resend", CreatedAt: 5100, ExpiresAt: 9000})
+		test.IsEqualInt64(t, GetLastShareLoginTokenTime(77, file, "res-resend"), 5100)
+
+		RevokeShareLoginTokens(77, file, "res-resend")
+		first, _ := GetShareLoginToken("resend-first")
+		test.IsEqualBool(t, first.IsRevoked, true)
+
+		// A different resource is unaffected.
+		test.IsEqualInt64(t, GetLastShareLoginTokenTime(77, file, "other"), 0)
+
+		// Expiry sweeps the row, so the hash does not outlive the resource.
+		CleanUpExpiredShareLoginTokens(10000)
+		_, ok := GetShareLoginToken("resend-first")
+		test.IsEqualBool(t, ok, false)
+		_, ok = GetShareLoginToken("resend-second")
+		test.IsEqualBool(t, ok, false)
+	})
+}
+
+// Renaming a recipient must not leave the old address resolving to them.
+// Redis keeps a separate email index, so it is the provider that can drift;
+// the SQL providers update the column in place.
+func TestShareRecipientEmailChangeDropsOldIndex(t *testing.T) {
+	runShareTypes(t, func() {
+		id := SaveShareRecipient(models.ShareRecipient{Email: "old@example.com", CreatedAt: 1})
+		recipient, _ := GetShareRecipient(id)
+		recipient.Email = "new@example.com"
+		SaveShareRecipient(recipient)
+
+		_, foundOld := GetShareRecipientByEmail("old@example.com")
+		test.IsEqualBool(t, foundOld, false)
+
+		moved, foundNew := GetShareRecipientByEmail("new@example.com")
+		test.IsEqualBool(t, foundNew, true)
+		test.IsEqualInt(t, moved.Id, id)
+
+		DeleteShareRecipient(id)
+	})
+}
+
+// Revoking a grant must not be undone by a download arriving at the same
+// moment. This locks the Redis path in particular: an earlier read-then-
+// increment version recreated the deleted grant hash with only a counter
+// field, which then scanned as "unlimited downloads" and handed a revoked
+// recipient unrestricted access.
+func TestShareGrantDownloadCannotResurrectRevokedGrant(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		id := SaveShareRecipient(models.ShareRecipient{Email: "revoked@example.com", CreatedAt: 1})
+		SetShareGrants(file, "res-revoke", []int{id}, 1, 5)
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-revoke", id), true)
+
+		DeleteShareGrants(file, "res-revoke")
+
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-revoke", id), false)
+		test.IsEqualBool(t, HasShareGrant(file, "res-revoke", id), false)
+		test.IsEqualBool(t, IsShareRestricted(file, "res-revoke"), false)
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-revoke")), 0)
+
+		DeleteShareRecipient(id)
+	})
+}
+
+// Replacing a recipient list must never leave the resource momentarily
+// unrestricted, because an unrestricted resource reads as publicly
+// downloadable. The observable requirement is that the resource is restricted
+// before and after, and that the counters of a recipient kept across the
+// replacement are reset rather than carried over.
+func TestSetShareGrantsKeepsResourceRestricted(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		first := SaveShareRecipient(models.ShareRecipient{Email: "first@example.com", CreatedAt: 1})
+		second := SaveShareRecipient(models.ShareRecipient{Email: "second@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "res-replace", []int{first}, 1, 2)
+		test.IsEqualBool(t, IsShareRestricted(file, "res-replace"), true)
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-replace", first), true)
+
+		// Replace with an overlapping list.
+		SetShareGrants(file, "res-replace", []int{first, second}, 1, 2)
+		test.IsEqualBool(t, IsShareRestricted(file, "res-replace"), true)
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-replace")), 2)
+		for _, grant := range GetShareGrants(file, "res-replace") {
+			test.IsEqualInt(t, grant.DownloadsUsed, 0)
+			test.IsEqualInt(t, grant.DownloadsAllowed, 2)
+		}
+
+		// Replace with a disjoint list: the dropped recipient loses access,
+		// and the resource never stops being restricted.
+		SetShareGrants(file, "res-replace", []int{second}, 1, 2)
+		test.IsEqualBool(t, IsShareRestricted(file, "res-replace"), true)
+		test.IsEqualBool(t, HasShareGrant(file, "res-replace", first), false)
+		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-replace", first), false)
+		test.IsEqualInt(t, len(GetShareGrantsForRecipient(first)), 0)
+
+		DeleteShareGrants(file, "res-replace")
+		DeleteShareRecipient(first)
+		DeleteShareRecipient(second)
+	})
+}
+
+// The first redemption is the one recorded, not the most recent, or the audit
+// trail would say when the link was last touched rather than collected.
+func TestMarkShareLoginTokenUsedRecordsFirstUseOnly(t *testing.T) {
+	runShareTypes(t, func() {
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "first-use-hash", RecipientId: 3, ResourceType: models.ShareResourceFile,
+			ResourceId: "res-first", CreatedAt: 100, ExpiresAt: 999999999999})
+
+		MarkShareLoginTokenUsed("first-use-hash", 200)
+		MarkShareLoginTokenUsed("first-use-hash", 300)
+
+		stored, ok := GetShareLoginToken("first-use-hash")
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt64(t, stored.FirstUsedAt, 200)
+
+		// An unknown hash must be a no-op rather than creating a phantom row.
+		MarkShareLoginTokenUsed("no-such-hash-at-all", 400)
+		_, ok = GetShareLoginToken("no-such-hash-at-all")
+		test.IsEqualBool(t, ok, false)
+	})
+}
+
+// A provider migration must carry the recipient ACLs. Omitting them is a
+// silent fail-open, not merely lost data: whether a resource is restricted is
+// derived from having any grant at all, so a migrated database with no grants
+// reports every previously identity-restricted file as anonymously
+// downloadable.
+func TestMigrateCarriesShareAccess(t *testing.T) {
+	source, err := dbabstraction.GetNew(configSqlite)
+	test.IsNil(t, err)
+	const file = models.ShareResourceFile
+
+	aliceId := source.SaveShareRecipient(models.ShareRecipient{Email: "m-alice@example.com", CreatedAt: 10})
+	bobId := source.SaveShareRecipient(models.ShareRecipient{Email: "m-bob@example.com", CreatedAt: 11})
+	source.SetShareGrants(file, "res-migrate", []int{aliceId, bobId}, 5, 4)
+	test.IsEqualBool(t, source.IncreaseShareGrantDownloadCount(file, "res-migrate", aliceId), true)
+	source.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash: "migrate-token", RecipientId: aliceId, ResourceType: file,
+		ResourceId: "res-migrate", CreatedAt: 12, ExpiresAt: 999999999999})
+	source.Close()
+
+	target := models.DbConnection{HostUrl: "./test/migrated.sqlite", Type: 0}
+	Migrate(configSqlite, target)
+
+	Connect(target)
+	defer Connect(configSqlite)
+
+	// The resource is still restricted, which is the property that matters.
+	test.IsEqualBool(t, IsShareRestricted(file, "res-migrate"), true)
+	test.IsEqualInt(t, len(GetShareGrants(file, "res-migrate")), 2)
+
+	// Recipients are matched by email, because the destination assigns its own
+	// IDs and reusing the source IDs would attach grants to whoever happened to
+	// land on that number.
+	alice, ok := GetShareRecipientByEmail("m-alice@example.com")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, HasShareGrant(file, "res-migrate", alice.Id), true)
+
+	// The allowance already spent is carried across, so a migration does not
+	// hand everyone a fresh budget.
+	for _, grant := range GetShareGrants(file, "res-migrate") {
+		test.IsEqualInt(t, grant.DownloadsAllowed, 4)
+		if grant.RecipientId == alice.Id {
+			test.IsEqualInt(t, grant.DownloadsUsed, 1)
+		}
+	}
+
+	// Live links come across too, remapped to the new recipient ID.
+	token, ok := GetShareLoginToken("migrate-token")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, token.RecipientId, alice.Id)
+}
+
+// Creating the same address twice must yield one recipient, not two. The SQL
+// providers get this from UNIQUE(email); Redis has to claim the index key
+// atomically or it produces an orphan whose grants nothing can reach.
+func TestShareRecipientEmailIsUnique(t *testing.T) {
+	runShareTypes(t, func() {
+		first := SaveShareRecipient(models.ShareRecipient{Email: "dup@example.com", CreatedAt: 1})
+		second := SaveShareRecipient(models.ShareRecipient{Email: "dup@example.com", CreatedAt: 2})
+		test.IsEqualInt(t, second, first)
+		test.IsEqualInt(t, len(GetAllShareRecipients()), 1)
+	})
 }
 
 func TestUpgrade(t *testing.T) {
