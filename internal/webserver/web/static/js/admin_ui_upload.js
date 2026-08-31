@@ -164,6 +164,33 @@ function setUploadDefaults() {
         document.getElementById("expiryDays").disabled = true;
     }
 
+    enforceServerLimits();
+}
+
+// enforceServerLimits applies GOKAPI_MAX_DOWNLOADS and GOKAPI_MAX_EXPIRY_DAYS to the
+// upload form, so that a stored default cannot exceed what the server accepts.
+// A value of 0 disables the respective limit.
+function enforceServerLimits() {
+    if (maxDownloads !== 0) {
+        let allowedDownloads = parseInt(document.getElementById("allowedDownloads").value, 10);
+        if (isNaN(allowedDownloads) || allowedDownloads < 1 || allowedDownloads > maxDownloads) {
+            document.getElementById("allowedDownloads").value = maxDownloads;
+        }
+        document.getElementById("allowedDownloads").max = maxDownloads;
+        document.getElementById("allowedDownloads").disabled = false;
+        document.getElementById("enableDownloadLimit").checked = true;
+        document.getElementById("enableDownloadLimit").disabled = true;
+    }
+    if (maxExpiryDays !== 0) {
+        let expiryDays = parseInt(document.getElementById("expiryDays").value, 10);
+        if (isNaN(expiryDays) || expiryDays < 1 || expiryDays > maxExpiryDays) {
+            document.getElementById("expiryDays").value = maxExpiryDays;
+        }
+        document.getElementById("expiryDays").max = maxExpiryDays;
+        document.getElementById("expiryDays").disabled = false;
+        document.getElementById("enableTimeLimit").checked = true;
+        document.getElementById("enableTimeLimit").disabled = true;
+    }
 }
 
 function saveUploadDefaults() {

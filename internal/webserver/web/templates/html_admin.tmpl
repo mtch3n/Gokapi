@@ -173,6 +173,8 @@
 	initDropzone();
 
 	Dropzone.options.uploaddropzone["maxFilesize"] = {{ .MaxFileSize }};
+	var maxDownloads = {{ .MaxDownloads }};
+	var maxExpiryDays = {{ .MaxExpiryDays }};
 	Dropzone.options.uploaddropzone["timeout"] = 1200000;
 	Dropzone.options.uploaddropzone["chunking"] = true;
 	Dropzone.options.uploaddropzone["chunkSize"] = {{ .ChunkSize }} * 1024 * 1024;

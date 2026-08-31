@@ -128,8 +128,22 @@ func CompleteChunk(chunkId string, header chunking.FileHeader, userId int, confi
 	return storage.NewFileFromChunk(chunkId, header, userId, config)
 }
 
-// CreateUploadConfig populates a new models.UploadParameters struct
-func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string) models.UploadParameters {
+// CreateUploadConfig populates a new models.UploadParameters struct.
+//
+// GOKAPI_MAX_EXPIRY_DAYS and GOKAPI_MAX_DOWNLOADS are enforced here, because every
+// upload path builds its parameters through this function. An upload belonging to a
+// file request is clamped to the limits, as the person uploading to a file request
+// does not choose these values. Any other upload is rejected.
+func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string) (models.UploadParameters, error) {
+	if fileRequestId != "" {
+		expiryDays, allowedDownloads, unlimitedTime, unlimitedDownload =
+			clampToServerLimits(expiryDays, allowedDownloads, unlimitedTime, unlimitedDownload)
+	} else {
+		err := checkServerLimits(expiryDays, allowedDownloads, unlimitedTime, unlimitedDownload)
+		if err != nil {
+			return models.UploadParameters{}, err
+		}
+	}
 	settings := configuration.Get()
 	return models.UploadParameters{
 		AllowedDownloads:    allowedDownloads,
@@ -143,14 +157,14 @@ func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlim
 		IsEndToEndEncrypted: isEnd2End,
 		RealSize:            realSize,
 		FileRequestId:       fileRequestId,
-	}
+	}, nil
 }
 
 func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	fileRequestId := values.Get("fileRequestId")
 	if fileRequestId != "" {
 		return CreateUploadConfig(0, 0, "",
-			true, true, false, 0, fileRequestId), nil
+			true, true, false, 0, fileRequestId)
 	}
 	allowedDownloads := values.Get("allowedDownloads")
 	expiryDays := values.Get("expiryDays")
@@ -184,9 +198,44 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 			return models.UploadParameters{}, err
 		}
 	}
-	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, password, unlimitedTime, unlimitedDownload, isEnd2End, realSize, ""), nil
+	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, password, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "")
 }
 
 type formOrHeader interface {
 	Get(key string) string
+}
+
+// ErrExpiryTooLong is returned if an upload requests a longer expiry than GOKAPI_MAX_EXPIRY_DAYS permits
+var ErrExpiryTooLong = errors.New("the requested expiry exceeds the maximum allowed by the server")
+
+// ErrTooManyDownloads is returned if an upload requests more downloads than GOKAPI_MAX_DOWNLOADS permits
+var ErrTooManyDownloads = errors.New("the requested download limit exceeds the maximum allowed by the server")
+
+// checkServerLimits rejects an upload that exceeds GOKAPI_MAX_EXPIRY_DAYS or GOKAPI_MAX_DOWNLOADS.
+// A value of 0 disables the respective check.
+func checkServerLimits(expiryDays, allowedDownloads int, unlimitedTime, unlimitedDownload bool) error {
+	env := configuration.GetEnvironment()
+	if env.MaxExpiryDays != 0 && (unlimitedTime || expiryDays > env.MaxExpiryDays) {
+		return ErrExpiryTooLong
+	}
+	if env.MaxDownloads != 0 && (unlimitedDownload || allowedDownloads > env.MaxDownloads) {
+		return ErrTooManyDownloads
+	}
+	return nil
+}
+
+// clampToServerLimits caps the parameters of a file request upload to
+// GOKAPI_MAX_EXPIRY_DAYS and GOKAPI_MAX_DOWNLOADS. A value of 0 disables the
+// respective limit and leaves the parameters untouched.
+func clampToServerLimits(expiryDays, allowedDownloads int, unlimitedTime, unlimitedDownload bool) (int, int, bool, bool) {
+	env := configuration.GetEnvironment()
+	if env.MaxExpiryDays != 0 && (unlimitedTime || expiryDays < 1 || expiryDays > env.MaxExpiryDays) {
+		expiryDays = env.MaxExpiryDays
+		unlimitedTime = false
+	}
+	if env.MaxDownloads != 0 && (unlimitedDownload || allowedDownloads < 1 || allowedDownloads > env.MaxDownloads) {
+		allowedDownloads = env.MaxDownloads
+		unlimitedDownload = false
+	}
+	return expiryDays, allowedDownloads, unlimitedTime, unlimitedDownload
 }

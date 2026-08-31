@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -189,6 +190,7 @@ func getFileUploadRecorder(addChunkInfo bool) *http.Request {
 
 type testData struct {
 	allowedDownloads, expiryDays, password, isE2E, realSize string
+	isUnlimitedDownload, isUnlimitedTime, fileRequestId     string
 }
 
 func (t testData) Get(key string) string {
@@ -197,4 +199,128 @@ func (t testData) Get(key string) string {
 		return field.String()
 	}
 	return ""
+}
+
+// setServerLimits reconfigures the upload limits and reloads the cached environment,
+// as parseConfig reads them through configuration.GetEnvironment().
+func setServerLimits(t *testing.T, maxExpiryDays, maxDownloads int) {
+	t.Helper()
+	t.Setenv("GOKAPI_MAX_EXPIRY_DAYS", strconv.Itoa(maxExpiryDays))
+	t.Setenv("GOKAPI_MAX_DOWNLOADS", strconv.Itoa(maxDownloads))
+	configuration.Load()
+	t.Cleanup(func() {
+		os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+		os.Unsetenv("GOKAPI_MAX_DOWNLOADS")
+		configuration.Load()
+	})
+}
+
+func TestParseConfigWithoutServerLimits(t *testing.T) {
+	config, err := parseConfig(testData{allowedDownloads: "0", expiryDays: "0"})
+	test.IsNil(t, err)
+	test.IsEqualBool(t, config.UnlimitedTime, true)
+	test.IsEqualBool(t, config.UnlimitedDownload, true)
+}
+
+func TestParseConfigWithinServerLimits(t *testing.T) {
+	setServerLimits(t, 30, 5)
+
+	config, err := parseConfig(testData{allowedDownloads: "3", expiryDays: "10"})
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 10)
+	test.IsEqualInt(t, config.AllowedDownloads, 3)
+
+	config, err = parseConfig(testData{allowedDownloads: "5", expiryDays: "30"})
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 30)
+	test.IsEqualInt(t, config.AllowedDownloads, 5)
+}
+
+func TestParseConfigRejectsAboveServerLimits(t *testing.T) {
+	setServerLimits(t, 30, 5)
+
+	_, err := parseConfig(testData{allowedDownloads: "3", expiryDays: "31"})
+	test.IsNotNil(t, err)
+
+	_, err = parseConfig(testData{allowedDownloads: "6", expiryDays: "10"})
+	test.IsNotNil(t, err)
+}
+
+func TestParseConfigRejectsUnlimitedWhenLimited(t *testing.T) {
+	setServerLimits(t, 30, 5)
+
+	_, err := parseConfig(testData{allowedDownloads: "3", expiryDays: "10", isUnlimitedTime: "true"})
+	test.IsNotNil(t, err)
+
+	_, err = parseConfig(testData{allowedDownloads: "3", expiryDays: "10", isUnlimitedDownload: "true"})
+	test.IsNotNil(t, err)
+
+	// A zero value is how the UI expresses "unlimited" and must be rejected as well
+	_, err = parseConfig(testData{allowedDownloads: "3", expiryDays: "0"})
+	test.IsNotNil(t, err)
+
+	_, err = parseConfig(testData{allowedDownloads: "0", expiryDays: "10"})
+	test.IsNotNil(t, err)
+}
+
+func TestParseConfigClampsFileRequests(t *testing.T) {
+	setServerLimits(t, 30, 5)
+
+	// The uploader of a file request cannot choose these values, so they are clamped
+	// to the server limit rather than rejected.
+	config, err := parseConfig(testData{fileRequestId: "testid"})
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 30)
+	test.IsEqualInt(t, config.AllowedDownloads, 5)
+	test.IsEqualBool(t, config.UnlimitedTime, false)
+	test.IsEqualBool(t, config.UnlimitedDownload, false)
+}
+
+func TestParseConfigFileRequestsStayUnlimitedWithoutLimits(t *testing.T) {
+	config, err := parseConfig(testData{fileRequestId: "testid"})
+	test.IsNil(t, err)
+	test.IsEqualBool(t, config.UnlimitedTime, true)
+	test.IsEqualBool(t, config.UnlimitedDownload, true)
+}
+
+// The API handlers for /chunk/complete, /chunk/uploadrequest/complete and
+// /files/duplicate build their parameters with CreateUploadConfig directly and never
+// reach parseConfig, so the limits have to hold at this level too.
+func TestCreateUploadConfigEnforcesServerLimits(t *testing.T) {
+	setServerLimits(t, 30, 5)
+
+	_, err := CreateUploadConfig(3, 31, "", false, false, false, 0, "")
+	test.IsNotNil(t, err)
+
+	_, err = CreateUploadConfig(6, 10, "", false, false, false, 0, "")
+	test.IsNotNil(t, err)
+
+	_, err = CreateUploadConfig(3, 10, "", true, false, false, 0, "")
+	test.IsNotNil(t, err)
+
+	_, err = CreateUploadConfig(3, 10, "", false, true, false, 0, "")
+	test.IsNotNil(t, err)
+
+	config, err := CreateUploadConfig(5, 30, "", false, false, false, 0, "")
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 30)
+	test.IsEqualInt(t, config.AllowedDownloads, 5)
+}
+
+func TestCreateUploadConfigClampsFileRequests(t *testing.T) {
+	setServerLimits(t, 30, 5)
+
+	config, err := CreateUploadConfig(0, 0, "", true, true, false, 0, "testrequest")
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 30)
+	test.IsEqualInt(t, config.AllowedDownloads, 5)
+	test.IsEqualBool(t, config.UnlimitedTime, false)
+	test.IsEqualBool(t, config.UnlimitedDownload, false)
+}
+
+func TestCreateUploadConfigWithoutServerLimits(t *testing.T) {
+	config, err := CreateUploadConfig(0, 0, "", true, true, false, 0, "")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, config.UnlimitedTime, true)
+	test.IsEqualBool(t, config.UnlimitedDownload, true)
 }

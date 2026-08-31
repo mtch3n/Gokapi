@@ -765,6 +765,8 @@ type AdminView struct {
 	ShowApiMenu           bool
 	ShowDeprecationNotice bool
 	MaxFileSize           int
+	MaxDownloads          int
+	MaxExpiryDays         int
 	ActiveView            int
 	ChunkSize             int
 	MaxParallelUploads    int
@@ -905,6 +907,8 @@ func (u *AdminView) convertGlobalConfig(view int, user models.User) *AdminView {
 	u.IsAdminView = true
 	u.ActiveView = view
 	u.MaxFileSize = config.MaxFileSizeMB
+	u.MaxDownloads = configuration.GetEnvironment().MaxDownloads
+	u.MaxExpiryDays = configuration.GetEnvironment().MaxExpiryDays
 	u.IsLogoutAvailable = authentication.IsLogoutAvailable()
 	u.ShowApiMenu = showApiMenu
 	u.IsUserTabAvailable = config.Authentication.Method != models.AuthenticationDisabled

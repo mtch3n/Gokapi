@@ -102,6 +102,18 @@ Available environment variables
 +-------------------------------------+----------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_LOG_STDOUT                   | Also outputs all log file entries to the console output, if set to true                | No              | false                       |
 +-------------------------------------+----------------------------------------------------------------------------------------+-----------------+-----------------------------+
+| GOKAPI_MAX_DOWNLOADS                | Sets the maximum number of downloads that can be selected for an upload                | No              | 0                           |
+|                                     |                                                                                        |                 |                             |
+|                                     | An upload requesting more downloads, or unlimited downloads, is rejected               |                 |                             |
+|                                     |                                                                                        |                 |                             |
+|                                     | Set to 0 to allow an unlimited number of downloads                                     |                 |                             |
++-------------------------------------+----------------------------------------------------------------------------------------+-----------------+-----------------------------+
+| GOKAPI_MAX_EXPIRY_DAYS              | Sets the maximum number of days after which an upload expires                          | No              | 0                           |
+|                                     |                                                                                        |                 |                             |
+|                                     | An upload requesting a longer expiry, or no expiry, is rejected                        |                 |                             |
+|                                     |                                                                                        |                 |                             |
+|                                     | Set to 0 to allow permanent files                                                      |                 |                             |
++-------------------------------------+----------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_MAX_FILESIZE                 | Sets the maximum allowed file size in MB                                               | Yes             | 102400                      |
 |                                     |                                                                                        |                 |                             |
 |                                     | Default 102400 = 100GB                                                                 |                 |                             |

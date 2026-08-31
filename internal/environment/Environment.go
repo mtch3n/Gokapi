@@ -44,6 +44,14 @@ type Environment struct {
 	LengthHotlinkId int `env:"LENGTH_HOTLINK_ID" envDefault:"40" minValue:"8"`
 	// Also outputs all log file entries to the console output, if set to true
 	LogToStdout bool `env:"LOG_STDOUT" envDefault:"false"`
+	// Sets the maximum number of downloads that can be selected for an upload
+	// An upload requesting more downloads, or unlimited downloads, is rejected
+	// Set to 0 to allow an unlimited number of downloads
+	MaxDownloads int `env:"MAX_DOWNLOADS" envDefault:"0" onlyPositive:"true"`
+	// Sets the maximum number of days after which an upload expires
+	// An upload requesting a longer expiry, or no expiry, is rejected
+	// Set to 0 to allow permanent files
+	MaxExpiryDays int `env:"MAX_EXPIRY_DAYS" envDefault:"0" onlyPositive:"true"`
 	// Sets the maximum allowed file size in MB
 	// Default 102400 = 100GB
 	MaxFileSize int `env:"MAX_FILESIZE" envDefault:"102400" onlyPositive:"true" persistent:"true"`
