@@ -177,6 +177,10 @@ li.wizard-nav-item {
 	display:none;
 }
 
+.wizard-dialog .popover.error-popover .popover-content {
+	white-space:nowrap;
+}
+
 .wizard-dialog .popover.error-popover .arrow {
 	border-right-color:#953B39;
 }

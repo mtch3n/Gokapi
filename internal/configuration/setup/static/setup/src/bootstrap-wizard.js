@@ -1135,6 +1135,12 @@
 
         _onBackClick: function() {
             this.log("handling 'back' button click");
+            /*
+             * going back leaves the card without re-running its validators,
+             * so any error popover and marking has to be cleared here
+             */
+            this.el.find(".popover.error-popover").remove();
+            this.el.find("div.form-group").removeClass("has-error");
             var currentCard = this.decrementCard();
         },
 
