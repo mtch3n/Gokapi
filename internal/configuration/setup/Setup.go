@@ -334,6 +334,10 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		if err != nil {
 			return err
 		}
+		location = strings.TrimSpace(location)
+		if location == "" {
+			return errors.New("no sqlite database location provided")
+		}
 		result.DatabaseUrl = "sqlite://" + location
 		return nil
 	case dbabstraction.TypeRedis:
@@ -356,6 +360,10 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		useSsl, err := getFormValueBool(formObjects, "redis_ssl_sel")
 		if err != nil {
 			return err
+		}
+		host = strings.TrimSpace(host)
+		if host == "" {
+			return errors.New("no redis database host provided")
 		}
 		dbUrl := url.URL{
 			Scheme: "redis",

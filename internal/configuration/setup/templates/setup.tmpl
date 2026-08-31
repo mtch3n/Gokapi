@@ -105,7 +105,7 @@
 				</div>
 			</div>
 			<!-- Step 1 DB Location -->
-			<div class="wizard-card wizard-card-overlay" data-cardname="dblocation">
+			<div class="wizard-card wizard-card-overlay" data-cardname="dblocation" data-validate="validateDatabaseCard">
 				<h3 style="display:none">Database</h3>
 
 				<div class="wizard-input-section">
@@ -952,6 +952,26 @@ function TestAWS(button, isManual) {
 				    inputField.disabled = !checkbox.checked;
 				});
 			    }
+			
+			
+			function validateDatabaseCard(card) {
+				// Validated per card rather than per input: the card has a single
+				// form-group, so marking an input would mark every field on it
+				let dbType = document.getElementById("dbtype_sel").value;
+				let el;
+				
+				if (dbType == "0") {
+					el = $("#sqlite_location");
+				} else {
+					el = $("#redis_location");
+				}
+				
+				if (el.val().length == 0) {
+					card.wizard.errorPopover(el, "Please enter a value");
+					return false;
+				}
+				return true;
+			}
 			
 			
 			function validateUrl(el) {

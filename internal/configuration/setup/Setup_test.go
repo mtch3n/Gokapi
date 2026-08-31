@@ -164,6 +164,18 @@ func TestToConfiguration(t *testing.T) {
 	test.IsEqualString(t, output.RedirectUrl, "https://github.com/Forceu/Gokapi/")
 }
 
+func TestParseDatabaseSettingsRequiresLocation(t *testing.T) {
+	output := models.Configuration{}
+	// An empty location previously produced the unusable URL "sqlite://"
+	input := generateDbFormValues(dbFormTest{DatabaseType: "0", RedisUseSsl: "0"})
+	err := parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
+
+	input = generateDbFormValues(dbFormTest{DatabaseType: "1", RedisUseSsl: "0"})
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
+}
+
 func TestVerifyPortNumber(t *testing.T) {
 	test.IsEqualInt(t, verifyPortNumber(2134), 2134)
 	test.IsEqualInt(t, verifyPortNumber(-1), environment.DefaultPort)
