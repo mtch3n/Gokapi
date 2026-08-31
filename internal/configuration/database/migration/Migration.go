@@ -22,7 +22,8 @@ func Do(flags flagparser.MigrateFlags) {
 		osExit(2)
 		return
 	}
-	fmt.Printf("Migrating %s database %s to %s database %s\n", getType(oldDb.Type), oldDb.HostUrl, getType(newDb.Type), newDb.HostUrl)
+	fmt.Printf("Migrating %s database %s to %s database %s\n", getType(oldDb.Type),
+		database.RedactUrl(oldDb.HostUrl), getType(newDb.Type), database.RedactUrl(newDb.HostUrl))
 	database.Migrate(oldDb, newDb)
 }
 
@@ -32,6 +33,8 @@ func getType(input int) string {
 		return "SQLite"
 	case dbabstraction.TypeRedis:
 		return "Redis"
+	case dbabstraction.TypePostgres:
+		return "PostgreSQL"
 	}
 	return "Invalid"
 }

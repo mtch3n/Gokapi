@@ -32,7 +32,7 @@ func ParseUrl(dbUrl string, mustExist bool) (models.DbConnection, error) {
 	}
 	u, err := url.Parse(dbUrl)
 	if err != nil {
-		return models.DbConnection{}, fmt.Errorf("unsupported database URL - expected format is: type://username:password@server: %v", err)
+		return models.DbConnection{}, errors.New("unsupported database URL - expected format is: type://username:password@server")
 	}
 	result := models.DbConnection{}
 	switch strings.ToLower(u.Scheme) {
@@ -51,8 +51,13 @@ func ParseUrl(dbUrl string, mustExist bool) (models.DbConnection, error) {
 	case "redis":
 		result.Type = dbabstraction.TypeRedis
 		result.HostUrl = u.Host
+	case "postgres", "postgresql":
+		result.Type = dbabstraction.TypePostgres
+		result.HostUrl = u.Host
+		result.DatabaseName = strings.TrimPrefix(u.Path, "/")
+		result.PostgresSslMode = u.Query().Get("sslmode")
 	default:
-		return models.DbConnection{}, fmt.Errorf("unsupported database type: %s\n", dbUrl)
+		return models.DbConnection{}, fmt.Errorf("unsupported database type: %s\n", RedactUrl(dbUrl))
 	}
 
 	query := u.Query()
@@ -378,4 +383,17 @@ func SaveTrafficSince(since int64) {
 // GetTrafficSince gets the beginning of traffic counting
 func GetTrafficSince() (int64, bool) {
 	return db.GetTrafficSince()
+}
+
+// RedactUrl removes the password from a database URL, so that it can be logged or
+// displayed in an error message
+func RedactUrl(dbUrl string) string {
+	parsed, err := url.Parse(dbUrl)
+	if err != nil || parsed.User == nil {
+		return dbUrl
+	}
+	if _, hasPassword := parsed.User.Password(); !hasPassword {
+		return dbUrl
+	}
+	return parsed.Redacted()
 }

@@ -334,6 +334,10 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		if err != nil {
 			return err
 		}
+		location = strings.TrimSpace(location)
+		if location == "" {
+			return errors.New("no sqlite database location provided")
+		}
 		result.DatabaseUrl = "sqlite://" + location
 		return nil
 	case dbabstraction.TypeRedis:
@@ -357,6 +361,10 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		if err != nil {
 			return err
 		}
+		host = strings.TrimSpace(host)
+		if host == "" {
+			return errors.New("no redis database host provided")
+		}
 		dbUrl := url.URL{
 			Scheme: "redis",
 			Host:   host,
@@ -374,6 +382,54 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		dbUrl.RawQuery = query.Encode()
 		result.DatabaseUrl = dbUrl.String()
 		return nil
+	case dbabstraction.TypePostgres:
+		host, err := getFormValueString(formObjects, "postgres_location")
+		if err != nil {
+			return err
+		}
+		database, err := getFormValueString(formObjects, "postgres_database")
+		if err != nil {
+			return err
+		}
+		pUser, err := getFormValueString(formObjects, "postgres_user")
+		if err != nil {
+			return err
+		}
+		pPassword, err := getFormValueString(formObjects, "postgres_password")
+		if err != nil {
+			return err
+		}
+		sslMode, err := getFormValueString(formObjects, "postgres_ssl_sel")
+		if err != nil {
+			return err
+		}
+		host = strings.TrimSpace(host)
+		database = strings.TrimSpace(database)
+		// The form marks these as required, but it is submitted as JSON, so the
+		// values are checked here as well
+		if host == "" {
+			return errors.New("no postgres database host provided")
+		}
+		if database == "" {
+			return errors.New("no postgres database name provided")
+		}
+		if pUser == "" {
+			return errors.New("no postgres username provided")
+		}
+		if pPassword == "" {
+			return errors.New("no postgres password provided")
+		}
+		dbUrl := url.URL{
+			Scheme: "postgres",
+			Host:   host,
+			Path:   "/" + database,
+			User:   url.UserPassword(pUser, pPassword),
+		}
+		query := url.Values{}
+		query.Set("sslmode", sslMode)
+		dbUrl.RawQuery = query.Encode()
+		result.DatabaseUrl = dbUrl.String()
+		return nil
 	default:
 		return errors.New("unsupported database selected")
 	}
@@ -382,7 +438,8 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 // checkForAllDbValues tests if all values were passed, even if they were not required for this particular database
 // This is done to ensure that no invalid form was passed and makes testing easier
 func checkForAllDbValues(formObjects *[]jsonFormObject) error {
-	expectedValues := []string{"dbtype_sel", "sqlite_location", "redis_location", "redis_prefix", "redis_user", "redis_password"}
+	expectedValues := []string{"dbtype_sel", "sqlite_location", "redis_location", "redis_prefix", "redis_user", "redis_password", "postgres_location", "postgres_database", "postgres_user",
+		"postgres_password", "postgres_ssl_sel"}
 	for _, value := range expectedValues {
 		_, err := getFormValueString(formObjects, value)
 		if err != nil {

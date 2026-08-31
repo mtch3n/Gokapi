@@ -105,7 +105,7 @@
 				</div>
 			</div>
 			<!-- Step 1 DB Location -->
-			<div class="wizard-card wizard-card-overlay" data-cardname="dblocation">
+			<div class="wizard-card wizard-card-overlay" data-cardname="dblocation" data-validate="validateDatabaseCard">
 				<h3 style="display:none">Database</h3>
 
 				<div class="wizard-input-section">
@@ -121,6 +121,7 @@
 						<select name="dbtype_sel" id="dbtype_sel"  style="width:350px;" class="select form-control"  onChange="dbChanged()">	
 								<option value="0" selected>SQLite</option>
 								<option value="1">Redis</option>
+								<option value="2">PostgreSQL</option>
 
 						</select><br>
 						<div id="divsqlite">
@@ -140,6 +141,23 @@
 							<select name="redis_ssl_sel" id="redis_ssl_sel" style="width:350px;" class="select form-control">
 								<option value="0" selected>No</option>
 								<option value="1">Yes</option>
+							</select>
+						</div>
+						<div id="divpostgres" style="display: none;">
+							<label for="postgres_location">Database host:</label>
+							<input type="text" class="form-control" id="postgres_location" name="postgres_location" value="127.0.0.1:5432" placeholder="Database host" required><br>
+							<label for="postgres_database">Database name:</label>
+							<input type="text" class="form-control" id="postgres_database" name="postgres_database" value="gokapi" placeholder="Database name" required><br>
+							<label for="postgres_user">Username:</label>
+							<input type="text" class="form-control" id="postgres_user" name="postgres_user" value="" placeholder="Username" required><br>
+							<label for="postgres_password">Password (stored in plain text):</label>
+							<input type="text" class="form-control" id="postgres_password" name="postgres_password" value="" placeholder="Password" required><br>
+							<label for="postgres_ssl_sel">SSL mode</label>
+							<select name="postgres_ssl_sel" id="postgres_ssl_sel" style="width:350px;" class="select form-control">
+								<option value="require" selected>Require</option>
+								<option value="verify-ca">Verify CA</option>
+								<option value="verify-full">Verify full</option>
+								<option value="disable">Disable</option>
 							</select>
 						</div>
 					</div>
@@ -800,6 +818,13 @@ function TestAWS(button, isManual) {
 
 	{{ if eq .DatabaseSettings.Type 0}}
 				document.getElementById("sqlite_location").value = {{.DatabaseSettings.HostUrl}};
+	{{ else if eq .DatabaseSettings.Type 2}}
+				document.getElementById("dbtype_sel").selectedIndex = 2;
+				document.getElementById("postgres_location").value = {{.DatabaseSettings.HostUrl}};
+				document.getElementById("postgres_database").value = {{.DatabaseSettings.DatabaseName}};
+				document.getElementById("postgres_user").value = {{.DatabaseSettings.Username}};
+				document.getElementById("postgres_password").value = {{.DatabaseSettings.Password}};
+				document.getElementById("postgres_ssl_sel").value = {{.DatabaseSettings.PostgresSslMode}};
 	{{ else }}
 				document.getElementById("dbtype_sel").selectedIndex = 1;
 				document.getElementById("redis_location").value = {{.DatabaseSettings.HostUrl}};
@@ -954,6 +979,31 @@ function TestAWS(button, isManual) {
 			    }
 			
 			
+			function validateDatabaseCard(card) {
+				// Validated per card rather than per input: the card has a single
+				// form-group, so marking an input would mark every field on it
+				let dbType = document.getElementById("dbtype_sel").value;
+				let fields = [];
+				
+				if (dbType == "0") {
+					fields = ["sqlite_location"];
+				} else if (dbType == "1") {
+					fields = ["redis_location"];
+				} else {
+					fields = ["postgres_location", "postgres_database", "postgres_user", "postgres_password"];
+				}
+				
+				for (let i = 0; i < fields.length; i++) {
+					let el = $("#" + fields[i]);
+					if (el.val().length == 0) {
+						card.wizard.errorPopover(el, "Please enter a value");
+						return false;
+					}
+				}
+				return true;
+			}
+			
+			
 			function validateUrl(el) {
 				let value = el.val();
 				let retValue = {};
@@ -1094,14 +1144,21 @@ function TestAWS(button, isManual) {
 			function dbChanged() {
 				let divSqlite = document.getElementById("divsqlite");
 				let divRedis = document.getElementById("divredis");
+				let divPostgres = document.getElementById("divpostgres");
 				let dbType = document.getElementById("dbtype_sel").value;
 				
 				if (dbType == "0") {
 					divSqlite.style.display = "block";
 					divRedis.style.display = "none";
-				} else {
+					divPostgres.style.display = "none";
+				} else if (dbType == "1") {
 					divSqlite.style.display = "none";
 					divRedis.style.display = "block";
+					divPostgres.style.display = "none";
+				} else {
+					divSqlite.style.display = "none";
+					divRedis.style.display = "none";
+					divPostgres.style.display = "block";
 				}
 			}
 				

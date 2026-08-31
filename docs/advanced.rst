@@ -192,6 +192,8 @@ Databases
 
 By default, Gokapi uses an SQLite database for data storage, which should suffice for most use cases. However if you are using a slow media for storing the database or expect to have a lot of files uploaded or downloaded it is highly recommended to use Redis instead.
 
+PostgreSQL is also supported. It is a good fit if you already run a PostgreSQL server, or if you deploy Gokapi as a container without persistent local storage for an SQLite file.
+
 
 
 Migrating to a different database
@@ -216,12 +218,14 @@ For Docker users, the command is:
 Database URL format
 ---------------------------------
 
-Database URLs must start with either ``sqlite://`` or ``redis://``.
+Database URLs must start with ``sqlite://``, ``redis://`` or ``postgres://`` (``postgresql://`` is also accepted).
 
 
 For SQLite, the path to the database follows the prefix. No additional options are allowed.
 
 For Redis, the URL can include authentication credentials (username and password), an optional prefix for keys, and parameter to use SSL.
+
+For PostgreSQL, the URL contains the host, the database name, the credentials and the SSL mode.
 
 
 Redis URL Format
@@ -237,6 +241,29 @@ A Redis URL has the following structure:
 * host: (required) The address of the Redis server.
 * port: (optional) The port of the Redis server (default is 6379).
 * options: (optional) Additional options such as SSL (``ssl=true``) and key prefix (``prefix=``).
+
+
+PostgreSQL URL Format
+---------------------------------
+
+A PostgreSQL URL has the following structure:
+::
+
+ postgres://[username:password@]host[:port]/database[?options]
+
+* username / password: the credentials for authentication.
+* host: (required) The address of the PostgreSQL server.
+* port: (optional) The port of the PostgreSQL server (default is 5432).
+* database: (required) The name of the database. It must already exist; Gokapi creates the tables, not the database itself.
+* options: ``sslmode`` selects the TLS mode.
+
+``require`` encrypts the connection but does not verify the server certificate, ``verify-ca`` and ``verify-full`` also check it, and ``disable`` connects without TLS. If ``sslmode`` is left out, the driver defaults to ``prefer``, which uses TLS if the server offers it and connects unencrypted otherwise.
+
+.. warning::
+   Use ``require`` or stricter if the database is not on the same host. Session IDs and API keys are sent over this connection and would otherwise cross the network unencrypted.
+
+.. warning::
+   The PostgreSQL connection string contains the password and is stored in plain text in the configuration file, in the same way as the Redis password.
 
 
 Examples

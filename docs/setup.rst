@@ -135,19 +135,28 @@ Database
 .. warning::
    The Redis password is stored in plain text in the configuration file and will be visible if you re-run setup.
 
+.. warning::
+   The PostgreSQL connection string is stored in plain text in the configuration file and will be visible if you re-run setup.
+
 By default Gokapi uses SQLite, which is fine for most deployments. Use Redis if:
 
 * you expect high download/upload traffic, or
 * your SQLite database lives on a slow disk (e.g. a network share or SD card).
 
+Use PostgreSQL if you already operate a PostgreSQL server, or if Gokapi runs in a container with no persistent local storage.
+
 Settings:
 
-* **Type of database** — SQLite or Redis.
+* **Type of database** — SQLite, Redis or PostgreSQL.
 * **Database location** — path to the SQLite file.
 * **Database host** — host and port for Redis (e.g. ``127.0.0.1:6379``).
 * **Key prefix** *(optional)* — added to all Redis keys; useful when sharing a Redis instance with other applications.
 * **Username / Password** *(optional)* — Redis authentication credentials.
 * **Use SSL** — enables TLS for the Redis connection.
+* **Database host** — host and port for PostgreSQL (e.g. ``127.0.0.1:5432``).
+* **Database name** — the database to use. It must already exist; Gokapi creates the tables, not the database.
+* **Username / Password** — PostgreSQL credentials. Both are required.
+* **SSL mode** — ``Require`` encrypts the connection, ``Verify CA`` and ``Verify full`` also check the server certificate, ``Disable`` connects without TLS. Use ``Require`` or stricter for a database on another host.
 
 .. _setup_webserver:
 

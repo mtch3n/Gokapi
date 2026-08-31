@@ -164,6 +164,72 @@ func TestToConfiguration(t *testing.T) {
 	test.IsEqualString(t, output.RedirectUrl, "https://github.com/Forceu/Gokapi/")
 }
 
+func TestParseDatabaseSettingsRequiresLocation(t *testing.T) {
+	output := models.Configuration{}
+	// An empty location previously produced the unusable URL "sqlite://"
+	input := generateDbFormValues(dbFormTest{DatabaseType: "0", RedisUseSsl: "0"})
+	err := parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
+
+	input = generateDbFormValues(dbFormTest{DatabaseType: "1", RedisUseSsl: "0"})
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
+}
+
+func TestParseDatabaseSettingsPostgres(t *testing.T) {
+	output := models.Configuration{}
+	input := generateDbFormValues(dbFormTest{
+		DatabaseType:     "2",
+		RedisUseSsl:      "0",
+		PostgresLocation: "db.example.com:5432",
+		PostgresDatabase: "gokapi",
+		PostgresUser:     "user",
+		PostgresPw:       "pw",
+		PostgresSsl:      "require",
+	})
+	err := parseDatabaseSettings(&output, &input)
+	test.IsNil(t, err)
+	test.IsEqualString(t, output.DatabaseUrl, "postgres://user:pw@db.example.com:5432/gokapi?sslmode=require")
+
+	// Every field is required, and the JSON form bypasses the HTML validation
+	for _, missing := range []dbFormTest{
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresDatabase: "gokapi", PostgresUser: "user", PostgresPw: "pw", PostgresSsl: "require"},
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresUser: "user", PostgresPw: "pw", PostgresSsl: "require"},
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresDatabase: "gokapi", PostgresPw: "pw", PostgresSsl: "require"},
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresDatabase: "gokapi", PostgresUser: "user", PostgresSsl: "require"},
+	} {
+		input = generateDbFormValues(missing)
+		err = parseDatabaseSettings(&output, &input)
+		test.IsNotNil(t, err)
+	}
+
+	// A remote database without TLS would send session IDs and API keys in the clear
+	input = generateDbFormValues(dbFormTest{
+		DatabaseType:     "2",
+		RedisUseSsl:      "0",
+		PostgresLocation: "db.example.com:5432",
+		PostgresDatabase: "gokapi",
+		PostgresUser:     "user",
+		PostgresPw:       "pw",
+		PostgresSsl:      "disable",
+	})
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
+
+	// Loopback never leaves the host, so it is exempt
+	input = generateDbFormValues(dbFormTest{
+		DatabaseType:     "2",
+		RedisUseSsl:      "0",
+		PostgresLocation: "127.0.0.1:5432",
+		PostgresDatabase: "gokapi",
+		PostgresUser:     "user",
+		PostgresPw:       "pw",
+		PostgresSsl:      "disable",
+	})
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNil(t, err)
+}
+
 func TestVerifyPortNumber(t *testing.T) {
 	test.IsEqualInt(t, verifyPortNumber(2134), 2134)
 	test.IsEqualInt(t, verifyPortNumber(-1), environment.DefaultPort)
@@ -234,13 +300,18 @@ func TestInitialSetup(t *testing.T) {
 }
 
 type dbFormTest struct {
-	DatabaseType   string `form:"dbtype_sel"`
-	SqliteLocation string `form:"sqlite_location"`
-	RedisLocation  string `form:"redis_location"`
-	RedisPrefix    string `form:"redis_prefix"`
-	RedisUser      string `form:"redis_user"`
-	RedisPw        string `form:"redis_password"`
-	RedisUseSsl    string `form:"redis_ssl_sel"`
+	DatabaseType     string `form:"dbtype_sel"`
+	SqliteLocation   string `form:"sqlite_location"`
+	RedisLocation    string `form:"redis_location"`
+	RedisPrefix      string `form:"redis_prefix"`
+	RedisUser        string `form:"redis_user"`
+	RedisPw          string `form:"redis_password"`
+	RedisUseSsl      string `form:"redis_ssl_sel"`
+	PostgresLocation string `form:"postgres_location"`
+	PostgresDatabase string `form:"postgres_database"`
+	PostgresUser     string `form:"postgres_user"`
+	PostgresPw       string `form:"postgres_password"`
+	PostgresSsl      string `form:"postgres_ssl_sel"`
 }
 
 func generateDbFormValues(input dbFormTest) []jsonFormObject {
@@ -555,6 +626,11 @@ type setupValues struct {
 	RedisUser                     setupEntry `form:"redis_user"`
 	RedisPw                       setupEntry `form:"redis_password"`
 	RedisUseSsl                   setupEntry `form:"redis_ssl_sel" isBool:"true"`
+	PostgresLocation              setupEntry `form:"postgres_location"`
+	PostgresDatabase              setupEntry `form:"postgres_database"`
+	PostgresUser                  setupEntry `form:"postgres_user"`
+	PostgresPw                    setupEntry `form:"postgres_password"`
+	PostgresSsl                   setupEntry `form:"postgres_ssl_sel"`
 }
 
 func (s *setupValues) init() {
