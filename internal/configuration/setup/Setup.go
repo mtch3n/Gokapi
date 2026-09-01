@@ -675,6 +675,10 @@ func parseEncryptionAndDelete(result *models.Configuration, formObjects *[]jsonF
 		if len(masterPw) < minLength {
 			return configuration.End2EndReconfigParameters{}, errors.New("password is less than " + strconv.Itoa(minLength) + " characters long")
 		}
+		err = configuration.ValidatePasswordComplexity(masterPw)
+		if err != nil {
+			return configuration.End2EndReconfigParameters{}, err
+		}
 		result.Encryption.Checksum = encryption.PasswordChecksum(masterPw, result.Encryption.ChecksumSalt)
 	}
 	result.Encryption.Level = encLevel

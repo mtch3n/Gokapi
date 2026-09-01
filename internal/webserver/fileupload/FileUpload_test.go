@@ -35,7 +35,7 @@ func TestParseConfig(t *testing.T) {
 	data := testData{
 		allowedDownloads: "9",
 		expiryDays:       "5",
-		password:         "longenoughpw",
+		password:         "LongEnoughPw1!",
 		isE2E:            "",
 		realSize:         "",
 	}
@@ -45,7 +45,7 @@ func TestParseConfig(t *testing.T) {
 	test.IsEqualInt64(t, config.RealSize, 0)
 
 	test.IsEqualInt(t, config.AllowedDownloads, 9)
-	test.IsEqualString(t, config.Password, "longenoughpw")
+	test.IsEqualString(t, config.Password, "LongEnoughPw1!")
 	test.IsEqualInt(t, config.Expiry, 5)
 
 	config, err = parseConfig(data)
@@ -116,10 +116,10 @@ func TestParseConfigAllowsAbsentPassword(t *testing.T) {
 }
 
 func TestParseConfigAllowsValidPassword(t *testing.T) {
-	data := testData{password: "validpassword"}
+	data := testData{password: "ValidPassword1!"}
 	config, err := parseConfig(data)
 	test.IsNil(t, err)
-	test.IsEqualString(t, config.Password, "validpassword")
+	test.IsEqualString(t, config.Password, "ValidPassword1!")
 }
 
 func TestProcess(t *testing.T) {
@@ -190,7 +190,7 @@ func TestCompleteChunk(t *testing.T) {
 	data.Del("realSize")
 	data.Set("allowedDownloads", "9")
 	data.Set("expiryDays", "5")
-	data.Set("password", "longenoughpw")
+	data.Set("password", "LongEnoughPw1!")
 	data.Set("chunkid", "randomchunkuuid")
 	data.Set("filename", "random.file")
 	data.Set("filesize", "13")

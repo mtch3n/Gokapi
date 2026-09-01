@@ -387,10 +387,23 @@ func createNewMetaData(hash string, fileHeader chunking.FileHeader, userId int, 
 // instances, which never hold a server-side key). Any encryption failure is treated the same as
 // "master key unavailable": the feature no-ops rather than failing the upload.
 func encryptSharePasswordIfEnabled(params models.UploadParameters) []byte {
-	if !configuration.Get().StoreShareKeys || !params.GeneratedPassword || params.Password == "" {
+	return EncryptSharePassword(params.Password, params.GeneratedPassword)
+}
+
+// EncryptSharePassword returns the encrypted form of password to store on a file's
+// EncryptedSharePassword, or nil if it must not be stored. See encryptSharePasswordIfEnabled
+// for the conditions.
+//
+// Exported for the edit path (apiEditFile), which changes a password without going through
+// UploadParameters at all. That path MUST call this on every password change and store the
+// result even when it is nil: leaving a previously stored key in place after the password has
+// been changed makes GET /api/files/{id}/sharekey serve a key that no longer opens the file,
+// which is worse than serving none.
+func EncryptSharePassword(password string, wasGenerated bool) []byte {
+	if !configuration.Get().StoreShareKeys || !wasGenerated || password == "" {
 		return nil
 	}
-	encrypted, err := encryption.EncryptString(params.Password)
+	encrypted, err := encryption.EncryptString(password)
 	if err != nil {
 		return nil
 	}

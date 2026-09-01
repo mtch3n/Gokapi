@@ -380,3 +380,38 @@ func TestMigration_LegacyToArgon2id(t *testing.T) {
 		t.Error("should not need rehash after migration")
 	}
 }
+
+func TestValidatePasswordComplexity(t *testing.T) {
+	test.IsNil(t, ValidatePasswordComplexity("Passw0rd!"))
+	// The fourth class is anything that is not a letter or a digit, so a space
+	// and a non-ASCII symbol both satisfy it.
+	test.IsNil(t, ValidatePasswordComplexity("Passw0rd "))
+	test.IsNil(t, ValidatePasswordComplexity("Passw0rd§"))
+
+	test.IsNotNil(t, ValidatePasswordComplexity("PASSW0RD!"))
+	test.IsNotNil(t, ValidatePasswordComplexity("passw0rd!"))
+	test.IsNotNil(t, ValidatePasswordComplexity("Password!"))
+	test.IsNotNil(t, ValidatePasswordComplexity("Passw0rd"))
+	test.IsNotNil(t, ValidatePasswordComplexity(""))
+}
+
+func TestValidateSharePasswordComplexity(t *testing.T) {
+	// ValidateSharePassword reads the minimum length from the environment, which
+	// panics until it has been parsed. Without this the test only passes when an
+	// earlier test in the package happened to load it first.
+	Load()
+
+	// Long enough but only one character class: length alone must not be
+	// enough to protect a share.
+	_, err := ValidateSharePassword("passwordpassword", true)
+	test.IsNotNil(t, err)
+
+	trimmed, err := ValidateSharePassword("  Passw0rd!x  ", true)
+	test.IsNil(t, err)
+	test.IsEqualString(t, trimmed, "Passw0rd!x")
+
+	// No password requested stays the legitimate default.
+	trimmed, err = ValidateSharePassword("", false)
+	test.IsNil(t, err)
+	test.IsEqualString(t, trimmed, "")
+}

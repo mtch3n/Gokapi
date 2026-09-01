@@ -8,6 +8,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"math/big"
 	"regexp"
 	"strings"
 )
@@ -27,6 +28,62 @@ func GenerateRandomString(length int) string {
 		return GenerateRandomString(length)
 	}
 	return result[:length]
+}
+
+// passwordSpecialChars is the pool GenerateRandomPassword draws its guaranteed special
+// character from. Deliberately narrow: a generated password is usually copied through a
+// mail client, a URL or a terminal, and these survive all three without quoting.
+const passwordSpecialChars = "-_.!@#$%*+="
+
+// GenerateRandomPassword returns a securely generated random password of the given length
+// that is guaranteed to contain a lowercase letter, an uppercase letter, a digit and a
+// special character, so that it satisfies configuration.ValidatePasswordComplexity.
+//
+// GenerateRandomString cannot be used on its own for a password: it strips everything
+// outside [a-zA-Z0-9], so its output never contains the special character the policy
+// requires, and on a short length it can happen to contain no digit or no uppercase
+// letter either. Handing an administrator a generated password that the server would
+// reject if they typed it back is the failure this avoids.
+func GenerateRandomPassword(length int) string {
+	if length < 4 {
+		length = 4
+	}
+	password := []byte(GenerateRandomString(length))
+	// Four distinct positions, so seeding one class cannot overwrite another.
+	positions := randomPositions(length, 4)
+	password[positions[0]] = randomCharFrom("abcdefghijklmnopqrstuvwxyz")
+	password[positions[1]] = randomCharFrom("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	password[positions[2]] = randomCharFrom("0123456789")
+	password[positions[3]] = randomCharFrom(passwordSpecialChars)
+	return string(password)
+}
+
+// randomCharFrom returns one uniformly chosen byte from pool.
+func randomCharFrom(pool string) byte {
+	index, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(len(pool))))
+	if err != nil {
+		panic(err)
+	}
+	return pool[index.Int64()]
+}
+
+// randomPositions returns count distinct indices below length, by shuffling the full range
+// and taking the first count. Drawing at random and retrying on a collision would work too,
+// but a partial Fisher-Yates has no retry loop to reason about.
+func randomPositions(length, count int) []int {
+	indices := make([]int, length)
+	for i := range indices {
+		indices[i] = i
+	}
+	for i := 0; i < count; i++ {
+		offset, err := cryptorand.Int(cryptorand.Reader, big.NewInt(int64(length-i)))
+		if err != nil {
+			panic(err)
+		}
+		j := i + int(offset.Int64())
+		indices[i], indices[j] = indices[j], indices[i]
+	}
+	return indices[:count]
 }
 
 // ByteCountSI converts bytes to a human-readable format

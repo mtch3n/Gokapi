@@ -446,6 +446,10 @@ func validateNewPassword(newPassword string, user models.User, userCsrfToken str
 	if len(newPassword) < configuration.GetEnvironment().MinLengthPassword {
 		return "", false, errors.New("password is too short")
 	}
+	err := configuration.ValidatePasswordComplexity(newPassword)
+	if err != nil {
+		return "", false, err
+	}
 	isSame, _ := configuration.VerifyPassword(newPassword, user.Password, "")
 	if isSame {
 		return "", false, errors.New("new password has to be different from the old password")

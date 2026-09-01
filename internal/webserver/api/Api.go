@@ -145,6 +145,7 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 	changePassword := request.IsPasswordSet
 	removePassword := request.RemovePassword
 	var newPasswordHash string
+	var newSharePassword string
 	if changePassword {
 		validatedPassword, err := configuration.ValidateSharePassword(request.Password, request.IsPasswordSet)
 		if err != nil {
@@ -152,6 +153,7 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 			return
 		}
 		newPasswordHash = configuration.HashPassword(validatedPassword, false, "")
+		newSharePassword = validatedPassword
 	}
 
 	if request.UnlimitedDownloads {
@@ -177,9 +179,16 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 
 	if changePassword {
 		file.PasswordHash = newPasswordHash
+		// Always reassigned, never left as it was. The stored copy belongs to the OLD
+		// password, so keeping it here would make GET /files/{id}/sharekey hand out a key
+		// that no longer opens the file. Assigning the result unconditionally also clears
+		// it when the new password was typed rather than generated, since a typed password
+		// must never be persisted in recoverable form.
+		file.EncryptedSharePassword = storage.EncryptSharePassword(newSharePassword, request.GeneratedPassword)
 		downloadPasswordToken.DeleteAllForFile(file.Id)
 	} else if removePassword {
 		file.PasswordHash = ""
+		file.EncryptedSharePassword = nil
 		downloadPasswordToken.DeleteAllForFile(file.Id)
 	}
 
@@ -1798,7 +1807,7 @@ func apiResetPassword(w http.ResponseWriter, r requestParser, user models.User, 
 	userToEdit.ResetPassword = true
 	password := ""
 	if request.NewPassword {
-		password = helper.GenerateRandomString(configuration.GetEnvironment().MinLengthPassword + 2)
+		password = helper.GenerateRandomPassword(configuration.GetEnvironment().MinLengthPassword + 2)
 		userToEdit.Password = configuration.HashPassword(password, false, "")
 	}
 	database.DeleteAllSessionsByUser(userToEdit.Id)

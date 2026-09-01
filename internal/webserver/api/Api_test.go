@@ -1912,7 +1912,7 @@ func uploadNewFile(t *testing.T) (models.Result, *bytes.Buffer) {
 	test.IsNil(t, err)
 	err = writer.WriteField("expiryDays", "10")
 	test.IsNil(t, err)
-	err = writer.WriteField("password", "12345678")
+	err = writer.WriteField("password", "Val1dPassw0rd!")
 	test.IsNil(t, err)
 	err = writer.Close()
 	test.IsNil(t, err)
@@ -1979,7 +1979,7 @@ func TestDuplicate(t *testing.T) {
 			}
 		}
 		if i > 4 {
-			headers = append(headers, test.Header{Name: "password", Value: "secretpw"})
+			headers = append(headers, test.Header{Name: "password", Value: "Secretpw1!"})
 		}
 		if i > 5 {
 			headers = append(headers, test.Header{Name: "originalPassword", Value: "true"})
@@ -2147,7 +2147,7 @@ func TestEditFileAcceptsValidPassword(t *testing.T) {
 
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: "editpwvalid"},
-		{Name: "password", Value: "avalidpassword"},
+		{Name: "password", Value: "AValidPassword1!"},
 	})
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
@@ -2256,7 +2256,7 @@ func TestEditFileRejectsPasswordAndRemovePasswordTogether(t *testing.T) {
 
 	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: "editpwbothheaders"},
-		{Name: "password", Value: "avalidpassword"},
+		{Name: "password", Value: "AValidPassword1!"},
 		{Name: "removePassword", Value: "true"},
 	})
 	Process(w, r)
@@ -2734,7 +2734,7 @@ func TestApiGetShareKeyAuthorisation(t *testing.T) {
 	otherUserKey.GrantPermission(models.ApiPermView)
 	database.SaveApiKey(otherUserKey)
 
-	fileId := chunkUploadWithPassword(t, ownerKey.Id, "sharekeyauthz1", "generatedPassw0rd", true)
+	fileId := chunkUploadWithPassword(t, ownerKey.Id, "sharekeyauthz1", "generatedPassw0rd!", true)
 
 	// Unknown id and "no view permission at all" both look identical from the outside.
 	w, r := getShareKey(ownerKey.Id, "doesnotexist")
@@ -2758,7 +2758,7 @@ func TestApiGetShareKeyAuthorisation(t *testing.T) {
 	}
 	err := json.Unmarshal(w.Body.Bytes(), &result)
 	test.IsNil(t, err)
-	test.IsEqualString(t, result.Key, "generatedPassw0rd")
+	test.IsEqualString(t, result.Key, "generatedPassw0rd!")
 
 	// Granting list-other-uploads lets the other user in too - same authorisation the rest of
 	// the file-list/view surface (e.g. apiListSingle) already uses.
@@ -2768,7 +2768,7 @@ func TestApiGetShareKeyAuthorisation(t *testing.T) {
 	test.IsEqualInt(t, w.Code, 200)
 	err = json.Unmarshal(w.Body.Bytes(), &result)
 	test.IsNil(t, err)
-	test.IsEqualString(t, result.Key, "generatedPassw0rd")
+	test.IsEqualString(t, result.Key, "generatedPassw0rd!")
 	removeUserPermission(t, idStranger, models.UserPermListOtherUploads)
 
 	// No apikey / invalid apikey are refused the same way as any other authenticated route.
@@ -2789,7 +2789,7 @@ func TestApiGetShareKeyToggleOff(t *testing.T) {
 	apiKey.GrantPermission(models.ApiPermView)
 	database.SaveApiKey(apiKey)
 
-	fileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleoff1", "generatedPassw0rd", true)
+	fileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleoff1", "generatedPassw0rd!", true)
 
 	file, ok := database.GetMetaDataById(fileId)
 	test.IsEqualBool(t, ok, true)
@@ -2814,7 +2814,7 @@ func TestApiGetShareKeyToggleOnGeneratedVsManual(t *testing.T) {
 	apiKey.GrantPermission(models.ApiPermView)
 	database.SaveApiKey(apiKey)
 
-	generatedFileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleon1", "generatedPassw0rd", true)
+	generatedFileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleon1", "generatedPassw0rd!", true)
 	file, ok := database.GetMetaDataById(generatedFileId)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, len(file.EncryptedSharePassword) > 0, true)
@@ -2827,9 +2827,9 @@ func TestApiGetShareKeyToggleOnGeneratedVsManual(t *testing.T) {
 	}
 	err := json.Unmarshal(w.Body.Bytes(), &result)
 	test.IsNil(t, err)
-	test.IsEqualString(t, result.Key, "generatedPassw0rd")
+	test.IsEqualString(t, result.Key, "generatedPassw0rd!")
 
-	manualFileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleon2", "manuallyTypedPw", false)
+	manualFileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleon2", "manuallyTypedPw1!", false)
 	file, ok = database.GetMetaDataById(manualFileId)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, len(file.EncryptedSharePassword), 0)
@@ -2838,6 +2838,55 @@ func TestApiGetShareKeyToggleOnGeneratedVsManual(t *testing.T) {
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 404)
 	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"File not found","ErrorCode":5}`)
+}
+
+// Placed with the other share-key tests deliberately: withMasterKey has no teardown, so a test
+// that calls it must run AFTER TestApiGetFeatures, which asserts the flag is false while no
+// master key has been loaded into the binary yet.
+// TestEditFileReplacesStoredShareKey covers the stale-key hazard: changing the password of a
+// file that has a stored share key must replace that stored key, never leave the previous
+// one behind. A left-behind key makes GET /files/{id}/sharekey serve a key that no longer
+// opens the file, which is worse than serving nothing.
+func TestEditFileReplacesStoredShareKey(t *testing.T) {
+	const apiUrl = "/files/modify"
+	withMasterKey(t)
+	withStoreShareKeys(t, true)
+
+	apiKey := generateNewKey(true, idUser, "", "")
+	fileId := chunkUploadWithPassword(t, apiKey.Id, "editsharekey1", "origPassw0rd!", true)
+	file, ok := database.GetMetaDataById(fileId)
+	test.IsEqualBool(t, ok, true)
+	stored, ok := storage.GetSharePassword(file)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored, "origPassw0rd!")
+
+	// A generated replacement is stored, and is the NEW key.
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: fileId},
+		{Name: "password", Value: "rotatedPassw0rd!"},
+		{Name: "generatedpassword", Value: "true"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	file, ok = database.GetMetaDataById(fileId)
+	test.IsEqualBool(t, ok, true)
+	stored, ok = storage.GetSharePassword(file)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored, "rotatedPassw0rd!")
+
+	// A typed replacement must clear the stored key entirely rather than leave the
+	// generated one it replaced.
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{
+		{Name: "id", Value: fileId},
+		{Name: "password", Value: "typedPassw0rd1!"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	file, ok = database.GetMetaDataById(fileId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, len(file.EncryptedSharePassword), 0)
+	_, ok = storage.GetSharePassword(file)
+	test.IsEqualBool(t, ok, false)
 }
 
 func TestMinorFunctions(t *testing.T) {

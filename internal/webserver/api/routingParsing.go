@@ -370,6 +370,19 @@ func (p *paramFilesModify) ParseRequest(r *http.Request) error {
 		}
 	}
 
+	// RequestParser header value "generatedpassword", required: false
+	exists, err = checkHeaderExists(r, "generatedpassword", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["generatedpassword"] = exists
+	if exists {
+		p.GeneratedPassword, err = parseHeaderBool(r, "generatedpassword")
+		if err != nil {
+			return fmt.Errorf("invalid value in header generatedpassword supplied")
+		}
+	}
+
 	// RequestParser header value "removePassword", required: false
 	exists, err = checkHeaderExists(r, "removePassword", false, false)
 	if err != nil {

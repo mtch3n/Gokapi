@@ -156,7 +156,8 @@ Available environment variables
 +-------------------------------------+----------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_MIN_FREE_SPACE               | Sets the minimum free space on the disk in MB for accepting an upload                                    | No              | 400                         |
 +-------------------------------------+----------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+
-| GOKAPI_MIN_LENGTH_PASSWORD          | Sets the minimum password length. Value must be 6 or greater                                             | No              | 8                           |
+| GOKAPI_MIN_LENGTH_PASSWORD          | Sets the minimum password length. Value must be 6 or greater. Regardless of this value, every password   | No              | 8                           |
+|                                     | must also contain a lowercase letter, an uppercase letter, a number and a special character              |                 |                             |
 +-------------------------------------+----------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_PORT                         | Sets the webserver port                                                                                  | Yes             | 53842                       |
 +-------------------------------------+----------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+

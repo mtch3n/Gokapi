@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/forceu/gokapi/internal/configuration/cloudconfig"
 	"github.com/forceu/gokapi/internal/configuration/configupgrade"
@@ -209,8 +210,13 @@ func SetDeploymentPassword(newPassword string) {
 		fmt.Printf("Password needs to be at least %d characters long\n", parsedEnvironment.MinLengthPassword)
 		os.Exit(1)
 	}
+	err := ValidatePasswordComplexity(newPassword)
+	if err != nil {
+		fmt.Println("Password needs a lowercase letter, an uppercase letter, a number and a special character")
+		os.Exit(1)
+	}
 	serverSettings.Authentication.SaltAdmin = helper.GenerateRandomString(30)
-	err := database.EditSuperAdmin(serverSettings.Authentication.Username, HashPassword(newPassword, false, ""))
+	err = database.EditSuperAdmin(serverSettings.Authentication.Username, HashPassword(newPassword, false, ""))
 	if err != nil {
 		fmt.Println("No super-admin user found, but database contains other users. Aborting.")
 		os.Exit(1)
@@ -279,6 +285,49 @@ func HashPassword(password string, useOldHash bool, legacySalt string) string {
 // whitespace it is shorter than the server-side minimum (env.MinLengthPassword).
 var ErrSharePasswordTooShort = errors.New("password does not meet the minimum length requirement")
 
+// ErrPasswordTooSimple is returned by ValidatePasswordComplexity when a password is long
+// enough but does not use all four required character classes.
+var ErrPasswordTooSimple = errors.New("password does not meet the complexity requirement")
+
+// ValidatePasswordComplexity checks that a password contains at least one lowercase
+// letter, one uppercase letter, one digit and one character that is none of those. It is
+// applied on top of the minimum length, not instead of it.
+//
+// A share password is the only thing standing between a stored file and anyone who has
+// the link, and the link is routinely forwarded further than the sender intended. Length
+// alone leaves "password" acceptable at the default minimum of 8.
+//
+// The fourth class is defined as "not a letter and not a digit" rather than as a list of
+// permitted punctuation, so a password typed on a non-US keyboard is not rejected for
+// using a symbol that did not occur to us.
+func ValidatePasswordComplexity(password string) error {
+	var hasLower, hasUpper, hasDigit, hasSpecial bool
+	for _, char := range password {
+		if unicode.IsLower(char) {
+			hasLower = true
+		} else if unicode.IsUpper(char) {
+			hasUpper = true
+		} else if unicode.IsDigit(char) {
+			hasDigit = true
+		} else {
+			hasSpecial = true
+		}
+	}
+	if !hasLower {
+		return fmt.Errorf("%w: needs a lowercase letter", ErrPasswordTooSimple)
+	}
+	if !hasUpper {
+		return fmt.Errorf("%w: needs an uppercase letter", ErrPasswordTooSimple)
+	}
+	if !hasDigit {
+		return fmt.Errorf("%w: needs a number", ErrPasswordTooSimple)
+	}
+	if !hasSpecial {
+		return fmt.Errorf("%w: needs a special character", ErrPasswordTooSimple)
+	}
+	return nil
+}
+
 // ValidateSharePassword enforces the server-side minimum length on a password a caller
 // wants to use to protect a share (an uploaded file or a bundle). This is the single
 // choke point every path that sets a share's PasswordHash must call before hashing, so
@@ -312,6 +361,10 @@ func ValidateSharePassword(password string, isPresent bool) (string, error) {
 	minLength := GetEnvironment().MinLengthPassword
 	if len(trimmed) < minLength {
 		return "", fmt.Errorf("%w: minimum length is %d characters", ErrSharePasswordTooShort, minLength)
+	}
+	err := ValidatePasswordComplexity(trimmed)
+	if err != nil {
+		return "", err
 	}
 	return trimmed, nil
 }

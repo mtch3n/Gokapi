@@ -93,7 +93,7 @@ func TestEncryptionSetup(t *testing.T) {
 	os.Unsetenv("GOKAPI_ENCRYPTION_KEY_B64")
 
 	input.EncryptionLevel.Value = "2"
-	input.EncryptionPassword.Value = "testpw12"
+	input.EncryptionPassword.Value = "TestPw12!"
 	formObjects, err = input.toFormObject()
 	test.IsNil(t, err)
 	config, _, _, _, err = toConfiguration(&formObjects)
@@ -134,7 +134,7 @@ func TestEncryptionSetup(t *testing.T) {
 	_, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	configuration.Get().Encryption.Level = 2
-	input.EncryptionPassword.Value = "otherpw12"
+	input.EncryptionPassword.Value = "OtherPw12!"
 	id = testconfiguration.WriteEncryptedFile()
 	_, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)

@@ -2,6 +2,7 @@ package helper
 
 import (
 	"testing"
+	"unicode"
 
 	"github.com/forceu/gokapi/internal/test"
 )
@@ -317,4 +318,33 @@ func TestSanitiseFilename(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateRandomPassword(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		password := GenerateRandomPassword(12)
+		test.IsEqualInt(t, len(password), 12)
+		var hasLower, hasUpper, hasDigit, hasSpecial bool
+		for _, char := range password {
+			if unicode.IsLower(char) {
+				hasLower = true
+			} else if unicode.IsUpper(char) {
+				hasUpper = true
+			} else if unicode.IsDigit(char) {
+				hasDigit = true
+			} else {
+				hasSpecial = true
+			}
+		}
+		test.IsEqualBool(t, hasLower, true)
+		test.IsEqualBool(t, hasUpper, true)
+		test.IsEqualBool(t, hasDigit, true)
+		test.IsEqualBool(t, hasSpecial, true)
+	}
+}
+
+func TestGenerateRandomPasswordMinimumLength(t *testing.T) {
+	// A length below the four required classes cannot satisfy them, so it is
+	// raised rather than returning a password that fails the policy.
+	test.IsEqualInt(t, len(GenerateRandomPassword(2)), 4)
 }

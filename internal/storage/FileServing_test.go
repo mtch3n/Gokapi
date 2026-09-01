@@ -717,7 +717,7 @@ func TestDuplicateFile(t *testing.T) {
 		AllowedDownloads:  5,
 		Expiry:            5,
 		ExpiryTimestamp:   200000,
-		Password:          "password1",
+		Password:          "Password1!",
 		UnlimitedDownload: true,
 		UnlimitedTime:     true,
 	}
@@ -796,7 +796,7 @@ func TestDuplicateFile(t *testing.T) {
 	test.IsNotNil(t, err)
 	test.IsEqualBool(t, errors.Is(err, configuration.ErrSharePasswordTooShort), true)
 
-	uploadRequest.Password = "password2"
+	uploadRequest.Password = "Password2!"
 	newFile, err = DuplicateFile(retrievedFile, ParamExpiry|ParamPassword|ParamDownloads|ParamName, "123", uploadRequest)
 	test.IsNil(t, err)
 	test.IsEqualInt(t, newFile.DownloadCount, 0)
