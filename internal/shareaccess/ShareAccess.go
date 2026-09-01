@@ -290,7 +290,7 @@ func buildMessage(resource Resource, recipient models.ShareRecipient, rawToken, 
 	body.WriteString("Open it here:\r\n")
 	body.WriteString(link + "\r\n\r\n")
 	if resource.ExpiresAt > 0 {
-		fmt.Fprintf(&body, "This link stops working on %s.\r\n",
+		fmt.Fprintf(&body, "This expires on %s.\r\n",
 			time.Unix(resource.ExpiresAt, 0).UTC().Format("2 January 2006 15:04 UTC"))
 	}
 	body.WriteString("The link is personal to this address. Do not forward it.\r\n")
