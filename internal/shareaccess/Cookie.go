@@ -115,31 +115,6 @@ func ReadCookie(r *http.Request, resourceType int, resourceId string) (int, bool
 	return entry.RecipientId, true
 }
 
-// ClearCookiesForRecipient drops every in-memory cookie held by a recipient.
-// Used when a recipient is blocked or deleted, so their live browser session
-// stops working at once rather than merely failing the next grant check.
-func ClearCookiesForRecipient(recipientId int) {
-	cookieMutex.Lock()
-	defer cookieMutex.Unlock()
-	for value, entry := range cookieStore {
-		if entry.RecipientId == recipientId {
-			delete(cookieStore, value)
-		}
-	}
-}
-
-// ClearCookiesForResource drops every cookie issued for a resource, used when
-// the resource is deleted.
-func ClearCookiesForResource(resourceType int, resourceId string) {
-	cookieMutex.Lock()
-	defer cookieMutex.Unlock()
-	for value, entry := range cookieStore {
-		if entry.ResourceType == resourceType && entry.ResourceId == resourceId {
-			delete(cookieStore, value)
-		}
-	}
-}
-
 func isHttps(r *http.Request) bool {
 	if r == nil {
 		return false

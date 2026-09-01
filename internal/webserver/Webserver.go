@@ -1399,9 +1399,10 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	// The filename is withheld until the caller has proved it may have the
 	// file. It is health-adjacent, so leaking it to anyone holding the ID
 	// would defeat the point of restricting the file at all.
+	restrictedNonRecipient := (file.PasswordHash != "" && !isValidPwCookie(r, file)) || !isAuthorisedRecipient
 	name := file.Name
 	contentType := file.ContentType
-	if (file.PasswordHash != "" && !isValidPwCookie(r, file)) || !isAuthorisedRecipient {
+	if restrictedNonRecipient {
 		name = ""
 		contentType = ""
 	}
@@ -1409,18 +1410,27 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"id":   keyId,
 		"name": name,
-		"size": file.Size,
 		// accessMode is the single value a client branches on:
 		// "public", "passcode" or "identity". requiresPassword is kept for
 		// clients written before it existed.
 		"accessMode":               accessMode,
 		"requiresPassword":         file.PasswordHash != "",
 		"isAuthorised":             isAuthorisedRecipient,
-		"expiresAt":                expiresAt,
-		"downloadsRemaining":       downloadsRemaining,
 		"isE2E":                    file.Encryption.IsEndToEndEncrypted,
 		"requiresClientDecryption": file.RequiresClientDecryption(),
 		"contentType":              contentType,
+	}
+	// size, expiresAt and downloadsRemaining are withheld for the same caller
+	// the name and contentType above are withheld from. Without this a caller
+	// that merely holds the ID, but has proved neither a password nor a
+	// recipient grant, still learned everything about the file except its name
+	// - serveFile and the pubApiFolder* handlers already refuse such a caller
+	// outright, and this endpoint must not be the one door on this ID that
+	// leaks the rest.
+	if !restrictedNonRecipient {
+		response["size"] = file.Size
+		response["expiresAt"] = expiresAt
+		response["downloadsRemaining"] = downloadsRemaining
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1510,17 +1520,32 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := r.Header.Get("apikey")
-	if apiKey == "" {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
-		return
-	}
+	if database.IsShareRestricted(models.ShareResourceFileRequest, requestId) {
+		// A request mailed to named recipients supersedes the apikey header: everyone holding
+		// the link has that same header value, so it must not double as identity here, or the
+		// recipient list restricts nothing. recipientFor checks a sharetoken header, a ?token=
+		// query param fallback, or an existing cookie, and on a token exchanges it for a cookie.
+		if recipientFor(w, r, models.ShareResourceFileRequest, requestId) == 0 {
+			// An unthrottled fast 200 next to every other refusal's slow 404 would itself be an
+			// existence oracle for restricted request ids, and token guessing must not be free.
+			ratelimiter.WaitOnFailedId(r)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "{\"valid\":false,\"reason\":\"identity\"}")
+			return
+		}
+	} else {
+		apiKey := r.Header.Get("apikey")
+		if apiKey == "" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+			return
+		}
 
-	// Validate the API key using constant-time comparison
-	if subtle.ConstantTimeCompare([]byte(request.ApiKey), []byte(apiKey)) != 1 {
-		respondPubApiNotFound(w, r)
-		return
+		// Validate the API key using constant-time comparison
+		if subtle.ConstantTimeCompare([]byte(request.ApiKey), []byte(apiKey)) != 1 {
+			respondPubApiNotFound(w, r)
+			return
+		}
 	}
 
 	// Check if the request is expired
@@ -1582,6 +1607,11 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		"chunkSize":      config.ChunkSize,
 		"expiry":         request.Expiry,
 		"receivedFiles":  receivedFiles,
+		// The SPA's chunked guest-upload endpoints (/api/uploadrequest/chunk/*) authenticate
+		// with this key. A mailed recipient never had it, so an authorised caller is handed
+		// exactly what every other link holder already carries in the URL - in the JSON body,
+		// not a URL, so it never lands in access logs.
+		"apikey": request.ApiKey,
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -2018,6 +2048,7 @@ func writeFolderPwCookie(w http.ResponseWriter, bundle models.FileBundle) {
 		Value:    downloadPasswordToken.Generate("bundle:" + bundle.Id),
 		Expires:  time.Now().Add(5 * time.Minute),
 		HttpOnly: true,
+		Secure:   configuration.UsesHttps(),
 		SameSite: http.SameSiteStrictMode,
 		Path:     "/",
 	})
@@ -2211,6 +2242,7 @@ func writeFilePwCookie(w http.ResponseWriter, file models.File) {
 		Value:    downloadPasswordToken.Generate(file.Id),
 		Expires:  time.Now().Add(5 * time.Minute),
 		HttpOnly: true,
+		Secure:   configuration.UsesHttps(),
 		SameSite: http.SameSiteStrictMode,
 		Path:     "/",
 	})
@@ -2284,11 +2316,15 @@ type publicUploadView struct {
 // Public, unauthenticated endpoint that mails a recipient a fresh access link
 // for one resource, for when the first one was lost.
 //
-// Every outcome that is not a successful send returns the SAME response. An
+// Every outcome returns the SAME response, including a cooldown hit. An
 // unknown address, an address with no grant on this resource, a blocked
-// recipient and an unrestricted resource must be indistinguishable, or this
-// endpoint becomes a way to ask "was this person sent this file", which is
-// exactly the fact the feature exists to protect.
+// recipient, an unrestricted resource and a too-recent previous send must all
+// be indistinguishable, or this endpoint becomes a way to ask "was this
+// person sent this file" - exactly the fact the feature exists to protect.
+// The cooldown is only ever reached after the grant check passes, so
+// surfacing it as a distinct response (as a previous version of this handler
+// did, with a 429) would itself leak recipient status across two requests. A
+// genuine double-click is left for the client to debounce.
 func pubApiShareResend(w http.ResponseWriter, r *http.Request) {
 	addNoCacheHeader(w)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
@@ -2298,6 +2334,11 @@ func pubApiShareResend(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"error":"method not allowed"}`)
 		return
 	}
+
+	// This handler can trigger a mail send and retire a recipient's live link,
+	// so - like every other /pubapi/* path - an anonymous caller must not be
+	// able to hammer it without limit.
+	ratelimiter.WaitOnFailedId(r)
 
 	var request struct {
 		ResourceType int    `json:"resourceType"`
@@ -2329,17 +2370,8 @@ func pubApiShareResend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := shareaccess.ResendLink(resource, request.Email,
+	_ = shareaccess.ResendLink(resource, request.Email,
 		configuration.Get().ServerUrl, logging.GetIpAddress(r))
-	// The cooldown is the one refusal worth distinguishing: it is not a secret,
-	// the caller has already proved nothing either way, and without it a
-	// recipient clicking twice would be told the send succeeded while no mail
-	// arrives.
-	if errors.Is(err, shareaccess.ErrCooldown) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, `{"error":"A link was sent recently. Please wait a moment before asking for another."}`)
-		return
-	}
 	respondAccepted()
 }
 

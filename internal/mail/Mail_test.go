@@ -547,12 +547,19 @@ func TestLogConnectorDoesNotLogTheBody(t *testing.T) {
 	test.IsNil(t, err)
 
 	msg := validMessage()
-	msg.Text = "Open it here:\r\nhttps://x.test/s/abc?token=SUPER-SECRET-TOKEN\r\n"
+	// Current mailed links carry the token in a fragment (#token=), but a legacy ?token=
+	// link (issued up to 30 days before the fragment form shipped) can still be in a body,
+	// so both forms must be proven not to leak.
+	msg.Text = "Open it here:\r\nhttps://x.test/s/abc#token=SUPER-SECRET-TOKEN\r\n" +
+		"Legacy link: https://x.test/s/abc?token=LEGACY-SECRET-TOKEN\r\n"
 	test.IsNil(t, sender.Send(context.Background(), msg))
 
 	logged := captured.String()
 	if strings.Contains(logged, "SUPER-SECRET-TOKEN") {
 		t.Errorf("the access token reached the log: %s", logged)
+	}
+	if strings.Contains(logged, "LEGACY-SECRET-TOKEN") {
+		t.Errorf("the legacy access token reached the log: %s", logged)
 	}
 	// The recipient and subject are still recorded, which is what makes the
 	// connector useful for proving a flow reached the send.

@@ -3,6 +3,7 @@ package ratelimiter
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -65,15 +66,60 @@ func WaitOnDownloadPassword(ip string) {
 }
 
 // AllowUnseal reports whether an unseal attempt from ip is allowed right now, without blocking.
-// Twenty attempts without limiting, thereafter one allowed every 2 seconds; unlike
-// WaitOnDownloadPassword this never blocks the caller - POST /api/unseal drives scrypt with
-// N=2^20 (~1 GiB RAM, 1-2s CPU) per attempt, so a caller that exceeds the burst must be turned
-// away with 429 immediately rather than parked on WaitN, which would hold the goroutine and
-// connection open for no benefit: an attacker can simply open more connections instead of waiting
-// on one. See also the process-wide derivation semaphore in package encryption, which bounds
-// actual scrypt concurrency regardless of how many IPs or connections are used.
+// Twenty attempts without limiting, thereafter one allowed every 2 seconds (rate.Limit(0.5), i.e.
+// 0.5 tokens/sec - passing 1 here would refill one token per second, twice the documented and
+// intended rate); unlike WaitOnDownloadPassword this never blocks the caller - POST /api/unseal
+// drives scrypt with N=2^20 (~1 GiB RAM, 1-2s CPU) per attempt, so a caller that exceeds the burst
+// must be turned away with 429 immediately rather than parked on WaitN, which would hold the
+// goroutine and connection open for no benefit: an attacker can simply open more connections
+// instead of waiting on one. See also the process-wide derivation semaphore in package encryption,
+// which bounds actual scrypt concurrency regardless of how many IPs or connections are used.
 func AllowUnseal(ip string) bool {
-	return failedUnsealLimiter.Get(ip, 1, 20).Allow()
+	return failedUnsealLimiter.Get(ip, rate.Limit(0.5), 20).Allow()
+}
+
+// unsealFailureMu guards unsealFailureCounts below.
+var unsealFailureMu sync.Mutex
+
+// unsealFailureCounts tracks the number of consecutive failed unseal attempts (i.e. attempts that
+// actually reached the passphrase/checksum comparison in encryption.Unseal and failed it) per IP,
+// purely for the high-severity brute-force alert raised by RecordUnsealFailure below. This is
+// deliberately independent of failedUnsealLimiter above: that limiter already turns away excess
+// *rate* with a 429 on its own, whereas this counter exists only to make an ongoing attack visible
+// in the logs - it never blocks, throttles, or disables anything itself. In particular it is never
+// used to lock out the endpoint: an attacker could otherwise weaponise such a lockout to deny the
+// real admin their own recovery path.
+var unsealFailureCounts = make(map[string]int)
+
+// UnsealAlertThreshold is the number of consecutive failed unseal attempts from a single IP that
+// triggers a high-severity alert log line (see RecordUnsealFailure). High enough that a few
+// genuine typos from an admin don't trigger it, low enough to surface a brute-force attempt
+// quickly; the alert repeats every further UnsealAlertThreshold failures for as long as the
+// attempt continues.
+const UnsealAlertThreshold = 10
+
+// RecordUnsealFailure records a failed unseal attempt (one that reached and failed the actual
+// password check) from ip, and logs a high-severity, hard-to-miss alert line the moment its
+// consecutive failure count reaches a multiple of UnsealAlertThreshold. This is alerting only -
+// see the package comment on unsealFailureCounts for why it must never lock the endpoint out.
+func RecordUnsealFailure(ip string) {
+	unsealFailureMu.Lock()
+	unsealFailureCounts[ip]++
+	count := unsealFailureCounts[ip]
+	unsealFailureMu.Unlock()
+
+	if count%UnsealAlertThreshold == 0 {
+		log.Printf("SECURITY ALERT: %d consecutive failed POST /api/unseal attempts from IP %s - possible brute-force attempt against the master encryption key", count, ip)
+	}
+}
+
+// RecordUnsealSuccess clears ip's consecutive failed-unseal counter after a successful unseal, so
+// a later, unrelated run of failures from the same IP (e.g. after the instance is resealed and
+// re-unsealed) starts counting from zero again.
+func RecordUnsealSuccess(ip string) {
+	unsealFailureMu.Lock()
+	delete(unsealFailureCounts, ip)
+	unsealFailureMu.Unlock()
 }
 
 // WaitOnFailedId blocks the current goroutine until the rate limiter allows a request

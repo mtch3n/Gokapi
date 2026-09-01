@@ -3629,10 +3629,13 @@ func TestChunkCompleteBundleOwnershipRejected(t *testing.T) {
 	}
 }
 
-// sealedStatusResponse mirrors apiSealStatus's JSON shape.
+// sealedStatusResponse mirrors apiSealStatus's JSON shape. Deliberately has no EncryptionLevel
+// field: that used to be exposed to any unauthenticated caller, letting them fingerprint the
+// instance (e.g. confirming Level 4 - and therefore an anonymously reachable /api/unseal - is
+// worth attacking) for no legitimate benefit to the SPA's "should I show an unseal prompt"
+// decision, which only needs Sealed.
 type sealedStatusResponse struct {
-	Sealed          bool `json:"sealed"`
-	EncryptionLevel int  `json:"encryptionLevel"`
+	Sealed bool `json:"sealed"`
 }
 
 func getSealStatus(t *testing.T) (*httptest.ResponseRecorder, sealedStatusResponse) {
@@ -3649,7 +3652,12 @@ func postUnseal(password string) (*httptest.ResponseRecorder, *http.Request) {
 	body, _ := json.Marshal(struct {
 		Password string `json:"password"`
 	}{Password: password})
-	return test.GetRecorder("POST", "/api/unseal", nil, nil, bytes.NewReader(body))
+	w, r := test.GetRecorder("POST", "/api/unseal", nil, nil, bytes.NewReader(body))
+	// apiUnseal only accepts a direct loopback connection (see isDirectLoopbackRequest); a real
+	// on-host caller reaches the handler over 127.0.0.1 with no forwarding header. httptest sets a
+	// non-loopback RemoteAddr by default, so set it explicitly here for the happy path.
+	r.RemoteAddr = "127.0.0.1:34567"
+	return w, r
 }
 
 // sealAtFullEncryptionInput seals the instance at FullEncryptionInput with a real,
@@ -3687,8 +3695,9 @@ func sealAtFullEncryptionInput(t *testing.T, password, saltSuffix string) {
 
 // TestApiSealStatus is the failing-first test for GET /api/seal-status: it must be reachable
 // with no apikey header at all (an admin cannot be authenticated before the instance is
-// unsealed, in the general case), and it must report the true sealed state and the configured
-// encryption level - nothing else.
+// unsealed, in the general case), and it must report only the true sealed state - not the
+// configured encryption level (see L5): that field has no legitimate use for an unauthenticated
+// caller and only helps an attacker fingerprint the instance.
 func TestApiSealStatus(t *testing.T) {
 	previousLevel := configuration.Get().Encryption.Level
 	t.Cleanup(func() { configuration.Get().Encryption.Level = previousLevel })
@@ -3697,14 +3706,107 @@ func TestApiSealStatus(t *testing.T) {
 	w, result := getSealStatus(t)
 	test.IsEqualInt(t, w.Code, 200)
 	test.IsEqualBool(t, result.Sealed, false)
-	test.IsEqualInt(t, result.EncryptionLevel, encryption.NoEncryption)
+	test.IsEqualBool(t, strings.Contains(strings.ToLower(w.Body.String()), "encryptionlevel"), false)
 
 	configuration.Get().Encryption.Level = encryption.FullEncryptionInput
 	sealAtFullEncryptionInput(t, "seal-status-password", "sealstatus")
 	w, result = getSealStatus(t)
 	test.IsEqualInt(t, w.Code, 200)
 	test.IsEqualBool(t, result.Sealed, true)
-	test.IsEqualInt(t, result.EncryptionLevel, encryption.FullEncryptionInput)
+	test.IsEqualBool(t, strings.Contains(strings.ToLower(w.Body.String()), "encryptionlevel"), false)
+}
+
+// TestApiUnsealRejectsProxiedRequests is the failing-first regression test for the host-local gate
+// on POST /api/unseal (C1): the master-key passphrase must never be accepted from a request that
+// traversed the reverse proxy chain. Every proxied request carries an X-Forwarded-For header (Caddy
+// and ingress-nginx both append it), and a request from a public peer with no forwarding header must
+// also be refused; both get a plain 404 before the rate limiter, the seal check, or any body parsing,
+// so the endpoint is neither usable nor discoverable from the public internet. A host-local request
+// with no forwarding header - including one whose peer is the Docker bridge gateway, which is how an
+// on-VM caller actually reaches the loopback-published container port - must pass the gate.
+func TestApiUnsealRejectsProxiedRequests(t *testing.T) {
+	const password = "loopback-gate-password"
+	sealAtFullEncryptionInput(t, password, "loopback-gate")
+
+	// Sealed, so a request that reaches the real logic with the correct password would unseal it;
+	// we assert these rejected requests do NOT, i.e. the gate short-circuits before any derivation.
+	_, result := getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, true)
+
+	// A request with an X-Forwarded-For header, even from a loopback peer, is treated as proxied.
+	w, r := postUnseal(password)
+	r.Header.Set("X-Forwarded-For", "203.0.113.7")
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, http.StatusNotFound)
+
+	// A request from a public peer with no forwarding header is refused too (the loopback-published
+	// port makes this unreachable in practice, but the gate must not rely on that alone).
+	w, r = postUnseal(password)
+	r.RemoteAddr = "203.0.113.7:5000"
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, http.StatusNotFound)
+
+	// The correct password on both rejected paths must NOT have unsealed the instance.
+	_, result = getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, true)
+
+	// The real production path: an on-VM caller hitting the loopback-published container port arrives
+	// at the app from the Docker bridge gateway (a private address) with no forwarding header. This
+	// must pass the gate and unseal correctly.
+	w, r = postUnseal(password)
+	r.RemoteAddr = "172.18.0.1:41000"
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	_, result = getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, false)
+}
+
+// TestApiUnsealNotSealedIsRejectedWithoutLogging is the failing-first regression test for the
+// audit-forgery bug in apiUnseal (C1a): previously, apiUnseal never checked encryption.IsSealed()
+// before calling encryption.Unseal, and encryption.Unseal returns nil (success) for an
+// already-unsealed instance regardless of the password given - so ANY caller, with ANY password
+// (including an empty one), got a 200 OK against an already-unsealed instance, and that 200 was
+// then audited as "Instance unsealed successfully by IP x". That let an anonymous caller forge a
+// successful-unseal audit trail entry at will, without ever supplying a correct password.
+//
+// After the fix, hitting POST /api/unseal while not sealed must return 409 and must not write any
+// unseal-related log entry at all, successful or failed - since no password was ever compared to
+// anything, it must not be recorded as an attempt.
+func TestApiUnsealNotSealedIsRejectedWithoutLogging(t *testing.T) {
+	previousLevel := configuration.Get().Encryption.Level
+	t.Cleanup(func() { configuration.Get().Encryption.Level = previousLevel })
+	configuration.Get().Encryption.Level = encryption.NoEncryption
+	test.IsEqualBool(t, encryption.IsSealed(), false)
+
+	// Drain any lagging async log goroutines from an earlier test BEFORE repointing the global
+	// log path to tempDir: LogUnsealAttempt writes asynchronously and logPath is a package global,
+	// so without this a prior test's write could land in tempDir/log.txt and pollute the assertion
+	// below (the failure this test would otherwise flake on under the -parallel gate).
+	time.Sleep(500 * time.Millisecond)
+
+	tempDir := t.TempDir()
+	logging.Init(tempDir)
+
+	w, r := postUnseal("totally the wrong password, or even the right one - it must not matter")
+	Process(w, r)
+
+	test.IsEqualInt(t, w.Code, http.StatusConflict)
+
+	// Give the (non-blocking) audit/text logging goroutines time to run, exactly as the existing
+	// TestLogsAudit does, then confirm nothing whatsoever was written about this request.
+	time.Sleep(500 * time.Millisecond)
+	logContent, exists := logging.GetAll()
+	if exists {
+		test.IsEqualBool(t, strings.Contains(strings.ToLower(logContent), "unseal"), false)
+	}
+
+	// Restore logging to the test data directory to avoid panics in subsequent tests when
+	// trying to write to a temp directory that's been deleted - same rationale as TestLogsAudit.
+	testDataDir := os.Getenv("GOKAPI_DATA_DIR")
+	if testDataDir == "" {
+		testDataDir = "test/data"
+	}
+	logging.Init(testDataDir)
 }
 
 // TestApiUnsealCorrectAndIncorrectPassword is the failing-first test for POST /api/unseal: a
@@ -3770,7 +3872,11 @@ func TestApiUnsealCorrectAndIncorrectPassword(t *testing.T) {
 // (see TestApiUnsealCorrectAndIncorrectPassword for that); only the per-IP throttle in front of
 // it is under test. Real rate limiting is disabled for this whole test binary (see TestMain), so
 // it is switched on only for the duration of this test, against an IP address no other test in
-// this file uses, so as not to disturb - or be disturbed by - shared limiter state.
+// this file uses, so as not to disturb - or be disturbed by - shared limiter state. That address
+// must itself still be loopback (127.0.0.0/8): isDirectLoopbackRequest (checked before the rate
+// limiter, see apiUnseal) rejects any non-loopback RemoteAddr with a plain 404 regardless of the
+// limiter's state, so a distinguishing key can only come from a different loopback address (here
+// 127.0.0.2, vs. postUnseal's default 127.0.0.1) - not a public one.
 func TestApiUnsealRateLimitReturns429(t *testing.T) {
 	ratelimiter.SetUnitTestMode(false)
 	t.Cleanup(func() { ratelimiter.SetUnitTestMode(true) })
@@ -3780,7 +3886,7 @@ func TestApiUnsealRateLimitReturns429(t *testing.T) {
 
 	newRequest := func() (*httptest.ResponseRecorder, *http.Request) {
 		w, r := postUnseal("")
-		r.RemoteAddr = "203.0.113.77:54321"
+		r.RemoteAddr = "127.0.0.2:54321"
 		return w, r
 	}
 

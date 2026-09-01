@@ -5,6 +5,8 @@ package webserver
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -20,6 +22,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/helper"
+	gokapimail "github.com/forceu/gokapi/internal/mail"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
@@ -1229,6 +1232,12 @@ func TestPublicApiUploadRequestValid(t *testing.T) {
 	if _, ok := response["chunkSize"]; !ok {
 		t.Errorf("Missing chunkSize field")
 	}
+	// The chunked guest-upload endpoints authenticate with this key, and an
+	// authorised caller needs it handed back the same way any other link
+	// holder already has it in the URL.
+	if apiKey, ok := response["apikey"]; !ok || apiKey != "testkey123" {
+		t.Errorf("Expected apikey 'testkey123', got %v", apiKey)
+	}
 }
 
 // TestPublicApiUploadRequestKeyInQueryStringRejected tests that GET /pubapi/uploadrequest
@@ -1361,6 +1370,527 @@ func TestPublicApiUploadRequestWrongKey(t *testing.T) {
 
 	if error, ok := response["error"]; !ok || error != "not found" {
 		t.Errorf("Expected error 'not found', got %v", error)
+	}
+}
+
+// uploadRequestShareLoginTokenHash hashes a raw token the same way
+// shareaccess.hashToken does, so a test can plant a login token directly in
+// the database without a mail round-trip. hashToken is unexported, so the
+// hashing is duplicated here rather than exposed just for tests.
+func uploadRequestShareLoginTokenHash(rawToken string) string {
+	sum := sha256.Sum256([]byte(rawToken))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestPublicApiUploadRequestRestrictedNoCredential is a regression test for the bug this change
+// fixes: a file request mailed to named recipients (shareaccess.GrantAccess) produced a link of
+// the form /r/<id>?token=<token>, but pubApiUploadRequest never looked at the token or the
+// recipient list at all, so a mailed recipient landed on "link is not valid". This asserts that a
+// restricted request refuses an anonymous caller holding neither a token nor a cookie.
+func TestPublicApiUploadRequestRestrictedNoCredential(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq1",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Restricted Upload Request",
+		ApiKey:   "restrictedkey1",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-none@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := response["valid"]; !ok || valid != false {
+		t.Errorf("Expected valid false, got %v", valid)
+	}
+	if reason, ok := response["reason"]; !ok || reason != "identity" {
+		t.Errorf("Expected reason 'identity', got %v", reason)
+	}
+}
+
+// TestPublicApiUploadRequestRestrictedApiKeyOnlyDenied asserts that the apikey header, which is
+// enough to reach an unrestricted request, does not unlock one that has been restricted to named
+// recipients - the recipient list supersedes the link credential, the same rule already applied
+// to identity-restricted files.
+func TestPublicApiUploadRequestRestrictedApiKeyOnlyDenied(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq2",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Restricted Upload Request",
+		ApiKey:   "restrictedkey2",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-apikey@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id="+testRequest.Id, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.Header.Set("apikey", "restrictedkey2")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := response["valid"]; !ok || valid != false {
+		t.Errorf("Expected valid false, got %v", valid)
+	}
+	if reason, ok := response["reason"]; !ok || reason != "identity" {
+		t.Errorf("Expected reason 'identity', got %v", reason)
+	}
+}
+
+// TestPublicApiUploadRequestRestrictedValidToken covers the ?token= query-string fallback: the
+// mailed link itself now carries the token in the URL fragment (never sent to the server), but
+// links mailed before that change, and any direct (non-JS) request, still present it in the
+// query string, so recipientFor must keep accepting it. It is exchanged for an sr_<id> cookie
+// (shareaccess.WriteCookie via recipientFor), the response reports valid:true, and it carries
+// the request's apikey so the SPA's chunked guest-upload endpoints (/api/uploadrequest/chunk/*)
+// can authenticate without ever having had the header credential of their own.
+func TestPublicApiUploadRequestRestrictedValidToken(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq3",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Restricted Upload Request",
+		ApiKey:   "restrictedkey3",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-token@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	rawToken := "raw-uploadreq-token-valid"
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    uploadRequestShareLoginTokenHash(rawToken),
+		RecipientId:  recipientId,
+		ResourceType: models.ShareResourceFileRequest,
+		ResourceId:   testRequest.Id,
+		CreatedAt:    time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := response["valid"]; !ok || valid != true {
+		t.Errorf("Expected valid true, got %v", valid)
+	}
+	if apiKey, ok := response["apikey"]; !ok || apiKey != "restrictedkey3" {
+		t.Errorf("Expected apikey 'restrictedkey3', got %v", apiKey)
+	}
+
+	expectedCookieName := shareaccess.CookieName(models.ShareResourceFileRequest, testRequest.Id)
+	found := false
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == expectedCookieName {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Expected Set-Cookie for %s, got cookies %v", expectedCookieName, resp.Cookies())
+	}
+}
+
+// TestPublicApiUploadRequestRestrictedSharetokenHeader is the primary path: the mailed link
+// carries the token in the URL fragment, which the server never sees, so the SPA reads it out
+// client-side and forwards it as the sharetoken request header instead. This asserts that header
+// alone (no ?token= query param at all) is enough to authorise, exchanges for an sr_<id> cookie
+// the same way the query-string fallback does, and the response carries the apikey field.
+func TestPublicApiUploadRequestRestrictedSharetokenHeader(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq5",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Restricted Upload Request",
+		ApiKey:   "restrictedkey5",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-sharetoken@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	rawToken := "raw-uploadreq-token-sharetoken-header"
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    uploadRequestShareLoginTokenHash(rawToken),
+		RecipientId:  recipientId,
+		ResourceType: models.ShareResourceFileRequest,
+		ResourceId:   testRequest.Id,
+		CreatedAt:    time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id="+testRequest.Id, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.Header.Set("sharetoken", rawToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := response["valid"]; !ok || valid != true {
+		t.Errorf("Expected valid true, got %v", valid)
+	}
+	if apiKey, ok := response["apikey"]; !ok || apiKey != "restrictedkey5" {
+		t.Errorf("Expected apikey 'restrictedkey5', got %v", apiKey)
+	}
+
+	expectedCookieName := shareaccess.CookieName(models.ShareResourceFileRequest, testRequest.Id)
+	found := false
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == expectedCookieName {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Expected Set-Cookie for %s, got cookies %v", expectedCookieName, resp.Cookies())
+	}
+}
+
+// TestPublicApiUploadRequestRestrictedTokenWrongResource asserts a token issued for a different
+// resource is refused rather than accepted, the same binding ValidateToken already enforces: a
+// link mailed for one file request must not double as a credential for another.
+func TestPublicApiUploadRequestRestrictedTokenWrongResource(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq4",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Restricted Upload Request",
+		ApiKey:   "restrictedkey4",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-wrongres@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	rawToken := "raw-uploadreq-token-wrong-resource"
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    uploadRequestShareLoginTokenHash(rawToken),
+		RecipientId:  recipientId,
+		ResourceType: models.ShareResourceFileRequest,
+		ResourceId:   "some-other-request-id",
+		CreatedAt:    time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := response["valid"]; !ok || valid != false {
+		t.Errorf("Expected valid false, got %v", valid)
+	}
+	if reason, ok := response["reason"]; !ok || reason != "identity" {
+		t.Errorf("Expected reason 'identity', got %v", reason)
+	}
+}
+
+// TestPublicApiUploadRequestRestrictedIdentityLeakPin pins the identity refusal body to exactly
+// {"valid","reason"}: today it is a string literal, but this fails loudly if a future refactor to
+// json.Encode ever adds name/notes/receivedFiles/apikey to a response an anonymous caller can see.
+func TestPublicApiUploadRequestRestrictedIdentityLeakPin(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq6",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Restricted Upload Request",
+		ApiKey:   "restrictedkey6",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-leakpin@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var response map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if len(response) != 2 {
+		t.Errorf("Expected identity refusal body to have exactly 2 keys, got %v", response)
+	}
+	if _, ok := response["valid"]; !ok {
+		t.Errorf("Expected key 'valid', got %v", response)
+	}
+	if _, ok := response["reason"]; !ok {
+		t.Errorf("Expected key 'reason', got %v", response)
+	}
+}
+
+// TestPublicApiUploadRequestRestrictedCookieOnly asserts the sr_ cookie minted by an earlier
+// token exchange is sufficient on its own: a second request carrying only the cookie, with no
+// token and no apikey, must still authorise, the same way the SPA revisits the request page after
+// the fragment token has already been exchanged once.
+func TestPublicApiUploadRequestRestrictedCookieOnly(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq7",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Restricted Upload Request",
+		ApiKey:   "restrictedkey7",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-cookieonly@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	rawToken := "raw-uploadreq-token-cookie-only"
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    uploadRequestShareLoginTokenHash(rawToken),
+		RecipientId:  recipientId,
+		ResourceType: models.ShareResourceFileRequest,
+		ResourceId:   testRequest.Id,
+		CreatedAt:    time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	client := &http.Client{}
+	firstResp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	if err != nil {
+		t.Fatalf("Failed to make first request: %v", err)
+	}
+	defer firstResp.Body.Close()
+
+	expectedCookieName := shareaccess.CookieName(models.ShareResourceFileRequest, testRequest.Id)
+	var cookie *http.Cookie
+	for _, c := range firstResp.Cookies() {
+		if c.Name == expectedCookieName {
+			cookie = c
+			break
+		}
+	}
+	if cookie == nil {
+		t.Fatalf("Expected Set-Cookie for %s, got cookies %v", expectedCookieName, firstResp.Cookies())
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id="+testRequest.Id, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.AddCookie(cookie)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to make second request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := response["valid"]; !ok || valid != true {
+		t.Errorf("Expected valid true from cookie alone, got %v", response)
+	}
+}
+
+// TestPublicApiUploadRequestRestrictedExpiredIdentityOrdering pins the gate ordering the frontend
+// relies on: for a request that is both restricted and expired, an anonymous caller must still see
+// reason "identity" rather than "expired" - the identity check runs first, so an unauthorised
+// caller learns nothing about the request's expiry. A caller holding a valid token clears the
+// identity gate and then sees "expired" as normal.
+func TestPublicApiUploadRequestRestrictedExpiredIdentityOrdering(t *testing.T) {
+	t.Parallel()
+	testRequest := models.FileRequest{
+		Id:       "restricteduploadreq8",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(-1 * time.Hour).Unix(), // Already expired
+		Name:     "Restricted Expired Upload Request",
+		ApiKey:   "restrictedkey8",
+		Notes:    "Test notes",
+	}
+	database.SaveFileRequest(testRequest)
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "uploadrecipient-expiredorder@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFileRequest, testRequest.Id, []int{recipientId}, 5, 0)
+	rawToken := "raw-uploadreq-token-expired-order"
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    uploadRequestShareLoginTokenHash(rawToken),
+		RecipientId:  recipientId,
+		ResourceType: models.ShareResourceFileRequest,
+		ResourceId:   testRequest.Id,
+		CreatedAt:    time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFileRequest, testRequest.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	noCredResp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer noCredResp.Body.Close()
+
+	var noCredResponse map[string]interface{}
+	if err := json.NewDecoder(noCredResp.Body).Decode(&noCredResponse); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := noCredResponse["valid"]; !ok || valid != false {
+		t.Errorf("Expected valid false, got %v", noCredResponse)
+	}
+	if reason, ok := noCredResponse["reason"]; !ok || reason != "identity" {
+		t.Errorf("Expected reason 'identity' for an anonymous caller on a restricted+expired request, got %v", noCredResponse)
+	}
+
+	tokenResp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer tokenResp.Body.Close()
+
+	var tokenResponse map[string]interface{}
+	if err := json.NewDecoder(tokenResp.Body).Decode(&tokenResponse); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+	if valid, ok := tokenResponse["valid"]; !ok || valid != false {
+		t.Errorf("Expected valid false, got %v", tokenResponse)
+	}
+	if reason, ok := tokenResponse["reason"]; !ok || reason != "expired" {
+		t.Errorf("Expected reason 'expired' once the identity gate is cleared, got %v", tokenResponse)
 	}
 }
 
@@ -1596,6 +2126,137 @@ func TestSingleFileCascadesRestrictedBundleDeniesAnonymous(t *testing.T) {
 	}
 	if isAuthorised, ok := response["isAuthorised"]; !ok || isAuthorised != false {
 		t.Errorf("Expected isAuthorised false, got %v", isAuthorised)
+	}
+}
+
+// TestPublicApiFileMetadataHidesSizeExpiryForNonRecipient is a regression test: an
+// identity-restricted file withheld its name and contentType from a non-recipient, but still
+// returned size, expiresAt and downloadsRemaining with a 200 - the exact information the
+// 404-for-non-recipients convention used by serveFile and the pubApiFolder* handlers exists to
+// deny. An anonymous caller holding only the file id must not learn any of these three fields.
+func TestPublicApiFileMetadataHidesSizeExpiryForNonRecipient(t *testing.T) {
+	t.Parallel()
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "metadata-leak-restricted.txt",
+		Size:               "42 B",
+		SizeBytes:          42,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "metadata-leak-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + fileId)
+	if err != nil {
+		t.Fatalf("Failed to request file metadata: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if isAuthorised, ok := response["isAuthorised"]; !ok || isAuthorised != false {
+		t.Errorf("Expected isAuthorised false, got %v", isAuthorised)
+	}
+	for _, field := range []string{"size", "expiresAt", "downloadsRemaining"} {
+		if value, present := response[field]; present {
+			t.Errorf("restricted file leaked %q to a non-recipient: %v", field, value)
+		}
+	}
+}
+
+// TestPublicApiShareResendCooldownIsIndistinguishableFromNonRecipient is a regression test for
+// the resend endpoint being usable as a recipient-membership oracle: ErrCooldown was only
+// reachable once the grant check inside shareaccess.ResendLink had already passed, so a caller
+// hitting the endpoint twice in a row could tell a real recipient (200, then a distinct 429) from
+// a stranger (200, then 200 again) purely from the second response. Every outcome, including a
+// cooldown hit, must now produce the exact same status and body.
+func TestPublicApiShareResendCooldownIsIndistinguishableFromNonRecipient(t *testing.T) {
+	test.IsNil(t, gokapimail.InitWithConfig(gokapimail.Config{Provider: gokapimail.ProviderLog, TimeoutSeconds: 20}))
+	t.Cleanup(gokapimail.ResetForTesting)
+
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "resend-oracle.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "resend-oracle-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	postResend := func(email string) (int, string) {
+		payload, err := json.Marshal(map[string]interface{}{
+			"resourceType": models.ShareResourceFile,
+			"resourceId":   fileId,
+			"email":        email,
+		})
+		test.IsNil(t, err)
+		resp, err := http.Post("http://127.0.0.1:53843/pubapi/share/resend",
+			"application/json", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("resend request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	// First call for the real recipient succeeds and mints a link; the second, sent
+	// immediately after, is the one a previous version of this handler answered with a
+	// distinct 429 because it hit the cooldown.
+	recipientStatus1, recipientBody1 := postResend("resend-oracle-recipient@example.com")
+	recipientStatus2, recipientBody2 := postResend("resend-oracle-recipient@example.com")
+
+	strangerStatus1, strangerBody1 := postResend("resend-oracle-stranger@example.com")
+	strangerStatus2, strangerBody2 := postResend("resend-oracle-stranger@example.com")
+
+	if recipientStatus1 != strangerStatus1 || recipientBody1 != strangerBody1 {
+		t.Errorf("first call distinguishes recipient from stranger: recipient=(%d,%s) stranger=(%d,%s)",
+			recipientStatus1, recipientBody1, strangerStatus1, strangerBody1)
+	}
+	if recipientStatus2 != strangerStatus2 || recipientBody2 != strangerBody2 {
+		t.Errorf("second call (cooldown for the recipient) distinguishes recipient from stranger: recipient=(%d,%s) stranger=(%d,%s)",
+			recipientStatus2, recipientBody2, strangerStatus2, strangerBody2)
+	}
+	if recipientStatus2 != http.StatusOK {
+		t.Errorf("expected the uniform OK response even on a cooldown hit, got %d: %s", recipientStatus2, recipientBody2)
 	}
 }
 

@@ -948,6 +948,9 @@ func (p *paramChunkComplete) ProcessParameter(r *http.Request) error {
 	}
 
 	p.FileName = helper.SanitiseFilename(p.FileName)
+	if p.FileName == "" {
+		return errors.New("empty or invalid filename provided")
+	}
 	p.ContentType = helper.SanitiseContentType(p.ContentType)
 	p.FileHeader = chunking.FileHeader{
 		Filename:    p.FileName,
@@ -993,6 +996,9 @@ func (p *paramChunkUploadRequestComplete) ProcessParameter(r *http.Request) erro
 	p.WebRequest = r
 	p.ContentType = helper.SanitiseContentType(p.ContentType)
 	p.FileName = helper.SanitiseFilename(p.FileName)
+	if p.FileName == "" {
+		return errors.New("empty or invalid filename provided")
+	}
 	p.FileHeader = chunking.FileHeader{
 		Filename:    p.FileName,
 		ContentType: p.ContentType,

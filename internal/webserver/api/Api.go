@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -476,41 +477,102 @@ func apiAuthInfo(w http.ResponseWriter, _ requestParser, _ models.User, _ models
 }
 
 // apiSealStatus reports whether the instance's master encryption key is currently loaded into
-// memory (see encryption.IsSealed) and which encryption level is configured. Unauthenticated
-// like /auth/info above: the SPA needs this to decide whether to show an unseal prompt before an
-// admin can even log in, in the general case. Leaks nothing beyond the two fields needed for
-// that decision.
+// memory (see encryption.IsSealed). Unauthenticated like /auth/info above: the SPA needs this to
+// decide whether to show an unseal prompt before an admin can even log in, in the general case.
+// Deliberately does NOT report the configured encryption level: that has no legitimate use for an
+// unauthenticated caller and only helps an attacker fingerprint the instance (e.g. confirming
+// Level 4 - full server-side encryption with an anonymously reachable /api/unseal - is worth
+// attacking). An authenticated caller that needs the level already has /api/config/info or the
+// admin API for that.
 func apiSealStatus(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
 	type sealStatusResponse struct {
-		Sealed          bool `json:"sealed"`
-		EncryptionLevel int  `json:"encryptionLevel"`
+		Sealed bool `json:"sealed"`
 	}
 	result, err := json.Marshal(sealStatusResponse{
-		Sealed:          encryption.IsSealed(),
-		EncryptionLevel: configuration.Get().Encryption.Level,
+		Sealed: encryption.IsSealed(),
 	})
 	helper.Check(err)
 	_, _ = w.Write(result)
 }
 
+// isHostLocalUnsealRequest reports whether the request reached the server directly, without passing
+// through the reverse proxy in front of it. It deliberately does NOT use logging.GetIpAddress /
+// GOKAPI_TRUSTED_PROXIES: it inspects the raw transport peer and the raw presence of forwarding
+// headers, so it cannot be spoofed by a client-supplied X-Forwarded-For. Caddy and ingress-nginx
+// both always append X-Forwarded-For, so the presence of either forwarding header is enough to
+// reject a proxied request; a caller reaching the app directly (on the VM, or through an SSH tunnel
+// to the loopback-published port) sends neither.
+//
+// The peer is required to be loopback or a private address rather than loopback alone: the app runs
+// in a container whose port is published on 127.0.0.1 only, and Docker's userland proxy rewrites
+// the source to the bridge gateway (a private address), so an on-host caller never actually presents
+// a loopback peer to the app. The real security boundary is that the port is not reachable off-host
+// AND every proxied path adds a forwarding header, so a request with neither a forwarding header nor
+// a public peer must have originated on the host itself. Used to fence off the master-key unseal
+// endpoint from the public internet.
+func isHostLocalUnsealRequest(r *http.Request) bool {
+	if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("Forwarded") != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+}
+
 // apiUnseal is the sole way to load the master key at runtime for the Input encryption levels
-// (LocalEncryptionInput/FullEncryptionInput) - see encryption.Unseal. Deliberately
-// unauthenticated: in the general case no session/API key can exist to check against before the
-// key is loaded. Rate limited per IP (see ratelimiter.AllowUnseal): once an IP exceeds its burst
-// it gets an immediate 429, never a blocked connection - each attempt drives scrypt with N=2^20
-// (~1 GiB RAM, 1-2s CPU), so blocking would only let an attacker pile up expensive derivations by
-// holding connections open. encryption.Unseal additionally enforces a process-wide cap of one
-// derivation in flight at a time (see ErrUnsealBusy); a second concurrent request also gets 429,
-// without ever touching scrypt, which bounds memory to ~1 GiB regardless of attacker concurrency
-// or how many IPs are used. Every attempt that actually reaches a password check - successful or
-// not - is written to the audit log (see logging.LogUnsealAttempt); the 429 paths above are
-// rate-limiting, not password attempts, so they are not logged as one. The response never
-// distinguishes "wrong password" from any other failure reason, so a caller learns nothing beyond
+// (LocalEncryptionInput/FullEncryptionInput) - see encryption.Unseal. It is restricted to a
+// host-local, unproxied connection (see isHostLocalUnsealRequest): the master-key passphrase is far
+// too sensitive to accept from the public internet, so this endpoint is reachable only from the host
+// itself - on the VM directly, or through an SSH tunnel to 127.0.0.1:<port>. Any request that
+// traversed the reverse proxy chain (ingress-nginx -> Caddy -> 127.0.0.1) carries an
+// X-Forwarded-For header and is answered with a plain 404, so the endpoint is not even
+// discoverable from the outside. This gate is checked FIRST, before the rate limiter, the seal
+// check, and any body parsing. No session/API key can be required here because in the general case
+// none can exist before the key is loaded; the loopback restriction is the authentication.
+//
+// Rate limited per IP (see ratelimiter.AllowUnseal): once an IP exceeds its burst
+// it gets an immediate 429, checked BEFORE anything else in this function - including the cheap
+// encryption.IsSealed() check below and, further down, the scrypt-driven encryption.Unseal call -
+// so a flood from a single source is turned away before it can occupy the single derivation slot
+// (see unsealSemaphore) or do any other work at all. encryption.Unseal additionally enforces a
+// process-wide cap of one derivation in flight at a time (see ErrUnsealBusy); a second concurrent
+// request also gets 429, without ever touching scrypt, which bounds memory to ~1 GiB regardless of
+// attacker concurrency or how many IPs are used.
+//
+// If the instance is not currently sealed, this returns 409 immediately and does NOT call
+// encryption.Unseal at all: encryption.Unseal returns nil (success) for an already-unsealed
+// instance regardless of the password supplied - by design, so a retried request after a genuine
+// unseal is a harmless no-op (see its doc comment) - which previously meant ANY caller, with ANY
+// password (including none), could hit this endpoint on an already-unsealed instance and receive
+// a 200 OK that was then audited as "unsealed successfully by IP x". That let an anonymous caller
+// forge a successful-unseal audit trail entry at will. The check here closes that: no password is
+// ever compared against anything on this path, so nothing is logged for it either - only an
+// attempt that actually reaches the passphrase/checksum comparison inside encryption.Unseal is
+// recorded via logging.LogUnsealAttempt, matching its own doc comment. Every attempt that does
+// reach that comparison - successful or not - is written to the audit log; the 429 and 409 paths
+// above are not password attempts, so they are not logged as one. The response never distinguishes
+// "wrong password" from any other failure reason, so a caller learns nothing beyond
 // correct/incorrect.
+//
+// Consecutive failed attempts from a single IP are counted separately (see
+// ratelimiter.RecordUnsealFailure) purely to raise a high-severity alert once brute-forcing looks
+// likely - never to lock the endpoint out, since an attacker could otherwise weaponise a lockout
+// to deny the real admin their own recovery path.
 func apiUnseal(w http.ResponseWriter, r *http.Request) {
+	if !isHostLocalUnsealRequest(r) {
+		http.NotFound(w, r)
+		return
+	}
 	ip := logging.GetIpAddress(r)
 	if !ratelimiter.AllowUnseal(ip) {
 		sendError(w, http.StatusTooManyRequests, errorcodes.RateLimited, "Too many unseal attempts. Please wait before retrying")
+		return
+	}
+	if !encryption.IsSealed() {
+		sendError(w, http.StatusConflict, errorcodes.AlreadyExists, "Instance is not sealed")
 		return
 	}
 
@@ -520,7 +582,6 @@ func apiUnseal(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(bodyReader).Decode(&input); err != nil {
-		logging.LogUnsealAttempt(ip, false)
 		sendError(w, http.StatusBadRequest, errorcodes.CannotParse, "Invalid request body")
 		return
 	}
@@ -532,10 +593,12 @@ func apiUnseal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logging.LogUnsealAttempt(ip, false)
+		ratelimiter.RecordUnsealFailure(ip)
 		sendError(w, http.StatusUnauthorized, errorcodes.InstanceSealed, "Incorrect password")
 		return
 	}
 	logging.LogUnsealAttempt(ip, true)
+	ratelimiter.RecordUnsealSuccess(ip)
 	_, _ = io.WriteString(w, `{"Result":"OK"}`)
 }
 

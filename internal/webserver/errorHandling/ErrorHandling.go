@@ -142,8 +142,6 @@ func redirectToError(w http.ResponseWriter, r *http.Request, displayedError Disp
 }
 
 func Get(r *http.Request) DisplayedError {
-	mutex.RLock()
-	defer mutex.RUnlock()
 	if !r.URL.Query().Has("e") {
 		return DisplayedError{
 			IsGeneric: true,
@@ -151,8 +149,20 @@ func Get(r *http.Request) DisplayedError {
 			CardWidth: WidthDefault,
 		}
 	}
-	displayedError, ok := tokens[r.URL.Query().Get("e")]
-	if !ok {
+	token := r.URL.Query().Get("e")
+
+	// Single-use: a token read once is removed immediately, rather than left to
+	// linger until the periodic cleanup notices it expired. Without this, a
+	// token was replayable for the rest of its 5-minute ttl by anyone who
+	// observed the "e" value, e.g. in a proxy access log.
+	mutex.Lock()
+	displayedError, ok := tokens[token]
+	if ok {
+		delete(tokens, token)
+	}
+	mutex.Unlock()
+
+	if !ok || displayedError.IsExpired() {
 		return DisplayedError{
 			Title:     "Unknown error ID",
 			Message:   "Unfortunately, an error occurred and the error message could not be displayed.",

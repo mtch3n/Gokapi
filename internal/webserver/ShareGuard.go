@@ -8,26 +8,42 @@ import (
 	"github.com/forceu/gokapi/internal/shareaccess"
 )
 
-// shareTokenParam is the query parameter carrying an access token, as built
-// into the link mailed to a recipient.
+// shareTokenParam is the query parameter carrying an access token. It is kept as a fallback
+// only: the mailed link itself now carries the token in the URL fragment (see
+// shareaccess.BuildAccessUrl), which is never sent to the server at all, so links mailed before
+// that change - still valid for up to 30 days - and any other caller that lands here with the
+// old query form both keep working.
 const shareTokenParam = "token"
+
+// shareTokenHeader is the request header the SPA forwards the token in, since a fragment never
+// reaches the server and has to be read out client-side. It mirrors the existing apikey header
+// idiom used elsewhere on /pubapi/*.
+const shareTokenHeader = "sharetoken"
 
 // recipientFor returns the recipient authorised for this resource by the
 // current request, or 0.
 //
-// Two ways in are accepted, in this order:
+// Three ways in are accepted, in this order:
 //
-//  1. A token in the query string, which is what the mailed link carries. On
-//     success it is exchanged for a cookie so the token stops appearing in
-//     later request URLs, and therefore in browser history and proxy access
-//     logs.
-//  2. A cookie from an earlier exchange.
+//  1. A token in the sharetoken request header, which is how the SPA forwards the fragment
+//     token it read out of the mailed link.
+//  2. A token in the query string, kept as a fallback: links mailed before the fragment change
+//     still carry it there, and a caller that downloads straight from the link (no JS, so no
+//     header) has no other way to present it.
+//  3. A cookie from an earlier exchange.
+//
+// On success from either token form it is exchanged for a cookie so it stops appearing in later
+// requests, and therefore in browser history and proxy access logs.
 //
 // The grant is re-checked on every call, not trusted from the cookie, so
 // removing a recipient or blocking them takes effect on their next request
 // rather than when their cookie happens to expire.
 func recipientFor(w http.ResponseWriter, r *http.Request, resourceType int, resourceId string) int {
-	if rawToken := r.URL.Query().Get(shareTokenParam); rawToken != "" {
+	rawToken := r.Header.Get(shareTokenHeader)
+	if rawToken == "" {
+		rawToken = r.URL.Query().Get(shareTokenParam)
+	}
+	if rawToken != "" {
 		recipient, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
 		if err == nil {
 			if w != nil {
@@ -81,8 +97,9 @@ func consumeShareDownload(r *http.Request, resourceType int, resourceId string) 
 	}
 	recipientId, ok := shareaccess.ReadCookie(r, resourceType, resourceId)
 	if !ok {
-		// Fall back to a token in the URL, for a client that downloads
-		// straight from the mailed link without loading the page first.
+		// Fall back to a token in the URL query. Mailed links now carry the token in a
+		// fragment the server never sees, but this fallback remains for pre-fragment mailed
+		// links (?token= form, valid up to 30 days) presented directly to a download URL.
 		if rawToken := r.URL.Query().Get(shareTokenParam); rawToken != "" {
 			recipient, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
 			if err != nil {
@@ -92,6 +109,14 @@ func consumeShareDownload(r *http.Request, resourceType int, resourceId string) 
 		} else {
 			return false
 		}
+	} else if !database.HasShareGrant(resourceType, resourceId, recipientId) {
+		// Unlike a token, a cookie carries no grant check of its own - ReadCookie
+		// only proves the cookie is genuine, not that the grant behind it still
+		// exists. Without this, revoking a recipient mid-cookie-lifetime would
+		// not take effect on this download-consuming path until the cookie
+		// itself expired, the same gap recipientFor already closes for the
+		// read-only access check.
+		return false
 	}
 	return shareaccess.ConsumeDownload(resourceType, resourceId, recipientId) == nil
 }

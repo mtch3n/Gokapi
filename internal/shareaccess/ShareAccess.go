@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"net/url"
 	"strings"
 	"time"
 
@@ -177,11 +178,20 @@ func ResendLink(resource Resource, email string, baseUrl string, requestedIp str
 	return issueAndSend(resource, recipient, baseUrl, requestedIp, now)
 }
 
-// issueAndSend retires any previous link, stores a new one and mails it.
+// issueAndSend mails a new link and only then retires the previous one.
+//
+// The send happens before anything is written, so a failed send leaves
+// whatever link the recipient already had - if any - untouched. Revoking
+// first, as this used to do, would strand the recipient with no working link
+// at all the moment the mail step failed.
 func issueAndSend(resource Resource, recipient models.ShareRecipient, baseUrl, requestedIp string, now time.Time) error {
-	database.RevokeShareLoginTokens(recipient.Id, resource.Type, resource.Id)
-
 	rawToken := helper.GenerateRandomString(tokenLength)
+
+	if err := gokapimail.Send(context.Background(), buildMessage(resource, recipient, rawToken, baseUrl)); err != nil {
+		return err
+	}
+
+	database.RevokeShareLoginTokens(recipient.Id, resource.Type, resource.Id)
 	database.SaveShareLoginToken(models.ShareLoginToken{
 		TokenHash:    hashToken(rawToken),
 		RecipientId:  recipient.Id,
@@ -192,7 +202,7 @@ func issueAndSend(resource Resource, recipient models.ShareRecipient, baseUrl, r
 		RequestedIp:  requestedIp,
 	})
 
-	return gokapimail.Send(context.Background(), buildMessage(resource, recipient, rawToken, baseUrl))
+	return nil
 }
 
 // ValidateToken resolves a raw token to the recipient it belongs to, checking
@@ -303,7 +313,10 @@ func BuildAccessUrl(baseUrl string, resource Resource, rawToken string) string {
 	case models.ShareResourceFileRequest:
 		prefix = "r"
 	}
-	return fmt.Sprintf("%s%s/%s?token=%s", ensureTrailingSlash(baseUrl), prefix, resource.Id, rawToken)
+	// The token rides in the URL fragment, not the query string: a fragment is never sent to
+	// the server, so it never reaches a reverse proxy's access log. The SPA reads it client-side
+	// and forwards it as the sharetoken request header instead (see ShareGuard.recipientFor).
+	return fmt.Sprintf("%s%s/%s#token=%s", ensureTrailingSlash(baseUrl), prefix, resource.Id, url.QueryEscape(rawToken))
 }
 
 func ensureTrailingSlash(url string) string {

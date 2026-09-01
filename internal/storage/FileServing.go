@@ -160,10 +160,25 @@ func GetUploadCounts() map[int]int {
 // NewFileFromChunk creates a new file in the system after a chunk upload has fully completed. If a file with the same sha1 hash
 // already exists, it is deduplicated. This function gathers information about the file, creates an ID and saves
 // it into the global configuration.
+//
+// Serialised end-to-end on chunkId via apimutex (see H3): without this, N parallel completion
+// requests for the exact same chunk id all pass chunking.GetFileByChunkId successfully - the
+// chunk file backing chunkId is only removed near the very end of this function, by
+// encryptChunkFile or the MoveToFilesystem call below - so every one of them would redundantly
+// hash and, if encryption is active, fully encrypt the same content before racing to move/remove
+// the same source file. That is both an anonymous disk/CPU exhaustion vector (each loser still did
+// a full encryption pass before losing) and, without encryptChunkFile's own fix, a way to leak the
+// loser's encrypted temp file. Holding the lock for the whole function - not just the final
+// move/remove - is what makes this idempotent: a second call for the same chunkId that arrives
+// after the first has finished simply finds the chunk file gone and fails cleanly via
+// chunking.GetFileByChunkId, having done no hashing or encryption work at all.
 func NewFileFromChunk(chunkId string, fileHeader chunking.FileHeader, userId int, uploadRequest models.UploadParameters) (models.File, error) {
 	if isEncryptionRequested() && encryption.IsSealed() {
 		return models.File{}, ErrorInstanceSealed
 	}
+	apimutex.Lock(apimutex.TypeMetaData, chunkId)
+	defer apimutex.Unlock(apimutex.TypeMetaData, chunkId)
+
 	file, err := chunking.GetFileByChunkId(chunkId)
 	if err != nil {
 		return models.File{}, err
@@ -254,7 +269,7 @@ func newEncryptedFileId() string {
 
 func encryptChunkFile(file *os.File, metadata *models.File) (*os.File, error) {
 
-	var removeTempFiles = func() {
+	var removePlainTextTemp = func() {
 		err := file.Close()
 		if err != nil {
 			fmt.Println("Warning: cannot close plain-text file")
@@ -268,34 +283,59 @@ func encryptChunkFile(file *os.File, metadata *models.File) (*os.File, error) {
 
 	}
 
+	// removeEncryptedTemp cleans up tempFileEnc on every error path below once it exists (see
+	// H3): previously, once os.CreateTemp had succeeded, any later error - a failed encrypt, a
+	// failed seek, or a failed close/remove of the plain-text source (e.g. because a concurrent
+	// caller for the same chunk id already removed it) - returned without ever closing or
+	// removing this fully-encrypted temp file, leaking it on disk until the periodic sweep.
+	var removeEncryptedTemp = func(tempFileEnc *os.File) {
+		if tempFileEnc == nil {
+			return
+		}
+		err := tempFileEnc.Close()
+		if err != nil {
+			fmt.Println("Warning: cannot close encrypted temp file")
+			fmt.Println(err)
+		}
+		err = os.Remove(tempFileEnc.Name())
+		if err != nil {
+			fmt.Println("Warning: cannot remove encrypted temp file")
+			fmt.Println(err)
+		}
+	}
+
 	_, err := file.Seek(0, io.SeekStart)
 	if err != nil {
-		removeTempFiles()
+		removePlainTextTemp()
 		return nil, err
 	}
 	tempFileEnc, err := os.CreateTemp(configuration.Get().DataDir, "upload")
 	if err != nil {
-		removeTempFiles()
+		removePlainTextTemp()
 		return nil, err
 	}
 	encInfo := metadata.Encryption
 	err = encryption.Encrypt(&encInfo, file, tempFileEnc)
 	if err != nil {
-		removeTempFiles()
+		removePlainTextTemp()
+		removeEncryptedTemp(tempFileEnc)
 		return nil, err
 	}
 	_, err = tempFileEnc.Seek(0, io.SeekStart)
 	if err != nil {
-		removeTempFiles()
+		removePlainTextTemp()
+		removeEncryptedTemp(tempFileEnc)
 		return nil, err
 	}
 	metadata.Encryption = encInfo
 	err = file.Close()
 	if err != nil {
+		removeEncryptedTemp(tempFileEnc)
 		return nil, err
 	}
 	err = os.Remove(file.Name())
 	if err != nil {
+		removeEncryptedTemp(tempFileEnc)
 		return nil, err
 	}
 	return tempFileEnc, nil

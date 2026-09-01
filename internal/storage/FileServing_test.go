@@ -11,6 +11,8 @@ import (
 	"net/textproto"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -490,6 +492,76 @@ func TestNewFileFromChunk(t *testing.T) {
 		test.IsEqual(t, file, retrievedFile)
 		test.IsEqualBool(t, ok, true)
 		testconfiguration.DisableS3()
+	}
+}
+
+// TestNewFileFromChunkConcurrentCompletionIsIdempotent is the failing-first regression test for
+// H3: before NewFileFromChunk serialised on chunkId (see its doc comment), N goroutines racing to
+// complete the exact same chunk id each passed chunking.GetFileByChunkId successfully and each ran
+// a full, redundant hash-and-encrypt pass before racing to remove the one shared source file - the
+// losers of that race leaked their fully-encrypted tempFileEnc copy (see encryptChunkFile) until
+// the periodic sweep, and an anonymous caller could multiply that cost at will simply by firing
+// the same completion request N times in parallel. After the fix, exactly one call may succeed;
+// every other call must fail cleanly (the chunk source file it needed was already consumed by the
+// winner), and - crucially - no "upload*" encrypted temp file may be left behind in the data
+// directory once every goroutine has returned.
+func TestNewFileFromChunkConcurrentCompletionIsIdempotent(t *testing.T) {
+	configuration.Get().Encryption.Level = 1
+	cipher, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:  encryption.LocalEncryptionStored,
+		Cipher: cipher,
+	}})
+	defer func() { configuration.Get().Encryption.Level = 0 }()
+
+	chunkId, fileHeader, request, err := createTestChunk()
+	test.IsNil(t, err)
+
+	const workers = 32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	var ready sync.WaitGroup
+	ready.Add(workers)
+	start := make(chan struct{})
+	var successes int32
+	var successMu sync.Mutex
+	var successFile models.File
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			// Every goroutine waits behind the same closed-channel gate so all workers enter
+			// NewFileFromChunk as close to simultaneously as the scheduler allows - a plain
+			// unsynchronised launch loop lets goroutines start staggered enough that the race
+			// this test targets rarely, if ever, actually interleaves.
+			ready.Done()
+			<-start
+			f, err := NewFileFromChunk(chunkId, fileHeader, 99, request)
+			if err == nil {
+				atomic.AddInt32(&successes, 1)
+				successMu.Lock()
+				successFile = f
+				successMu.Unlock()
+			}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	wg.Wait()
+
+	test.IsEqualInt(t, int(successes), 1)
+
+	_, ok := database.GetMetaDataById(successFile.Id)
+	test.IsEqualBool(t, ok, true)
+
+	// No orphaned "upload*" temp file (encryptChunkFile's tempFileEnc) may remain in the data
+	// directory - a leaked one is exactly the disk-exhaustion vector H3 describes.
+	entries, err := os.ReadDir(configuration.Get().DataDir)
+	test.IsNil(t, err)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "upload") {
+			t.Fatalf("orphaned encrypted temp file left behind: %s", e.Name())
+		}
 	}
 }
 

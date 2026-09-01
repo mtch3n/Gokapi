@@ -80,7 +80,7 @@ func SetForceConsentHint(w http.ResponseWriter) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   configuration.Get().UseSsl,
+		Secure:   configuration.UsesHttps(),
 	})
 }
 
@@ -92,7 +92,7 @@ func clearForceConsentHint(w http.ResponseWriter) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   configuration.Get().UseSsl,
+		Secure:   configuration.UsesHttps(),
 	})
 }
 
@@ -171,7 +171,7 @@ func HandlerCallback(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   configuration.Get().UseSsl,
+		Secure:   configuration.UsesHttps(),
 	}
 	http.SetCookie(w, clearCookie)
 
@@ -227,7 +227,7 @@ func setCallbackCookie(w http.ResponseWriter, value string) {
 		MaxAge:   int(time.Hour.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   configuration.Get().UseSsl,
+		Secure:   configuration.UsesHttps(),
 	}
 	http.SetCookie(w, c)
 }

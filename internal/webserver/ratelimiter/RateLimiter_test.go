@@ -56,8 +56,10 @@ func TestAllowUnsealIsPerIP(t *testing.T) {
 }
 
 // TestAllowUnsealRefillsOverTime confirms AllowUnseal is a genuine rate limiter and not a
-// one-shot lockout: once the refill period (2 seconds, matching the previous WaitN(ctx, 2)
-// behaviour) has passed, a further attempt is allowed again.
+// one-shot lockout, refilling at the documented one attempt every 2 seconds - not the previous
+// (buggy) one attempt every second, which this test's ~1.1s assertion below would fail against:
+// with the old rate.Limit(1), a fresh token would already be available well before 2 seconds
+// have passed.
 func TestAllowUnsealRefillsOverTime(t *testing.T) {
 	const ip = "203.0.113.30"
 
@@ -70,9 +72,45 @@ func TestAllowUnsealRefillsOverTime(t *testing.T) {
 		t.Fatal("expected rejection immediately after exhausting the burst")
 	}
 
-	time.Sleep(2100 * time.Millisecond)
+	// Just past 1 second - under a genuine 1-per-2-seconds limiter, no token has refilled yet.
+	time.Sleep(1100 * time.Millisecond)
+	if AllowUnseal(ip) {
+		t.Fatal("expected still-rejected after only ~1.1s of an actual 2-second refill period")
+	}
 
+	// Now comfortably past the full 2-second period.
+	time.Sleep(1100 * time.Millisecond)
 	if !AllowUnseal(ip) {
-		t.Fatal("expected a fresh token to be available after the refill period")
+		t.Fatal("expected a fresh token to be available after the full ~2.2s refill period")
+	}
+}
+
+// TestRecordUnsealFailureAlertsAtThreshold is the failing-first test for the brute-force alerting
+// requirement: RecordUnsealFailure must count consecutive failures per IP and never panic or
+// block, and RecordUnsealSuccess must reset that count. There is no exported way to observe the
+// log line itself from this package without capturing stdlib log output, so this test exercises
+// the counting/reset behaviour driving it - the threshold and message are covered by inspection of
+// RecordUnsealFailure - and confirms the alert path never errors out or gets stuck under a burst
+// well past the threshold.
+func TestRecordUnsealFailureAlertsAtThreshold(t *testing.T) {
+	const ip = "203.0.113.40"
+
+	for i := 0; i < UnsealAlertThreshold*2+1; i++ {
+		RecordUnsealFailure(ip)
+	}
+
+	unsealFailureMu.Lock()
+	count := unsealFailureCounts[ip]
+	unsealFailureMu.Unlock()
+	if count != UnsealAlertThreshold*2+1 {
+		t.Fatalf("expected %d consecutive failures recorded, got %d", UnsealAlertThreshold*2+1, count)
+	}
+
+	RecordUnsealSuccess(ip)
+	unsealFailureMu.Lock()
+	_, stillPresent := unsealFailureCounts[ip]
+	unsealFailureMu.Unlock()
+	if stillPresent {
+		t.Fatal("expected RecordUnsealSuccess to clear the consecutive-failure counter")
 	}
 }
