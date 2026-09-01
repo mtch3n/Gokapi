@@ -140,11 +140,16 @@ func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool) (FileApi
 		result.RequiresClientSideDecryption = true
 	}
 	result.IsEndToEndEncrypted = f.Encryption.IsEndToEndEncrypted
+	// A file collected through a file request is never publicly shareable, so it gets
+	// no download or hotlink URL. The owner still has to be identifiable though - the
+	// collect view lists a request's files by uploader, and copier does not map
+	// File.UserId onto the differently named UploaderId, so leaving this unset here
+	// made every collected file look like it belonged to user 0.
 	if !f.IsFileRequest() {
 		result.UrlHotlink = getHotlinkUrl(result, serverUrl, useFilenameInUrl)
 		result.UrlDownload = getDownloadUrl(result, serverUrl, useFilenameInUrl)
-		result.UploaderId = f.UserId
 	}
+	result.UploaderId = f.UserId
 	result.IsPendingDeletion = f.IsPendingForDeletion()
 	result.FileRequestId = f.UploadRequestId
 	result.ExpireAtString = time.Unix(f.ExpireAt, 0).UTC().Format("2006-01-02 15:04:05")

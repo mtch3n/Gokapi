@@ -84,3 +84,20 @@ func TestGetHolinkUrl(t *testing.T) {
 	url = getHotlinkUrl(file, "testserver/", true)
 	test.IsEqualString(t, url, "testserver/dh/testfile/name")
 }
+
+func TestToFileApiOutputFileRequest(t *testing.T) {
+	file := File{
+		Id:              "testId",
+		Name:            "testName",
+		UserId:          2,
+		UploadRequestId: "requestId",
+	}
+	output, err := file.ToFileApiOutput("serverurl/", false)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, output.IsFileRequest, true)
+	// A file collected through a file request has no public share URL, but the
+	// owner still has to be identifiable - the collect view lists files by uploader.
+	test.IsEqualString(t, output.UrlDownload, "")
+	test.IsEqualString(t, output.UrlHotlink, "")
+	test.IsEqualInt(t, output.UploaderId, 2)
+}
