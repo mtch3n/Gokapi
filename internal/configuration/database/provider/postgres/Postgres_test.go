@@ -489,6 +489,19 @@ func TestFileRequests(t *testing.T) {
 	test.IsEqualInt(t, retrieved.MaxSize, 500)
 	test.IsEqualString(t, retrieved.Notes, "please upload here")
 
+	test.IsEqualBool(t, retrieved.Closed, false)
+
+	// Closing and reopening has to survive a round trip, otherwise a request marked complete
+	// starts accepting uploads again on the next read
+	request.Closed = true
+	dbInstance.SaveFileRequest(request)
+	retrieved, _ = dbInstance.GetFileRequest("req-1")
+	test.IsEqualBool(t, retrieved.Closed, true)
+	request.Closed = false
+	dbInstance.SaveFileRequest(request)
+	retrieved, _ = dbInstance.GetFileRequest("req-1")
+	test.IsEqualBool(t, retrieved.Closed, false)
+
 	_, ok = dbInstance.GetFileRequest("")
 	test.IsEqualBool(t, ok, false)
 	_, ok = dbInstance.GetFileRequest("nonexistent")

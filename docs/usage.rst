@@ -135,6 +135,14 @@ Sharing the Request
 2.  Click the *Copy (Clipboard)* icon.
 3.  A notification will confirm the URL is copied. You can now paste this into an email or chat.
 
+Marking a Request Complete
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+A request otherwise keeps accepting uploads until it reaches its file limit or expires. Marking it complete closes it immediately, whether or not it is full, and the upload page then shows it as finished instead of a drop target. The files already collected are kept and stay downloadable.
+
+Reopening the request from the same menu makes it accept uploads again.
+
+The person you sent the link to can also mark the request complete from the upload page, to signal that they have sent everything. Because a request link is a shared address rather than a personal identity, anyone holding the link can do this, and it closes the request for every other holder as well. Only the owner can reopen it.
+
 Deleting Requests
 ^^^^^^^^^^^^^^^^^^^
 To remove a request, click the *Trash* icon. 

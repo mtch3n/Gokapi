@@ -19,6 +19,7 @@ type FileRequest struct {
 	Name            string   `json:"name" redis:"name"`                 // The given name for the file request
 	ApiKey          string   `json:"apikey" redis:"apikey"`             // The API key related to the file request
 	Notes           string   `json:"notes" redis:"notes"`               // The custom note that was set for this file request
+	Closed          bool     `json:"closed" redis:"closed"`             // True if the request was marked complete and no longer accepts uploads
 	UploadedFiles   int      `json:"uploadedfiles" redis:"-"`           // Contains the number of uploaded files for this request. Needs to be calculated with Populate()
 	CombinedMaxSize int      `json:"combinedmaxsize" redis:"-"`         // The lesser of MaxSize and the server's max upload size. Needs to be calculated with Populate()
 	ReservedUploads int      `json:"reserveduploads" redis:"-"`         // How many uploads are currently reserved but not finalised. Needs to be calculated with Populate()

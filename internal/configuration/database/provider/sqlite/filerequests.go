@@ -18,6 +18,7 @@ type schemaFileRequests struct {
 	Creation int64
 	ApiKey   string
 	Note     string
+	Closed   int
 }
 
 // GetFileRequest returns the FileRequest or false if not found
@@ -28,7 +29,8 @@ func (p DatabaseProvider) GetFileRequest(id string) (models.FileRequest, bool) {
 	var rowResult schemaFileRequests
 	row := p.sqliteDb.QueryRow("SELECT * FROM UploadRequests WHERE Id = ?", id)
 	err := row.Scan(&rowResult.Id, &rowResult.Name, &rowResult.UserId, &rowResult.Expiry,
-		&rowResult.MaxFiles, &rowResult.MaxSize, &rowResult.Creation, &rowResult.ApiKey, &rowResult.Note)
+		&rowResult.MaxFiles, &rowResult.MaxSize, &rowResult.Creation, &rowResult.ApiKey, &rowResult.Note,
+		&rowResult.Closed)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileRequest{}, false
@@ -46,6 +48,7 @@ func (p DatabaseProvider) GetFileRequest(id string) (models.FileRequest, bool) {
 		CreationDate: rowResult.Creation,
 		ApiKey:       rowResult.ApiKey,
 		Notes:        rowResult.Note,
+		Closed:       rowResult.Closed == 1,
 	}
 	return result, true
 }
@@ -59,7 +62,7 @@ func (p DatabaseProvider) GetAllFileRequests() []models.FileRequest {
 	for rows.Next() {
 		rowData := schemaFileRequests{}
 		err = rows.Scan(&rowData.Id, &rowData.Name, &rowData.UserId, &rowData.Expiry, &rowData.MaxFiles,
-			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.Note)
+			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.Note, &rowData.Closed)
 		helper.Check(err)
 		result = append(result, models.FileRequest{
 			Id:           rowData.Id,
@@ -71,6 +74,7 @@ func (p DatabaseProvider) GetAllFileRequests() []models.FileRequest {
 			CreationDate: rowData.Creation,
 			ApiKey:       rowData.ApiKey,
 			Notes:        rowData.Note,
+			Closed:       rowData.Closed == 1,
 		})
 	}
 	return result
@@ -78,6 +82,10 @@ func (p DatabaseProvider) GetAllFileRequests() []models.FileRequest {
 
 // SaveFileRequest stores the file request associated with the file in the database
 func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
+	closed := 0
+	if request.Closed {
+		closed = 1
+	}
 	newData := schemaFileRequests{
 		Id:       request.Id,
 		Name:     request.Name,
@@ -88,12 +96,13 @@ func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
 		Creation: request.CreationDate,
 		ApiKey:   request.ApiKey,
 		Note:     request.Notes,
+		Closed:   closed,
 	}
 
 	_, err := p.sqliteDb.Exec(`INSERT OR REPLACE INTO UploadRequests
-   				 (id, name, userid, expiry, maxFiles, maxSize, creation, apiKey, note) 
-         			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		newData.Id, newData.Name, newData.UserId, newData.Expiry, newData.MaxFiles, newData.MaxSize, newData.Creation, newData.ApiKey, newData.Note)
+   				 (id, name, userid, expiry, maxFiles, maxSize, creation, apiKey, note, closed) 
+         			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newData.Id, newData.Name, newData.UserId, newData.Expiry, newData.MaxFiles, newData.MaxSize, newData.Creation, newData.ApiKey, newData.Note, newData.Closed)
 	helper.Check(err)
 }
 

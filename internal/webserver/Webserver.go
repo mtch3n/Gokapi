@@ -1582,6 +1582,20 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Marked complete, by the owner or by a link holder. Reported ahead of the max-files check
+	// because it is the deliberate decision and the file count is only incidental, and it carries
+	// the same receipt: being told a request is finished is exactly when someone wants to confirm
+	// what they sent actually arrived.
+	if request.Closed {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"valid":         false,
+			"reason":        "closed",
+			"receivedFiles": receivedFiles,
+		})
+		return
+	}
+
 	// Check if the request has reached max files
 	if !request.IsUnlimitedFiles() && request.UploadedFiles >= request.MaxFiles {
 		w.WriteHeader(http.StatusOK)

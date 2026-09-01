@@ -47,4 +47,6 @@ const (
 	// InstanceSealed is returned when an action requiring the master encryption key was refused
 	// because the instance is sealed - see encryption.IsSealed and POST /api/unseal
 	InstanceSealed
+	// RequestClosed is returned when a file request was marked complete and no longer accepts uploads
+	RequestClosed
 )

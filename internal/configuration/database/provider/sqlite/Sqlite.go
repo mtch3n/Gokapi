@@ -242,6 +242,16 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			helper.Check(err)
 		}
 	}
+	// Lets a request be closed before it is full or expired. GetFileRequest reads the table with
+	// SELECT *, so the column has to be appended last here and in createNewDatabase alike, or the
+	// two orders diverge and every Scan on an upgraded database reads the wrong column. Same
+	// idempotency guard as the v17 step above.
+	if currentDbVersion < 21 {
+		if !p.columnExists("UploadRequests", "closed") {
+			err := p.rawSqlite(`ALTER TABLE UploadRequests ADD COLUMN "closed" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+	}
 	// Encrypted file names. The column is only added here; the plaintext Name column is read,
 	// re-encrypted into it and dropped by MigratePlaintextFileNames, which cannot run from this
 	// ladder because Upgrade executes at boot, before an Input-level instance has been unsealed
@@ -435,6 +445,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"creation"	INTEGER NOT NULL,
 			"apiKey"	TEXT NOT NULL UNIQUE,
 			"note"	TEXT NOT NULL,
+			"closed"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("id")
 		);
 		CREATE TABLE "Statistics" (

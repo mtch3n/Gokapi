@@ -211,6 +211,11 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS EncryptedSharePassword BYTEA;`)
 		helper.Check(err)
 	}
+	// Lets a request be closed before it is full or expired
+	if currentDbVersion < 21 {
+		_, err := p.exec(`ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS Closed BOOLEAN NOT NULL DEFAULT FALSE;`)
+		helper.Check(err)
+	}
 	// Encrypted file names. The column is only added here; the plaintext Name column is read,
 	// re-encrypted into it and dropped by MigratePlaintextFileNames, which cannot run from this
 	// ladder because Upgrade executes at boot, before an Input-level instance has been unsealed
@@ -376,6 +381,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			Creation	BIGINT NOT NULL,
 			ApiKey	TEXT NOT NULL UNIQUE,
 			Note	TEXT NOT NULL,
+			Closed	BOOLEAN NOT NULL DEFAULT FALSE,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Statistics (

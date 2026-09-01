@@ -350,6 +350,20 @@ func TestFileRequest(t *testing.T) {
 	test.IsEqualString(t, request.Id, "req1")
 	test.IsEqualString(t, request.Name, "New file request")
 
+	test.IsEqualBool(t, request.Closed, false)
+
+	// Closing and reopening has to survive a round trip, otherwise a request marked complete
+	// starts accepting uploads again on the next read
+	req1.Closed = true
+	dbInstance.SaveFileRequest(req1)
+	request, ok = dbInstance.GetFileRequest("req1")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, request.Closed, true)
+	req1.Closed = false
+	dbInstance.SaveFileRequest(req1)
+	request, _ = dbInstance.GetFileRequest("req1")
+	test.IsEqualBool(t, request.Closed, false)
+
 	// Get invalid file request
 	_, ok = dbInstance.GetFileRequest("invalid")
 	test.IsEqualBool(t, ok, false)

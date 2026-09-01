@@ -530,6 +530,28 @@ func LogEditFileRequest(fr models.FileRequest, user models.User) {
 	})
 }
 
+// LogCloseFileRequest adds a log entry when a file request was marked complete. Non-Blocking.
+// byRecipient is true when a link holder closed it from the public upload page rather than the
+// owner closing it from the admin UI. There is no identity to name in that case - the link is a
+// shared address - so the entry records the request and its owner, the same way an upload through
+// a file request does.
+func LogCloseFileRequest(fr models.FileRequest, user models.User, byRecipient bool) {
+	action := "filerequest.closed"
+	if byRecipient {
+		createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) marked complete by a link holder, owned by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+		action = "filerequest.closed.recipient"
+	} else {
+		createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) marked complete by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+	}
+	appendAuditEntryAsync(AuditEntry{
+		Category:  categoryEdit,
+		Action:    action,
+		Outcome:   OutcomeSuccess,
+		RequestId: fr.Id,
+		Actor:     AuditActor{UserId: user.Id, Email: user.Name},
+	})
+}
+
 // LogDeleteFileRequest adds a log entry when a file request was deleted. Non-Blocking
 func LogDeleteFileRequest(fr models.FileRequest, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) and associated files deleted by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)

@@ -1575,12 +1575,50 @@ func (p *paramURequestSave) ParseRequest(r *http.Request) error {
 		}
 	}
 
+	// RequestParser header value "closed", required: false
+	exists, err = checkHeaderExists(r, "closed", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["closed"] = exists
+	if exists {
+		p.Closed, err = parseHeaderBool(r, "closed")
+		if err != nil {
+			return fmt.Errorf("invalid value in header closed supplied")
+		}
+	}
+
 	return p.ProcessParameter(r)
 }
 
 // New returns a new instance of paramURequestSave struct
 func (p *paramURequestSave) New() requestParser {
 	return &paramURequestSave{}
+}
+
+// ParseRequest reads r and saves the passed header values in the paramURequestComplete struct
+// In the end, ProcessParameter() is called
+func (p *paramURequestComplete) ParseRequest(r *http.Request) error {
+	var err error
+	var exists bool
+	p.foundHeaders = make(map[string]bool)
+
+	// RequestParser header value "id", required: true
+	exists, err = checkHeaderExists(r, "id", true, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["id"] = exists
+	if exists {
+		p.Id = r.Header.Get("id")
+	}
+
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramURequestComplete struct
+func (p *paramURequestComplete) New() requestParser {
+	return &paramURequestComplete{}
 }
 
 // ParseRequest parses the header file. As paramURequestListSingle has no fields with the

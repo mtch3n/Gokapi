@@ -916,6 +916,9 @@ func checkFileRequestAndApiKey(fileRequestId string, apiKey models.ApiKey) (mode
 	if !fileRequest.IsUnlimitedTime() && fileRequest.Expiry < time.Now().Unix() {
 		return models.FileRequest{}, false, http.StatusUnauthorized, errorcodes.RequestExpired, "Filerequest has expired"
 	}
+	if fileRequest.Closed {
+		return models.FileRequest{}, false, http.StatusUnauthorized, errorcodes.RequestClosed, "Filerequest has been marked complete"
+	}
 	if !fileRequest.IsUnlimitedFiles() && fileRequest.UploadedFiles >= fileRequest.MaxFiles {
 		return models.FileRequest{}, false, http.StatusUnauthorized, errorcodes.CannotUploadMoreFiles, "Max file count has already been reached for this file request"
 	}
@@ -2080,6 +2083,7 @@ func apiURequestSave(w http.ResponseWriter, r requestParser, user models.User, _
 		apiKey := generateNewKey(false, user.Id, "File Request Public Access", uploadRequest.Id)
 		uploadRequest.ApiKey = apiKey.Id
 	}
+	wasClosed := uploadRequest.Closed
 
 	if request.Name == "" {
 		if request.IsNameSet || uploadRequest.Name == "" {
@@ -2100,12 +2104,18 @@ func apiURequestSave(w http.ResponseWriter, r requestParser, user models.User, _
 	if request.IsNotesSet {
 		uploadRequest.Notes = request.Notes
 	}
+	if request.IsClosedSet {
+		uploadRequest.Closed = request.Closed
+	}
 	database.SaveFileRequest(uploadRequest)
 	uploadRequest, ok = filerequest.Get(uploadRequest.Id)
 	if isNewRequest {
 		logging.LogCreateFileRequest(uploadRequest, user)
 	} else {
 		logging.LogEditFileRequest(uploadRequest, user)
+	}
+	if request.IsClosedSet && request.Closed && !wasClosed {
+		logging.LogCloseFileRequest(uploadRequest, user, false)
 	}
 	response := map[string]interface{}{
 		"Result":      "OK",
@@ -2114,6 +2124,36 @@ func apiURequestSave(w http.ResponseWriter, r requestParser, user models.User, _
 	result, err := json.Marshal(response)
 	helper.Check(err)
 	_, _ = w.Write(result)
+}
+
+// apiURequestComplete closes a file request from the public upload page, so whoever is sending
+// the files can say they are done instead of leaving the request open until it expires or fills
+// up. Anyone holding the link can do this - a file request link is a shared address rather than a
+// personal identity, so there is no finer-grained actor to authorise against. The owner can
+// reopen the request, which is what keeps this recoverable instead of destructive.
+//
+// Deliberately does not go through checkFileRequestAndApiKey: that refuses an expired or full
+// request, and closing one of those is harmless and still the outcome the caller asked for.
+func apiURequestComplete(w http.ResponseWriter, r requestParser, user models.User, apikey models.ApiKey) {
+	request, ok := r.(*paramURequestComplete)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+	uploadRequest, ok := database.GetFileRequest(request.Id)
+	if !ok {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "FileRequest does not exist with the given ID")
+		return
+	}
+	if uploadRequest.ApiKey != apikey.Id {
+		sendError(w, http.StatusUnauthorized, errorcodes.InvalidApiKey, "Invalid API key")
+		return
+	}
+	if !uploadRequest.Closed {
+		uploadRequest.Closed = true
+		database.SaveFileRequest(uploadRequest)
+		logging.LogCloseFileRequest(uploadRequest, user, true)
+	}
+	_, _ = w.Write([]byte(`{"Result":"OK"}`))
 }
 
 func apiUploadRequestList(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {

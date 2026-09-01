@@ -1328,6 +1328,59 @@ func TestPublicApiUploadRequestExpired(t *testing.T) {
 	}
 }
 
+// TestPublicApiUploadRequestClosed tests GET /pubapi/uploadrequest for a request that was marked
+// complete while it was still neither full nor expired
+func TestPublicApiUploadRequestClosed(t *testing.T) {
+	t.Parallel()
+
+	testRequest := models.FileRequest{
+		Id:       "closeduploadreq12345",
+		UserId:   5,
+		MaxFiles: 10,
+		MaxSize:  100,
+		Name:     "Closed Upload Request",
+		ApiKey:   "closedkey123",
+		Notes:    "Test notes",
+		Closed:   true,
+	}
+	database.SaveFileRequest(testRequest)
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=closeduploadreq12345", nil)
+	if err != nil {
+		t.Errorf("Failed to build request: %v", err)
+		return
+	}
+	req.Header.Set("apikey", "closedkey123")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Errorf("Failed to make request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Errorf("Failed to decode response: %v", err)
+	}
+
+	if valid, ok := response["valid"]; !ok || valid != false {
+		t.Errorf("Expected valid false, got %v", valid)
+	}
+	if reason, ok := response["reason"]; !ok || reason != "closed" {
+		t.Errorf("Expected reason 'closed', got %v", reason)
+	}
+	// A closed request still reports what it collected - being told it is finished is exactly
+	// when someone wants to confirm what they sent arrived.
+	if _, ok := response["receivedFiles"]; !ok {
+		t.Error("Expected receivedFiles to be present")
+	}
+}
+
 // TestPublicApiUploadRequestWrongKey tests GET /pubapi/uploadrequest with wrong key
 func TestPublicApiUploadRequestWrongKey(t *testing.T) {
 	t.Parallel()

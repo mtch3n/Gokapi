@@ -332,6 +332,13 @@ var routes = []apiRoute{
 		RequestParser:    &paramChunkUnreserve{},
 	},
 	{
+		Url:              "/uploadrequest/complete",
+		ApiPerm:          models.ApiPermNone,
+		IsFileRequestApi: true,
+		execution:        apiURequestComplete,
+		RequestParser:    &paramURequestComplete{},
+	},
+	{
 		Url:           "/logs/delete",
 		ApiPerm:       models.ApiPermManageLogs,
 		AdminOnly:     true,
@@ -1045,11 +1052,13 @@ type paramURequestSave struct {
 	Expiry        int64  `header:"expiry"`
 	MaxFiles      int    `header:"maxfiles"`
 	MaxSizeMb     int    `header:"maxsize"`
+	Closed        bool   `header:"closed"`
 	IsNameSet     bool
 	IsExpirySet   bool
 	IsMaxFilesSet bool
 	IsMaxSizeSet  bool
 	IsNotesSet    bool
+	IsClosedSet   bool
 
 	foundHeaders map[string]bool
 }
@@ -1070,6 +1079,18 @@ func (p *paramURequestSave) ProcessParameter(_ *http.Request) error {
 	if p.foundHeaders["notes"] {
 		p.IsNotesSet = true
 	}
+	if p.foundHeaders["closed"] {
+		p.IsClosedSet = true
+	}
+	return nil
+}
+
+type paramURequestComplete struct {
+	Id           string `header:"id" required:"true"`
+	foundHeaders map[string]bool
+}
+
+func (p *paramURequestComplete) ProcessParameter(_ *http.Request) error {
 	return nil
 }
 

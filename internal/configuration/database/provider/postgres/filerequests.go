@@ -8,7 +8,7 @@ import (
 	"github.com/forceu/gokapi/internal/models"
 )
 
-const fileRequestColumns = "Id, Name, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, Note"
+const fileRequestColumns = "Id, Name, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, Note, Closed"
 
 type schemaFileRequests struct {
 	Id       string
@@ -20,6 +20,7 @@ type schemaFileRequests struct {
 	Creation int64
 	ApiKey   string
 	Note     string
+	Closed   bool
 }
 
 func (s schemaFileRequests) toFileRequest() models.FileRequest {
@@ -33,6 +34,7 @@ func (s schemaFileRequests) toFileRequest() models.FileRequest {
 		CreationDate: s.Creation,
 		ApiKey:       s.ApiKey,
 		Notes:        s.Note,
+		Closed:       s.Closed,
 	}
 }
 
@@ -44,7 +46,8 @@ func (p DatabaseProvider) GetFileRequest(id string) (models.FileRequest, bool) {
 	var rowResult schemaFileRequests
 	row := p.queryRow("SELECT "+fileRequestColumns+" FROM UploadRequests WHERE Id = $1", id)
 	err := row.Scan(&rowResult.Id, &rowResult.Name, &rowResult.UserId, &rowResult.Expiry,
-		&rowResult.MaxFiles, &rowResult.MaxSize, &rowResult.Creation, &rowResult.ApiKey, &rowResult.Note)
+		&rowResult.MaxFiles, &rowResult.MaxSize, &rowResult.Creation, &rowResult.ApiKey, &rowResult.Note,
+		&rowResult.Closed)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileRequest{}, false
@@ -64,7 +67,7 @@ func (p DatabaseProvider) GetAllFileRequests() []models.FileRequest {
 	for rows.Next() {
 		rowData := schemaFileRequests{}
 		err = rows.Scan(&rowData.Id, &rowData.Name, &rowData.UserId, &rowData.Expiry, &rowData.MaxFiles,
-			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.Note)
+			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.Note, &rowData.Closed)
 		helper.Check(err)
 		result = append(result, rowData.toFileRequest())
 	}
@@ -84,16 +87,18 @@ func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
 		Creation: request.CreationDate,
 		ApiKey:   request.ApiKey,
 		Note:     request.Notes,
+		Closed:   request.Closed,
 	}
 
 	_, err := p.exec(`INSERT INTO UploadRequests
-					(Id, Name, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, Note)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+					(Id, Name, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, Note, Closed)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 					ON CONFLICT (Id) DO UPDATE SET Name = EXCLUDED.Name, UserId = EXCLUDED.UserId,
 						Expiry = EXCLUDED.Expiry, MaxFiles = EXCLUDED.MaxFiles, MaxSize = EXCLUDED.MaxSize,
-						Creation = EXCLUDED.Creation, ApiKey = EXCLUDED.ApiKey, Note = EXCLUDED.Note`,
+						Creation = EXCLUDED.Creation, ApiKey = EXCLUDED.ApiKey, Note = EXCLUDED.Note,
+						Closed = EXCLUDED.Closed`,
 		newData.Id, newData.Name, newData.UserId, newData.Expiry, newData.MaxFiles, newData.MaxSize,
-		newData.Creation, newData.ApiKey, newData.Note)
+		newData.Creation, newData.ApiKey, newData.Note, newData.Closed)
 	helper.Check(err)
 }
 
