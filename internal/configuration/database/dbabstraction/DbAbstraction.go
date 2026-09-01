@@ -72,6 +72,10 @@ type Database interface {
 	GetMetaDataById(id string) (models.File, bool)
 	// SaveMetaData stores the metadata of a file to the disk
 	SaveMetaData(file models.File)
+	// MigratePlaintextFileNames re-encrypts any file name still stored in plaintext by a version
+	// that predates encrypted names, removes the plaintext storage and returns how many files were
+	// converted. Needs the master key, so it runs after unsealing rather than from Upgrade
+	MigratePlaintextFileNames() int
 	// DeleteMetaData deletes information about a file
 	DeleteMetaData(id string)
 	// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads

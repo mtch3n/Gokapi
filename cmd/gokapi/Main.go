@@ -64,6 +64,7 @@ func main() {
 	setDeploymentPassword(passedFlags)
 	checkIfUserExists()
 	encryption.Init(*configuration.Get())
+	storage.MigratePlaintextFileNames()
 	authentication.Init(configuration.Get().Authentication)
 	initMail()
 	createSsl(passedFlags)

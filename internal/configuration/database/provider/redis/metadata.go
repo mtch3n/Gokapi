@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"strings"
 
+	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	redigo "github.com/gomodule/redigo/redis"
@@ -42,6 +43,8 @@ func dbToMetadata(id string, input []any) (models.File, error) {
 	if len(result.EncryptedSharePassword) == 0 {
 		result.EncryptedSharePassword = nil
 	}
+	result.Name = encryption.DecryptFileName(result.InternalRedisName)
+	result.InternalRedisName = nil
 	return unmarshalEncryptionInfo(result)
 }
 
@@ -86,9 +89,34 @@ func (p DatabaseProvider) GetMetaDataById(id string) (models.File, bool) {
 
 // SaveMetaData stores the metadata of a file to the disk
 func (p DatabaseProvider) SaveMetaData(file models.File) {
+	encryptedName, err := p.encryptNameForSave(file)
+	helper.Check(err)
+	file.InternalRedisName = encryptedName
 	marshalledFile, err := marshalEncryptionInfo(file)
 	helper.Check(err)
 	p.setHashMap(p.buildArgs(prefixMetaData + file.Id).AddFlat(marshalledFile))
+}
+
+// encryptNameForSave returns the value to store in the NameEncrypted hash field for this file. An
+// empty name is never a real one - uploads always set one - so it means this models.File was read
+// back while the instance was still sealed, when encryption.DecryptFileName had no key and
+// reported the name as empty. Re-encrypting that would overwrite the stored name with nothing,
+// which matters because bookkeeping writes that are allowed while sealed (marking a file pending
+// deletion, clearing a hotlink) go through this same path. Keeping whatever is already stored is
+// the only correct answer, and on a fresh insert there is nothing to keep.
+func (p DatabaseProvider) encryptNameForSave(file models.File) ([]byte, error) {
+	if file.Name != "" {
+		return encryption.EncryptFileName(file.Name)
+	}
+	hash, ok := p.getHashMap(prefixMetaData + file.Id)
+	if !ok {
+		return nil, nil
+	}
+	storedName, ok := hashFieldString(hash, "NameEncrypted")
+	if !ok {
+		return nil, nil
+	}
+	return []byte(storedName), nil
 }
 
 // DeleteMetaData deletes information about a file
@@ -116,4 +144,47 @@ func (p DatabaseProvider) GetDownloadsRemaining(id string) int {
 		return 0
 	}
 	return file.DownloadsRemaining
+}
+
+// MigratePlaintextFileNames re-encrypts every file name still stored in the plaintext Name hash
+// field and then removes that field, reporting how many files it converted. It is a separate step
+// rather than part of Upgrade because encrypting needs the master key, which an Input-level
+// instance does not have until an administrator unseals it - long after Upgrade has run at boot.
+//
+// Unlike the SQL providers this is not driven by the scheme version, because Redis has no schema
+// to version: a hash written before file names were encrypted is distinguishable from a current
+// one by carrying a Name field at all, which is the condition used here. Doing nothing and
+// reporting 0 once no hash has one is the normal steady state, so this is safe to call on every
+// unseal, and an interrupted run resumes on the next call.
+func (p DatabaseProvider) MigratePlaintextFileNames() int {
+	migrated := 0
+	for key, hash := range p.getAllHashesWithPrefix(prefixMetaData) {
+		plaintextName, ok := hashFieldString(hash, "Name")
+		if !ok {
+			continue
+		}
+		encryptedName, err := encryption.EncryptFileName(plaintextName)
+		helper.Check(err)
+		p.setHashMap(p.buildArgs(key).Add("NameEncrypted").Add(encryptedName))
+		p.deleteHashField(key, "Name")
+		migrated++
+	}
+	return migrated
+}
+
+// hashFieldString reads one field out of the flat field/value list an HGETALL returns. Only used
+// by the migration above: everything else scans the whole hash into models.File in one go.
+func hashFieldString(hash []any, field string) (string, bool) {
+	for i := 0; i+1 < len(hash); i += 2 {
+		name, err := redigo.String(hash[i], nil)
+		if err != nil || name != field {
+			continue
+		}
+		value, err := redigo.String(hash[i+1], nil)
+		if err != nil {
+			return "", false
+		}
+		return value, true
+	}
+	return "", false
 }

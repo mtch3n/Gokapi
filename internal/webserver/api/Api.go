@@ -608,6 +608,9 @@ func apiUnseal(w http.ResponseWriter, r *http.Request) {
 	}
 	logging.LogUnsealAttempt(ip, true)
 	ratelimiter.RecordUnsealSuccess(ip)
+	// The master key only exists from here on, so this is the first moment an instance running at
+	// an Input encryption level can encrypt the file names an older version stored in plaintext.
+	storage.MigratePlaintextFileNames()
 	_, _ = io.WriteString(w, `{"Result":"OK"}`)
 }
 

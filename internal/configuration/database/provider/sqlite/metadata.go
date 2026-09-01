@@ -6,13 +6,22 @@ import (
 	"encoding/gob"
 	"errors"
 
+	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 )
 
+// metaDataColumns is listed explicitly rather than using SELECT *, because the scans below are
+// positional. SQLite appends an ALTER TABLE ADD COLUMN at the end of the table and closes the gap
+// left by a DROP COLUMN, so an upgraded database orders its columns differently from one created
+// fresh from the CREATE TABLE above - which SELECT * would silently scan into the wrong fields.
+const metaDataColumns = `Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes, DownloadsRemaining, DownloadCount,
+	PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption, UnlimitedDownloads, UnlimitedTime,
+	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId, EncryptedSharePassword`
+
 type schemaMetaData struct {
 	Id                     string
-	Name                   string
+	NameEncrypted          []byte
 	Size                   string
 	SHA1                   string
 	ExpireAt               int64
@@ -37,7 +46,7 @@ type schemaMetaData struct {
 func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 	result := models.File{
 		Id:                     rowData.Id,
-		Name:                   rowData.Name,
+		Name:                   encryption.DecryptFileName(rowData.NameEncrypted),
 		Size:                   rowData.Size,
 		SHA1:                   rowData.SHA1,
 		ExpireAt:               rowData.ExpireAt,
@@ -68,12 +77,12 @@ func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 // GetAllMetadata returns a map of all available files
 func (p DatabaseProvider) GetAllMetadata() map[string]models.File {
 	result := make(map[string]models.File)
-	rows, err := p.sqliteDb.Query("SELECT * FROM FileMetaData")
+	rows, err := p.sqliteDb.Query("SELECT " + metaDataColumns + " FROM FileMetaData")
 	helper.Check(err)
 	defer rows.Close()
 	for rows.Next() {
 		rowData := schemaMetaData{}
-		err = rows.Scan(&rowData.Id, &rowData.Name, &rowData.Size, &rowData.SHA1, &rowData.ExpireAt, &rowData.SizeBytes,
+		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.Size, &rowData.SHA1, &rowData.ExpireAt, &rowData.SizeBytes,
 			&rowData.DownloadsRemaining, &rowData.DownloadCount, &rowData.PasswordHash, &rowData.HotlinkId, &rowData.ContentType,
 			&rowData.AwsBucket, &rowData.Encryption, &rowData.UnlimitedDownloads, &rowData.UnlimitedTime, &rowData.UserId,
 			&rowData.UploadDate, &rowData.PendingDeletion, &rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword)
@@ -91,8 +100,8 @@ func (p DatabaseProvider) GetMetaDataById(id string) (models.File, bool) {
 	result := models.File{}
 	rowData := schemaMetaData{}
 
-	row := p.sqliteDb.QueryRow("SELECT * FROM FileMetaData WHERE Id = ?", id)
-	err := row.Scan(&rowData.Id, &rowData.Name, &rowData.Size, &rowData.SHA1, &rowData.ExpireAt, &rowData.SizeBytes,
+	row := p.sqliteDb.QueryRow("SELECT "+metaDataColumns+" FROM FileMetaData WHERE Id = ?", id)
+	err := row.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.Size, &rowData.SHA1, &rowData.ExpireAt, &rowData.SizeBytes,
 		&rowData.DownloadsRemaining, &rowData.DownloadCount, &rowData.PasswordHash,
 		&rowData.HotlinkId, &rowData.ContentType, &rowData.AwsBucket, &rowData.Encryption,
 		&rowData.UnlimitedDownloads, &rowData.UnlimitedTime, &rowData.UserId, &rowData.UploadDate,
@@ -111,9 +120,11 @@ func (p DatabaseProvider) GetMetaDataById(id string) (models.File, bool) {
 
 // SaveMetaData stores the metadata of a file to the disk
 func (p DatabaseProvider) SaveMetaData(file models.File) {
+	encryptedName, err := p.encryptNameForSave(file)
+	helper.Check(err)
 	newData := schemaMetaData{
 		Id:                     file.Id,
-		Name:                   file.Name,
+		NameEncrypted:          encryptedName,
 		Size:                   file.Size,
 		SHA1:                   file.SHA1,
 		ExpireAt:               file.ExpireAt,
@@ -141,20 +152,40 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(file.Encryption)
+	err = enc.Encode(file.Encryption)
 	helper.Check(err)
 	newData.Encryption = buf.Bytes()
 
-	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO FileMetaData (Id, Name, Size, SHA1, ExpireAt, SizeBytes,
+	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO FileMetaData (Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes,
                                    DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
                                    UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId,
                                    EncryptedSharePassword)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		newData.Id, newData.Name, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
+		newData.Id, newData.NameEncrypted, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
 		newData.DownloadsRemaining, newData.DownloadCount, newData.PasswordHash, newData.HotlinkId, newData.ContentType,
 		newData.AwsBucket, newData.Encryption, newData.UnlimitedDownloads, newData.UnlimitedTime, newData.UserId, newData.UploadDate,
 		newData.PendingDeletion, newData.UploadRequestId, newData.BundleId, newData.EncryptedSharePassword)
 	helper.Check(err)
+}
+
+// encryptNameForSave returns the value to store in NameEncrypted for this file. An empty name is
+// never a real one - uploads always set one - so it means this models.File was read back while the
+// instance was still sealed, when encryption.DecryptFileName had no key and reported the name as
+// empty. Re-encrypting that would overwrite the stored name with nothing, which matters because
+// bookkeeping writes that are allowed while sealed (marking a file pending deletion, clearing a
+// hotlink) go through this same path. Keeping whatever is already stored is the only correct
+// answer, and on a fresh insert there is nothing to keep.
+func (p DatabaseProvider) encryptNameForSave(file models.File) ([]byte, error) {
+	if file.Name != "" {
+		return encryption.EncryptFileName(file.Name)
+	}
+	var storedName []byte
+	row := p.sqliteDb.QueryRow("SELECT NameEncrypted FROM FileMetaData WHERE Id = ?", file.Id)
+	err := row.Scan(&storedName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return storedName, err
 }
 
 // IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
@@ -194,4 +225,43 @@ func (p DatabaseProvider) GetDownloadsRemaining(id string) int {
 func (p DatabaseProvider) DeleteMetaData(id string) {
 	_, err := p.sqliteDb.Exec("DELETE FROM FileMetaData WHERE Id = ?", id)
 	helper.Check(err)
+}
+
+// MigratePlaintextFileNames re-encrypts every file name still stored in the pre-v22 plaintext
+// Name column and then drops that column, reporting how many rows it converted. It is a separate
+// step rather than part of Upgrade because encrypting needs the master key, which an Input-level
+// instance does not have until an administrator unseals it - long after the schema ladder has run.
+//
+// Doing nothing and reporting 0 once the column is gone is the normal steady state, so this is
+// safe to call on every unseal. A run that is interrupted part way resumes on the next call: rows
+// already converted are skipped by the NameEncrypted IS NULL filter, and the column is only
+// dropped once none are left.
+func (p DatabaseProvider) MigratePlaintextFileNames() int {
+	if !p.columnExists("FileMetaData", "Name") {
+		return 0
+	}
+
+	rows, err := p.sqliteDb.Query(`SELECT Id, Name FROM FileMetaData WHERE NameEncrypted IS NULL`)
+	helper.Check(err)
+	plaintextNames := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		err = rows.Scan(&id, &name)
+		helper.Check(err)
+		plaintextNames[id] = name
+	}
+	helper.Check(rows.Err())
+	rows.Close()
+
+	for id, name := range plaintextNames {
+		var encryptedName []byte
+		encryptedName, err = encryption.EncryptFileName(name)
+		helper.Check(err)
+		_, err = p.sqliteDb.Exec(`UPDATE FileMetaData SET NameEncrypted = ? WHERE Id = ?`, encryptedName, id)
+		helper.Check(err)
+	}
+
+	err = p.rawSqlite(`ALTER TABLE FileMetaData DROP COLUMN "Name"`)
+	helper.Check(err)
+	return len(plaintextNames)
 }

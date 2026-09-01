@@ -193,6 +193,16 @@ func migrateShareAccess(dbOld, dbNew dbabstraction.Database) {
 	}
 }
 
+// MigratePlaintextFileNames re-encrypts any file name that a version predating encrypted file
+// names left in plaintext, and reports how many files were converted. Safe to call repeatedly:
+// once there is nothing left to convert it does no work and returns 0.
+//
+// Called after unsealing rather than from Upgrade because encrypting needs the master key, which
+// an instance running at an Input encryption level does not hold while it is still sealed.
+func MigratePlaintextFileNames() int {
+	return db.MigratePlaintextFileNames()
+}
+
 // RunGarbageCollection runs the databases GC
 func RunGarbageCollection() {
 	db.RunGarbageCollection()

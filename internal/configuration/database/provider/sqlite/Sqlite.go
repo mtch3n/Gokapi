@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 20
+const DatabaseSchemeVersion = 22
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -242,6 +242,16 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			helper.Check(err)
 		}
 	}
+	// Encrypted file names. The column is only added here; the plaintext Name column is read,
+	// re-encrypted into it and dropped by MigratePlaintextFileNames, which cannot run from this
+	// ladder because Upgrade executes at boot, before an Input-level instance has been unsealed
+	// and therefore before a master key exists to encrypt with.
+	if currentDbVersion < 22 {
+		if !p.columnExists("FileMetaData", "NameEncrypted") {
+			err := p.rawSqlite(`ALTER TABLE FileMetaData ADD COLUMN "NameEncrypted" BLOB;`)
+			helper.Check(err)
+		}
+	}
 }
 
 // tableExists returns true if the given table is present. Used to make a
@@ -368,7 +378,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 		);
 		CREATE TABLE "FileMetaData" (
 			"Id"	TEXT NOT NULL UNIQUE,
-			"Name"	TEXT NOT NULL,
+			"NameEncrypted"	BLOB,
 			"Size"	TEXT NOT NULL,
 			"SHA1"	TEXT NOT NULL,
 			"ExpireAt"	INTEGER NOT NULL,

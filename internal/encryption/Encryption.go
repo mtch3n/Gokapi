@@ -430,6 +430,65 @@ func DecryptString(data []byte) (string, error) {
 	return string(plainBytes), nil
 }
 
+// File names are stored with a one-byte format prefix rather than as bare ciphertext, so a stored
+// name says for itself whether it is encrypted. Inferring that from the instance's current
+// encryption level instead would misread every existing row the moment an operator changes that
+// level, which is exactly when the two disagree.
+const (
+	// fileNamePlaintext marks a name stored as-is, which is all an instance can do when it holds
+	// no master key: NoEncryption has none by definition, and EndToEndEncryption keeps none
+	// server-side.
+	fileNamePlaintext = 0x00
+	// fileNameEncrypted marks a name encrypted with the master key, as EncryptString writes it.
+	fileNameEncrypted = 0x01
+)
+
+// EncryptFileName encrypts a file name for storage in the database. File names are treated as
+// content rather than as metadata: on their own they routinely disclose what a file is about
+// ("2026-layoffs-final.xlsx"), so a database dump, a backup or an over-broad read grant must not
+// yield a readable inventory of everything an instance has ever shared.
+//
+// Returns ErrSealed while the instance is sealed. Every caller that writes file metadata is
+// already refused earlier by its own sealed check (see storage.NewFile), so reaching this while
+// sealed is a programming error rather than an operational state.
+func EncryptFileName(name string) ([]byte, error) {
+	if IsSealed() {
+		return nil, ErrSealed
+	}
+	if !IsDecryptionAvailable() {
+		return append([]byte{fileNamePlaintext}, name...), nil
+	}
+	cipherText, err := EncryptString(name)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{fileNameEncrypted}, cipherText...), nil
+}
+
+// DecryptFileName reverses EncryptFileName, returning an empty string when the name cannot be
+// read. Unlike DecryptString it reports no error, because the one expected failure - the instance
+// still being sealed, so the master key does not exist yet - is a normal state that every read of
+// the file list has to survive rather than an error worth propagating. A file whose name cannot
+// be decrypted is still listed, with its size, dates and download counts intact; only the name is
+// withheld. Callers render models.NameUnavailable in its place.
+func DecryptFileName(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	switch data[0] {
+	case fileNamePlaintext:
+		return string(data[1:])
+	case fileNameEncrypted:
+		name, err := DecryptString(data[1:])
+		if err != nil {
+			return ""
+		}
+		return name
+	default:
+		return ""
+	}
+}
+
 func generateNewFileKey(encInfo *models.EncryptionInfo) ([]byte, error) {
 	encryptionKey, err := getRandomData(blockSize)
 	if err != nil {

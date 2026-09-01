@@ -73,7 +73,7 @@ func TestAddDownload(t *testing.T) {
 	// itself is synchronous and already completed by the time LogDownload() returned above)
 	time.Sleep(500 * time.Millisecond)
 	content, _ := os.ReadFile("test/log.txt")
-	test.IsEqualBool(t, strings.Contains(string(content), "UTC   [download] testName, IP 1.1.1.1, ID testId, Useragent testAgent"), true)
+	test.IsEqualBool(t, strings.Contains(string(content), "UTC   [download] IP 1.1.1.1, ID testId, Useragent testAgent"), true)
 	r.Header.Add("X-REAL-IP", "2.2.2.2")
 	err = LogDownload(file, r, false)
 	test.IsNil(t, err)
@@ -123,7 +123,7 @@ func TestLogDownloadDenied(t *testing.T) {
 	test.IsNil(t, err)
 	time.Sleep(500 * time.Millisecond)
 	content, _ := os.ReadFile("test/log.txt")
-	test.IsEqualBool(t, strings.Contains(string(content), "[denied] deniedTestName, ID deniedTestId, IP 9.9.9.9, download denied: incorrect password"), true)
+	test.IsEqualBool(t, strings.Contains(string(content), "[denied] ID deniedTestId, IP 9.9.9.9, download denied: incorrect password"), true)
 }
 
 // TestLogDownloadFailClosed verifies the W7 fail-closed contract at the logging package level:

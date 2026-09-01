@@ -1293,3 +1293,20 @@ func CancelPendingFileDeletion(fileId string) (models.File, bool) {
 	database.SaveMetaData(file)
 	return file, true
 }
+
+// MigratePlaintextFileNames converts any file name that a version predating encrypted file names
+// left in plaintext, and records the count in the log. Runs once the master key is available:
+// at startup for the encryption levels that load their key there, and immediately after a
+// successful unseal for the Input levels, which have no key before that point.
+//
+// A sealed instance is skipped rather than made to fail, so that this stays safe to call
+// unconditionally from startup - the unseal path picks the work up later in that case.
+func MigratePlaintextFileNames() {
+	if encryption.IsSealed() {
+		return
+	}
+	migrated := database.MigratePlaintextFileNames()
+	if migrated > 0 {
+		logging.LogFileNameMigration(migrated)
+	}
+}

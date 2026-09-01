@@ -238,6 +238,13 @@ func LogStartup() {
 	createLogEntry(categoryInfo, "Gokapi started", false)
 }
 
+// LogFileNameMigration adds a log entry recording how many file names were converted from the
+// plaintext storage used before file names were encrypted. Blocking call, as it runs once during
+// startup or unsealing and the count is worth having on disk before anything else happens.
+func LogFileNameMigration(count int) {
+	createLogEntry(categoryConfig, fmt.Sprintf("Encrypted %d file name(s) that were stored in plaintext", count), true)
+}
+
 // LogShutdown adds a log entry to indicate that Gokapi is shutting down. Blocking call
 func LogShutdown() {
 	createLogEntry(categoryInfo, "Gokapi shutting down", true)
@@ -403,9 +410,9 @@ func LogDownload(file models.File, r *http.Request, saveIp bool) error {
 	ip := ""
 	if saveIp {
 		ip = GetIpAddress(r)
-		createLogEntry(categoryDownload, fmt.Sprintf("%s, IP %s, ID %s, Useragent %s", file.Name, ip, file.Id, sanitiseUserAgent(r)), false)
+		createLogEntry(categoryDownload, fmt.Sprintf("IP %s, ID %s, Useragent %s", ip, file.Id, sanitiseUserAgent(r)), false)
 	} else {
-		createLogEntry(categoryDownload, fmt.Sprintf("%s, ID %s, Useragent %s", file.Name, file.Id, sanitiseUserAgent(r)), false)
+		createLogEntry(categoryDownload, fmt.Sprintf("ID %s, Useragent %s", file.Id, sanitiseUserAgent(r)), false)
 	}
 	return appendAuditEntry(AuditEntry{
 		Category:   categoryDownload,
@@ -439,7 +446,7 @@ func LogDownloadDenied(file models.File, r *http.Request, saveIp bool, reason st
 	if saveIp {
 		ip = GetIpAddress(r)
 	}
-	createLogEntry(categoryDenied, fmt.Sprintf("%s, ID %s, IP %s, download denied: %s", file.Name, file.Id, ip, reason), false)
+	createLogEntry(categoryDenied, fmt.Sprintf("ID %s, IP %s, download denied: %s", file.Id, ip, reason), false)
 	return appendAuditEntry(AuditEntry{
 		Category:   categoryDenied,
 		Action:     "download",
@@ -469,10 +476,10 @@ func LogUpload(file models.File, user models.User, fr models.FileRequest, r *htt
 	}
 	action := "upload"
 	if fr.Id != "" {
-		createLogEntry(categoryUpload, fmt.Sprintf("%s, ID %s, IP %s, uploaded to file request %s (%s), owned by %s (user #%d) ", file.Name, ip, file.Id, fr.Id, fr.Name, user.Name, user.Id), false)
+		createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded to file request %s (%s), owned by %s (user #%d) ", file.Id, ip, fr.Id, fr.Name, user.Name, user.Id), false)
 		action = "upload.filerequest"
 	} else {
-		createLogEntry(categoryUpload, fmt.Sprintf("%s, ID %s, IP %s, uploaded by %s (user #%d)", file.Name, ip, file.Id, user.Name, user.Id), false)
+		createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded by %s (user #%d)", file.Id, ip, user.Name, user.Id), false)
 	}
 	return appendAuditEntry(AuditEntry{
 		Category:   categoryUpload,
@@ -488,7 +495,7 @@ func LogUpload(file models.File, user models.User, fr models.FileRequest, r *htt
 
 // LogEdit adds a log entry when an upload was edited. Non-Blocking
 func LogEdit(file models.File, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, edited by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("ID %s, edited by %s (user #%d)", file.Id, user.Name, user.Id), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category:   categoryEdit,
 		Action:     "file.edited",
@@ -556,7 +563,7 @@ func LogReplace(originalFile, newContent models.File, user models.User) {
 // fire-and-forget appendAuditEntryAsync used for most other edit/log events, since a deletion is
 // irreversible: an entry lost to a local write failure here can never be reconstructed.
 func LogDelete(file models.File, user models.User) error {
-	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, deleted by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("ID %s, deleted by %s (user #%d)", file.Id, user.Name, user.Id), false)
 	return appendAuditEntry(AuditEntry{
 		Category: categoryEdit,
 		Action:   "file.deleted",
@@ -589,7 +596,7 @@ func LogFolderCreate(bundle models.FileBundle, user models.User) {
 func LogFolderDeleteBatch(bundle models.FileBundle, memberFiles []models.File, user models.User) error {
 	entries := make([]AuditEntry, 0, len(memberFiles)+1)
 	for _, file := range memberFiles {
-		createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, deleted by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+		createLogEntry(categoryEdit, fmt.Sprintf("ID %s, deleted by %s (user #%d)", file.Id, user.Name, user.Id), false)
 		entries = append(entries, AuditEntry{
 			Category: categoryEdit,
 			Action:   "file.deleted",
@@ -611,7 +618,7 @@ func LogFolderDeleteBatch(bundle models.FileBundle, memberFiles []models.File, u
 
 // LogRestore adds a log entry when the pending deletion of a file was cancelled and the file restored. Non-Blocking
 func LogRestore(file models.File, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s, restored by %s (user #%d)", file.Name, file.Id, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("ID %s, restored by %s (user #%d)", file.Id, user.Name, user.Id), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category: categoryEdit,
 		Action:   "file.restored",
@@ -625,7 +632,7 @@ func LogRestore(file models.File, user models.User) {
 // was automatically disposed of by the periodic cleanup job. There is no requester to
 // attribute this to; it is a system action. Non-blocking, as this runs off the request path.
 func LogFileExpired(file models.File, reason string) {
-	createLogEntry(categoryExpiry, fmt.Sprintf("%s, ID %s, automatically disposed of: %s", file.Name, file.Id, reason), false)
+	createLogEntry(categoryExpiry, fmt.Sprintf("ID %s, automatically disposed of: %s", file.Id, reason), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category: categoryExpiry,
 		Action:   "file.disposed",

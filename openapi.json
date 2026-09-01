@@ -2817,7 +2817,7 @@
           },
           "Name": {
             "type": "string",
-            "description": "The filename. Will be 'Encrypted file' for end-to-end encrypted files",
+            "description": "The filename. Will be 'Encrypted file' for end-to-end encrypted files, and '(sealed)' while the instance is sealed and cannot decrypt stored file names",
             "example": "Test File.jpg"
           },
           "Size": {

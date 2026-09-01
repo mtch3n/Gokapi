@@ -1513,6 +1513,17 @@ func TestNewFileFromChunkSealedRefusesUpload(t *testing.T) {
 // nothing served) - the response is committed directly inside ServeFile, so no caller
 // additionally renders an "expired" page/image over the top of it.
 func TestServeFileSealedRefusesDownload(t *testing.T) {
+	// Stored before sealing, because a file name can only be encrypted while the master key
+	// exists (see encryption.EncryptFileName) - which is exactly what sealing takes away.
+	e2eFile := models.File{
+		Id:                 "sealedDownloadE2EFile",
+		Name:               "sealed-e2e.txt",
+		Encryption:         models.EncryptionInfo{IsEncrypted: true, IsEndToEndEncrypted: true},
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	}
+	database.SaveMetaData(e2eFile)
+
 	defer sealAtInputLevel(t, encryption.FullEncryptionInput, "servefile")()
 
 	file := models.File{
@@ -1534,14 +1545,6 @@ func TestServeFileSealedRefusesDownload(t *testing.T) {
 	// An end-to-end encrypted file never touches the server's master key at all (the server
 	// never holds a key capable of decrypting it), so it must not be blocked by the sealed check
 	// above - only IsEncrypted && !IsEndToEndEncrypted is gated.
-	e2eFile := models.File{
-		Id:                 "sealedDownloadE2EFile",
-		Name:               "sealed-e2e.txt",
-		Encryption:         models.EncryptionInfo{IsEncrypted: true, IsEndToEndEncrypted: true},
-		UnlimitedDownloads: true,
-		UnlimitedTime:      true,
-	}
-	database.SaveMetaData(e2eFile)
 	r = httptest.NewRequest("GET", "/", nil)
 	w = httptest.NewRecorder()
 	handled = ServeFile(e2eFile, w, r, true, true, false, false)

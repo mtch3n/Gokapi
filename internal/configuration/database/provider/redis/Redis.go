@@ -450,3 +450,10 @@ func (p DatabaseProvider) deleteAllWithPrefix(prefix string) {
 }
 
 var osExit = os.Exit
+
+func (p DatabaseProvider) deleteHashField(id, field string) {
+	conn := p.pool.Get()
+	defer conn.Close()
+	_, err := conn.Do("HDEL", p.dbPrefix+id, field)
+	helper.Check(err)
+}

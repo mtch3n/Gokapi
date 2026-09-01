@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
 	"io"
@@ -632,4 +633,64 @@ func TestUnsealSemaphoreReleasedOnIncorrectPassword(t *testing.T) {
 	err = Unseal(password)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, IsSealed(), false)
+}
+
+// TestEncryptDecryptFileNameRoundTrip covers the ordinary case: with a master key loaded, a name
+// survives a round trip and its ciphertext contains no trace of the plaintext, which is the whole
+// point of storing it encrypted.
+func TestEncryptDecryptFileNameRoundTrip(t *testing.T) {
+	key, err := GetRandomCipher()
+	test.IsNil(t, err)
+	Init(models.Configuration{Encryption: models.Encryption{Level: FullEncryptionStored, Cipher: key}})
+
+	const name = "2026-layoffs-final.xlsx"
+	encrypted, err := EncryptFileName(name)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, bytes.Contains(encrypted, []byte(name)), false)
+	test.IsEqualInt(t, int(encrypted[0]), fileNameEncrypted)
+	test.IsEqualString(t, DecryptFileName(encrypted), name)
+}
+
+// TestEncryptFileNameWithoutMasterKey covers the levels that hold no server-side master key at
+// all - NoEncryption by definition, EndToEndEncryption because the key never leaves the client.
+// Those cannot encrypt a name, so it is stored with the plaintext marker rather than failing the
+// upload, and DecryptFileName has to read it back from the marker rather than from the level
+// currently configured.
+func TestEncryptFileNameWithoutMasterKey(t *testing.T) {
+	previousRamCipher, previousEncryptedKey := ramCipher, encryptedKey
+	defer func() { ramCipher, encryptedKey = previousRamCipher, previousEncryptedKey }()
+	Init(models.Configuration{Encryption: models.Encryption{Level: NoEncryption}})
+	ramCipher, encryptedKey = nil, nil
+
+	encrypted, err := EncryptFileName("holiday-photo.jpg")
+	test.IsNil(t, err)
+	test.IsEqualInt(t, int(encrypted[0]), fileNamePlaintext)
+	test.IsEqualString(t, DecryptFileName(encrypted), "holiday-photo.jpg")
+}
+
+// TestFileNameWhileSealed locks the two halves of the sealed contract that the rest of the code
+// relies on. Writing must fail loudly (every caller that writes metadata is refused by its own
+// sealed check long before this point, so getting here means a bug), while reading must fail
+// quietly: the file list is served while sealed and has to survive a name it cannot decrypt,
+// reporting it as absent rather than panicking the request.
+func TestFileNameWhileSealed(t *testing.T) {
+	key, err := GetRandomCipher()
+	test.IsNil(t, err)
+	Init(models.Configuration{Encryption: models.Encryption{Level: FullEncryptionStored, Cipher: key}})
+	encrypted, err := EncryptFileName("contract.pdf")
+	test.IsNil(t, err)
+
+	Init(sealedTestConfig(FullEncryptionInput, "correct horse battery staple"))
+	test.IsEqualBool(t, IsSealed(), true)
+
+	_, err = EncryptFileName("contract.pdf")
+	test.IsEqualBool(t, errors.Is(err, ErrSealed), true)
+	test.IsEqualString(t, DecryptFileName(encrypted), "")
+}
+
+// TestDecryptFileNameRejectsUnknownFormat guards the format byte itself: anything this version
+// does not recognise reports no name rather than being handed back to a client as if it were one.
+func TestDecryptFileNameRejectsUnknownFormat(t *testing.T) {
+	test.IsEqualString(t, DecryptFileName(nil), "")
+	test.IsEqualString(t, DecryptFileName([]byte{0xFF, 'a', 'b'}), "")
 }

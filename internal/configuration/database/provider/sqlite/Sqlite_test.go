@@ -3,6 +3,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"math"
 	"os"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
@@ -754,4 +756,64 @@ func TestRawSql(t *testing.T) {
 	dbInstance.sqliteDb = nil
 	defer test.ExpectPanic(t)
 	_ = dbInstance.rawSqlite("Select * from Sessions")
+}
+
+// TestFileNameNotStoredInPlaintext is the requirement this provider exists to satisfy: a file
+// name must not be readable in the database itself. Asserted against the raw database file rather
+// than through the provider, because reading it back through SaveMetaData/GetMetaDataById would
+// pass just as happily with the name stored in the clear - the threat here is whoever holds a
+// dump, a backup or a read grant, not the application.
+func TestFileNameNotStoredInPlaintext(t *testing.T) {
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+
+	const secretName = "2026-layoffs-final-do-not-share.xlsx"
+	instance, err := New(config)
+	test.IsNil(t, err)
+	instance.SaveMetaData(models.File{Id: "plaintextNameTest", Name: secretName, SHA1: "abc"})
+
+	retrieved, ok := instance.GetMetaDataById("plaintextNameTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, retrieved.Name, secretName)
+	instance.Close()
+
+	rawDatabase, err := os.ReadFile(config.HostUrl)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, bytes.Contains(rawDatabase, []byte(secretName)), false)
+}
+
+// TestMigratePlaintextFileNames covers the upgrade path for a database written before file names
+// were encrypted: the name has to be moved into NameEncrypted and the plaintext column removed,
+// leaving nothing behind for a later dump to pick up. Re-running it must be a no-op, because it
+// is called on every unseal rather than once.
+func TestMigratePlaintextFileNames(t *testing.T) {
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+
+	const legacyName = "pre-migration-invoice.pdf"
+	instance, err := New(models.DbConnection{HostUrl: "./test/newfolder/gokapi_names.sqlite"})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	// Recreate the pre-v22 shape: a plaintext Name column, populated, with NameEncrypted unset.
+	test.IsNil(t, instance.rawSqlite(`ALTER TABLE FileMetaData ADD COLUMN "Name" TEXT NOT NULL DEFAULT ''`))
+	instance.SaveMetaData(models.File{Id: "legacyNameTest", SHA1: "def"})
+	_, err = instance.sqliteDb.Exec(`UPDATE FileMetaData SET Name = ?, NameEncrypted = NULL WHERE Id = ?`,
+		legacyName, "legacyNameTest")
+	test.IsNil(t, err)
+
+	test.IsEqualInt(t, instance.MigratePlaintextFileNames(), 1)
+	test.IsEqualBool(t, instance.columnExists("FileMetaData", "Name"), false)
+
+	migrated, ok := instance.GetMetaDataById("legacyNameTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, migrated.Name, legacyName)
+
+	test.IsEqualInt(t, instance.MigratePlaintextFileNames(), 0)
 }

@@ -134,3 +134,36 @@ Docker container loses data after update
 
 See :ref:`quickstart_docker` for the full run command.
 
+
+
+File names are shown as "(sealed)"
+-----------------------------------
+
+**Symptom:** The file list loads and shows sizes, dates and download counts, but every file
+is named ``(sealed)``.
+
+**Cause:** File names are stored encrypted with the server's master key. At the encryption
+levels that ask for the password on startup, that key does not exist until the instance has
+been unsealed, so the stored names cannot be read yet. Downloads are refused in this state
+for the same reason.
+
+**Fix:** Unseal the instance by posting the encryption password to ``/api/unseal``. The names
+appear on the next reload.
+
+Note that a restart re-seals the instance, so this is expected after every restart at those
+encryption levels.
+
+
+File names stay "(sealed)" after unsealing
+-------------------------------------------
+
+**Symptom:** Unsealing succeeded and downloads work, but file names uploaded by an older
+Gokapi version are still shown as ``(sealed)``.
+
+**Cause:** Upgrading converts file names that were previously stored in plaintext, and that
+conversion needs the master key, so it runs when the instance is unsealed rather than at
+startup. If the conversion did not finish, the affected names are left unreadable.
+
+**Fix:** Check the log for an ``Encrypted N file name(s) that were stored in plaintext``
+entry, which is written once the conversion completes. If it is missing, unseal the instance
+again - the conversion resumes where it stopped and is safe to repeat.

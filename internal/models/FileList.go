@@ -49,7 +49,7 @@ func (f *File) AccessMode(hasRecipients bool) string {
 // File is a struct used for saving information about an uploaded file
 type File struct {
 	Id                      string         `json:"Id" redis:"Id"`                                 // The internal ID of the file
-	Name                    string         `json:"Name" redis:"Name"`                             // The filename. Will be 'Encrypted file' for end-to-end encrypted files
+	Name                    string         `json:"Name" redis:"-"`                                // The filename, held in plaintext only in memory. Will be 'Encrypted file' for end-to-end encrypted files, and NameUnavailable while the instance is sealed
 	Size                    string         `json:"Size" redis:"Size"`                             // Filesize in a human-readable format
 	SHA1                    string         `json:"SHA1" redis:"SHA1"`                             // The hash of the file, used for deduplication
 	PasswordHash            string         `json:"PasswordHash" redis:"PasswordHash"`             // The hash of the password (if the file is password-protected)
@@ -69,6 +69,7 @@ type File struct {
 	UnlimitedDownloads      bool           `json:"UnlimitedDownloads" redis:"UnlimitedDownloads"` // True if the uploader did not limit the downloads
 	UnlimitedTime           bool           `json:"UnlimitedTime" redis:"UnlimitedTime"`           // True if the uploader did not limit the time
 	InternalRedisEncryption []byte         `redis:"EncryptionRedis"`                              // This field is an internal field, used to store the EncryptionInfo in a Redis Hashmap
+	InternalRedisName       []byte         `json:"-" redis:"NameEncrypted"`                       // This field is an internal field, used to store the encrypted Name in a Redis Hashmap
 	// EncryptedSharePassword holds the auto-generated share password, encrypted with the
 	// server master key (see encryption.EncryptString), so it can be retrieved later through
 	// /api/files/{id}/sharekey. Only ever populated when configuration.StoreShareKeys is
@@ -107,6 +108,12 @@ type FileApiOutput struct {
 	UploaderId                   int    `json:"UploaderId"`                   // The user ID of the uploader
 }
 
+// NameUnavailable is reported in place of a file name that could not be decrypted, which happens
+// while the instance is sealed and the master key therefore does not exist yet. It is deliberately
+// not an empty string: a client showing a blank cell cannot tell "this file has no name" apart
+// from "this name is withheld for now", and the second is the only one that ever actually occurs.
+const NameUnavailable = "(sealed)"
+
 // EncryptionInfo holds information about the encryption used on the file
 type EncryptionInfo struct {
 	IsEncrypted         bool   `json:"IsEncrypted" redis:"IsEncrypted"`
@@ -131,6 +138,12 @@ func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool) (FileApi
 	err := copier.Copy(&result, &f)
 	if err != nil {
 		return FileApiOutput{}, err
+	}
+	// copier has already copied Name across; an empty one here means the row could not be
+	// decrypted, so report that rather than an empty cell (see NameUnavailable). A real file can
+	// never legitimately have an empty name - uploads reject one.
+	if result.Name == "" {
+		result.Name = NameUnavailable
 	}
 	result.IsFileRequest = f.UploadRequestId != ""
 	result.IsPasswordProtected = f.PasswordHash != ""
