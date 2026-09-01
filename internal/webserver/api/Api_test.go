@@ -26,6 +26,7 @@ import (
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
 	"github.com/forceu/gokapi/internal/webserver/authentication/downloadPasswordToken"
+	"github.com/forceu/gokapi/internal/webserver/errorHandling/errorcodes"
 	"github.com/forceu/gokapi/internal/webserver/ratelimiter"
 )
 
@@ -3626,4 +3627,275 @@ func TestChunkCompleteBundleOwnershipRejected(t *testing.T) {
 	if strings.Contains(w2.Body.String(), "bundle does not belong to user") {
 		t.Errorf("Positive control should not fail with ownership error when using correct bundle owner")
 	}
+}
+
+// sealedStatusResponse mirrors apiSealStatus's JSON shape.
+type sealedStatusResponse struct {
+	Sealed          bool `json:"sealed"`
+	EncryptionLevel int  `json:"encryptionLevel"`
+}
+
+func getSealStatus(t *testing.T) (*httptest.ResponseRecorder, sealedStatusResponse) {
+	t.Helper()
+	w, r := test.GetRecorder("GET", "/api/seal-status", nil, nil, nil)
+	Process(w, r)
+	var result sealedStatusResponse
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	return w, result
+}
+
+func postUnseal(password string) (*httptest.ResponseRecorder, *http.Request) {
+	body, _ := json.Marshal(struct {
+		Password string `json:"password"`
+	}{Password: password})
+	return test.GetRecorder("POST", "/api/unseal", nil, nil, bytes.NewReader(body))
+}
+
+// sealAtFullEncryptionInput seals the instance at FullEncryptionInput with a real,
+// scrypt-verifiable password (the same derivation POST /api/unseal exercises via
+// encryption.Unseal), and restores the instance to whatever decryption-availability state it had
+// before the calling test - matching an already-loaded master key back with a freshly generated
+// one, mirroring withMasterKey's own "additive only" contract, so a later test in this shared
+// binary that assumes a master key is loaded is not left with none.
+func sealAtFullEncryptionInput(t *testing.T, password, saltSuffix string) {
+	t.Helper()
+	wasAvailable := encryption.IsDecryptionAvailable()
+	previousLevel := configuration.Get().Encryption.Level
+	checksumSalt := "api-seal-test-checksum-salt-" + saltSuffix
+	// isEncryptionRequested (storage.FileServing.go), which the upload gate depends on, reads
+	// the level from the configuration package directly - encryption.Init alone only affects
+	// the encryption package's own state, so both have to be set for the gate to engage.
+	configuration.Get().Encryption.Level = encryption.FullEncryptionInput
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:        encryption.FullEncryptionInput,
+		Salt:         "api-seal-test-salt-" + saltSuffix,
+		ChecksumSalt: checksumSalt,
+		Checksum:     encryption.PasswordChecksum(password, checksumSalt),
+	}})
+	t.Cleanup(func() {
+		configuration.Get().Encryption.Level = previousLevel
+		if wasAvailable {
+			key, err := encryption.GetRandomCipher()
+			test.IsNil(t, err)
+			encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.FullEncryptionStored, Cipher: key}})
+			return
+		}
+		encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+	})
+}
+
+// TestApiSealStatus is the failing-first test for GET /api/seal-status: it must be reachable
+// with no apikey header at all (an admin cannot be authenticated before the instance is
+// unsealed, in the general case), and it must report the true sealed state and the configured
+// encryption level - nothing else.
+func TestApiSealStatus(t *testing.T) {
+	previousLevel := configuration.Get().Encryption.Level
+	t.Cleanup(func() { configuration.Get().Encryption.Level = previousLevel })
+
+	configuration.Get().Encryption.Level = encryption.NoEncryption
+	w, result := getSealStatus(t)
+	test.IsEqualInt(t, w.Code, 200)
+	test.IsEqualBool(t, result.Sealed, false)
+	test.IsEqualInt(t, result.EncryptionLevel, encryption.NoEncryption)
+
+	configuration.Get().Encryption.Level = encryption.FullEncryptionInput
+	sealAtFullEncryptionInput(t, "seal-status-password", "sealstatus")
+	w, result = getSealStatus(t)
+	test.IsEqualInt(t, w.Code, 200)
+	test.IsEqualBool(t, result.Sealed, true)
+	test.IsEqualInt(t, result.EncryptionLevel, encryption.FullEncryptionInput)
+}
+
+// TestApiUnsealCorrectAndIncorrectPassword is the failing-first test for POST /api/unseal: a
+// wrong (or empty) password must return a generic failure and leave the instance sealed (visible
+// via /api/seal-status), while the correct password must unseal it and flip seal-status - both
+// with no apikey header, since this endpoint is deliberately unauthenticated.
+func TestApiUnsealCorrectAndIncorrectPassword(t *testing.T) {
+	const password = "the correct unseal password"
+	sealAtFullEncryptionInput(t, password, "unseal-correctness")
+
+	_, result := getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, true)
+
+	// Empty password.
+	w, r := postUnseal("")
+	Process(w, r)
+	test.IsEqualBool(t, w.Code == 200, false)
+	var errResult struct {
+		Result       string `json:"Result"`
+		ErrorMessage string `json:"ErrorMessage"`
+		ErrorCode    int    `json:"ErrorCode"`
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &errResult)
+	test.IsNil(t, err)
+	test.IsEqualString(t, errResult.Result, "error")
+	test.IsEqualBool(t, strings.Contains(strings.ToLower(errResult.ErrorMessage), "password"), true)
+	// The generic failure must not reveal anything more specific than "incorrect" - in
+	// particular it must never echo the submitted (empty) password back, nor say anything
+	// distinguishing this from a wrong-but-nonempty password.
+	test.IsEqualBool(t, strings.Contains(errResult.ErrorMessage, password), false)
+	_, result = getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, true)
+
+	// Wrong, nonempty password: same generic shape, still sealed.
+	w, r = postUnseal("the WRONG password")
+	Process(w, r)
+	test.IsEqualBool(t, w.Code == 200, false)
+	errResult = struct {
+		Result       string `json:"Result"`
+		ErrorMessage string `json:"ErrorMessage"`
+		ErrorCode    int    `json:"ErrorCode"`
+	}{}
+	err = json.Unmarshal(w.Body.Bytes(), &errResult)
+	test.IsNil(t, err)
+	test.IsEqualString(t, errResult.Result, "error")
+	_, result = getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, true)
+
+	// Correct password: unseals, and seal-status flips.
+	w, r = postUnseal(password)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	_, result = getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, false)
+}
+
+// TestApiUnsealRateLimitReturns429 is the failing-first test for turning unseal throttling from a
+// blocking wait (the old ratelimiter.WaitOnUnseal, which only ever delayed via WaitN and never
+// rejected) into an immediate rejection: once an IP has exhausted its burst (see
+// ratelimiter.AllowUnseal), a further POST /api/unseal request from that IP must get 429
+// promptly - not be parked until the limiter would eventually allow it through. Every request
+// here uses an empty password, so this never reaches encryption.Unseal's expensive scrypt path
+// (see TestApiUnsealCorrectAndIncorrectPassword for that); only the per-IP throttle in front of
+// it is under test. Real rate limiting is disabled for this whole test binary (see TestMain), so
+// it is switched on only for the duration of this test, against an IP address no other test in
+// this file uses, so as not to disturb - or be disturbed by - shared limiter state.
+func TestApiUnsealRateLimitReturns429(t *testing.T) {
+	ratelimiter.SetUnitTestMode(false)
+	t.Cleanup(func() { ratelimiter.SetUnitTestMode(true) })
+
+	const password = "rate-limit-test-password"
+	sealAtFullEncryptionInput(t, password, "unseal-ratelimit")
+
+	newRequest := func() (*httptest.ResponseRecorder, *http.Request) {
+		w, r := postUnseal("")
+		r.RemoteAddr = "203.0.113.77:54321"
+		return w, r
+	}
+
+	for i := 0; i < 20; i++ {
+		w, r := newRequest()
+		Process(w, r)
+		if w.Code == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d: got 429 before the burst should have been exhausted", i+1)
+		}
+	}
+
+	start := time.Now()
+	w, r := newRequest()
+	Process(w, r)
+	elapsed := time.Since(start)
+
+	test.IsEqualInt(t, w.Code, http.StatusTooManyRequests)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("request blocked for %v instead of returning 429 promptly", elapsed)
+	}
+	_, result := getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, true)
+}
+
+// TestApiUnsealBusyReturns429 is the failing-first test for the process-wide derivation
+// semaphore's effect at the HTTP layer (see encryption.Unseal / encryption.ErrUnsealBusy): while
+// a derivation is in flight, apiUnseal must answer 429 rather than also run scrypt or queue
+// behind it - this is what bounds memory to a single ~1 GiB derivation regardless of attacker
+// concurrency. Exercised cheaply, without running a real derivation at all: the single
+// process-wide slot is taken directly via encryption.AcquireUnsealSemaphoreForTesting, mirroring
+// TestUnsealSemaphoreRejectsWhenBusy in the encryption package but confirming apiUnseal's own
+// mapping of ErrUnsealBusy onto the HTTP response.
+func TestApiUnsealBusyReturns429(t *testing.T) {
+	const password = "api-busy-test-password"
+	sealAtFullEncryptionInput(t, password, "unseal-busy")
+
+	acquired := encryption.AcquireUnsealSemaphoreForTesting()
+	test.IsEqualBool(t, acquired, true)
+	defer encryption.ReleaseUnsealSemaphoreForTesting()
+
+	w, r := postUnseal(password)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, http.StatusTooManyRequests)
+
+	_, result := getSealStatus(t)
+	test.IsEqualBool(t, result.Sealed, true)
+}
+
+// TestApiUnsealGatesKeyDependentOperations is the failing-first test for the "refuse cleanly
+// while sealed" requirement at the API layer: an upload and a request for
+// /files/{id}/sharekey must both answer 503 with errorcodes.InstanceSealed while sealed - not
+// panic, not silently misbehave - and both must work normally again once unsealed.
+func TestApiUnsealGatesKeyDependentOperations(t *testing.T) {
+	const password = "gating-test-password"
+	sealAtFullEncryptionInput(t, password, "gating")
+
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermUpload)
+	apiKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(apiKey)
+
+	// A separate uuid/chunk file per attempt: doBlockingPartCompleteChunk deletes the reserved
+	// chunk on any error (including the sealed refusal below), so reusing one across both the
+	// sealed and the post-unseal attempt would make the second attempt fail for an unrelated
+	// reason (no such chunk) rather than actually proving upload works again once unsealed.
+	sealedContent := []byte("sealed gating test content")
+	uuidSealed := helper.GenerateRandomString(16)
+	err := os.WriteFile("test/data/chunk-"+uuidSealed, sealedContent, 0600)
+	test.IsNil(t, err)
+	defer os.Remove("test/data/chunk-" + uuidSealed)
+
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKey.Id},
+		{Name: "uuid", Value: uuidSealed},
+		{Name: "filename", Value: "sealed-gate-test.txt"},
+		{Name: "filesize", Value: strconv.Itoa(len(sealedContent))},
+	}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, http.StatusServiceUnavailable)
+	var errResult struct {
+		ErrorCode int `json:"ErrorCode"`
+	}
+	err = json.Unmarshal(w.Body.Bytes(), &errResult)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, errResult.ErrorCode, errorcodes.InstanceSealed)
+
+	// /files/{id}/sharekey must also refuse while sealed - checked against a file created
+	// before sealing (idFileUser from generateTestData), since the point under test is the read
+	// path, not upload gating.
+	w, r = getShareKey(apiKey.Id, idFileUser)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, http.StatusServiceUnavailable)
+	errResult = struct {
+		ErrorCode int `json:"ErrorCode"`
+	}{}
+	err = json.Unmarshal(w.Body.Bytes(), &errResult)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, errResult.ErrorCode, errorcodes.InstanceSealed)
+
+	// Once unsealed, a fresh upload must succeed normally.
+	err = encryption.Unseal(password)
+	test.IsNil(t, err)
+
+	afterUnsealContent := []byte("post-unseal gating test content")
+	uuidAfterUnseal := helper.GenerateRandomString(16)
+	err = os.WriteFile("test/data/chunk-"+uuidAfterUnseal, afterUnsealContent, 0600)
+	test.IsNil(t, err)
+	defer os.Remove("test/data/chunk-" + uuidAfterUnseal)
+
+	w, r = test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKey.Id},
+		{Name: "uuid", Value: uuidAfterUnseal},
+		{Name: "filename", Value: "post-unseal-gate-test.txt"},
+		{Name: "filesize", Value: strconv.Itoa(len(afterUnsealContent))},
+	}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
 }

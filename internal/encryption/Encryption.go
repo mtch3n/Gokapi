@@ -12,9 +12,8 @@ import (
 	"io"
 	"log"
 	"os"
-	"time"
+	"sync"
 
-	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/secure-io/sio-go"
 	"golang.org/x/crypto/scrypt"
@@ -38,13 +37,72 @@ const FullEncryptionInput = 4
 // EndToEndEncryption means all files are encrypted and decrypted client-side
 const EndToEndEncryption = 5
 
+// mu guards every package-level variable below: the sealed/unsealed flag, the salts/checksum
+// recorded for a sealed instance, and the in-memory master key material itself. Unseal can be
+// called concurrently (e.g. several admins racing to submit the password, or a retried request),
+// so every read or write of this state goes through mu rather than relying on it only ever being
+// touched from one goroutine at startup, which was true before sealed boot existed.
+var mu sync.Mutex
+
 var encryptedKey, ramCipher []byte
 
+// sealed is true only for the Input encryption levels (LocalEncryptionInput/FullEncryptionInput)
+// before a successful Unseal call. It is always false for every other level - see Init.
+var sealed bool
+
+// sealedSalt, sealedChecksum and sealedChecksumSalt are the values Init recorded for a sealed
+// instance, kept in memory only so Unseal can later reproduce and verify the scrypt derivation
+// without having to re-read the configuration.
+var sealedSalt, sealedChecksum, sealedChecksumSalt string
+
 // IsDecryptionAvailable returns true if the master encryption key has been
-// loaded into memory, meaning server-side decryption is possible.
+// loaded into memory, meaning server-side decryption is possible. Always false while the
+// instance is sealed, even though the fields backing it may still hold a stale key from before
+// a previous Init - IsSealed is authoritative on whether that key may be used.
 func IsDecryptionAvailable() bool {
-	return len(ramCipher) > 0
+	mu.Lock()
+	defer mu.Unlock()
+	return !sealed && len(ramCipher) > 0
 }
+
+// IsSealed returns true if the instance is running at an Input encryption level
+// (LocalEncryptionInput or FullEncryptionInput) and has not yet been unsealed with the correct
+// password via Unseal. Always false at every other level: NoEncryption never has a key to seal,
+// LocalEncryptionStored/FullEncryptionStored load their key from the stored cipher at Init, and
+// EndToEndEncryption never holds a server-side key capable of decrypting anything in the first
+// place.
+func IsSealed() bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return sealed
+}
+
+// ErrSealed is returned by encryption operations that need the master key while the instance is
+// still sealed (see IsSealed). Callers that can produce a clearer, user-facing refusal (e.g. the
+// webserver/storage packages) should check IsSealed themselves before reaching this point; this
+// is the last line of defence that keeps fileCipherEncrypt/fileCipherDecrypt from ever calling
+// into getMasterCipher with no key loaded, which would otherwise be a fatal error.
+var ErrSealed = errors.New("instance is sealed")
+
+// ErrIncorrectPassword is returned by Unseal when the supplied password is empty or does not
+// match the checksum recorded when the instance was configured. The instance remains sealed.
+var ErrIncorrectPassword = errors.New("incorrect password provided")
+
+// ErrUnsealBusy is returned by Unseal when another unseal derivation is already in flight
+// process-wide (see unsealSemaphore). The caller (POST /api/unseal) should answer 429/503
+// immediately rather than retry inline - retrying right away would just contend for the same
+// single derivation slot again.
+var ErrUnsealBusy = errors.New("an unseal derivation is already in progress")
+
+// unsealSemaphore bounds the expensive part of Unseal (the scrypt derivation, both the checksum
+// verification and the key derivation itself - see PasswordChecksum and the scrypt.Key call
+// below) to exactly one in flight at a time, process-wide. Each derivation uses N=2^20
+// (~1 GiB of working memory, 1-2s of CPU); without this cap, an unauthenticated caller could
+// force many derivations to run concurrently via POST /api/unseal and exhaust memory. Acquired
+// with a non-blocking send so a caller that cannot get the single slot fails fast with
+// ErrUnsealBusy instead of queueing behind (and thereby holding open a connection for) whichever
+// derivation is already running.
+var unsealSemaphore = make(chan struct{}, 1)
 
 const blockSize = 32
 const nonceSize = 12
@@ -53,12 +111,25 @@ const nonceSize = 12
 // externally, e.g. resolved from a secret store into the environment before startup
 const envMasterKey = "GOKAPI_ENCRYPTION_KEY_B64"
 
-// Init needs to be called to load the master key into memory or ask the user for the password
+// Init needs to be called to load the master key into memory, or - for the Input encryption
+// levels (LocalEncryptionInput/FullEncryptionInput) - to record the instance as sealed. It never
+// reads from stdin and never blocks: those levels derive their key from a password only, and a
+// server running detached (e.g. in a container, with no attached terminal) must still be able to
+// start and serve. The instance stays sealed until an admin calls Unseal with the correct
+// password, typically over the webserver's /api/unseal endpoint.
 func Init(config models.Configuration) {
 	externalKey, err := getExternalKey(config.Encryption.Level)
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Init fully determines the sealed state from the supplied config on every call - a level
+	// that does not need sealing (or a fresh call to Init itself) must not leave the instance
+	// sealed from a previous configuration. Levels 2/4 set sealed back to true immediately below
+	// via initSealed.
+	mu.Lock()
+	sealed = false
+	sealedSalt, sealedChecksum, sealedChecksumSalt = "", "", ""
+	mu.Unlock()
 	switch config.Encryption.Level {
 	case NoEncryption:
 		return
@@ -69,10 +140,96 @@ func Init(config models.Configuration) {
 		}
 		initWithCipher(config.Encryption.Cipher)
 	case LocalEncryptionInput, FullEncryptionInput:
-		initWithPassword(config.Encryption.Salt, config.Encryption.Checksum, config.Encryption.ChecksumSalt)
+		initSealed(config.Encryption.Salt, config.Encryption.Checksum, config.Encryption.ChecksumSalt)
 	case EndToEndEncryption:
 		return
 	}
+}
+
+// initSealed records the instance as sealed and stores the salts/checksum Unseal will later need
+// to derive and verify the master key. An empty salt means the configuration itself is broken
+// (not merely "not unsealed yet"), so that case still fails startup immediately, exactly as it
+// did before sealed boot existed.
+func initSealed(saltPw, expectedChecksum, saltChecksum string) {
+	if saltPw == "" || saltChecksum == "" {
+		log.Fatal("Empty salt provided. Please rerun setup with --reconfigure")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	sealed = true
+	sealedSalt = saltPw
+	sealedChecksum = expectedChecksum
+	sealedChecksumSalt = saltChecksum
+}
+
+// Unseal derives the master key from password and loads it into memory, using the same scrypt
+// parameters and checksum verification that the (now removed) interactive stdin prompt used to.
+// Safe to call repeatedly and concurrently: the password is verified against the checksum
+// recorded by Init before anything is mutated, so a wrong or empty password never touches the
+// stored key material and the instance simply stays sealed. Returns nil (and leaves the instance
+// unsealed) if it was already unsealed, so a retried request after a successful unseal is a
+// harmless no-op rather than an error. Returns ErrUnsealBusy without deriving anything if another
+// derivation is already in flight (see unsealSemaphore) - the caller should turn that into a 429,
+// not retry inline.
+func Unseal(password string) error {
+	mu.Lock()
+	if !sealed {
+		mu.Unlock()
+		return nil
+	}
+	saltPw, expectedChecksum, saltChecksum := sealedSalt, sealedChecksum, sealedChecksumSalt
+	mu.Unlock()
+
+	if password == "" {
+		return ErrIncorrectPassword
+	}
+
+	select {
+	case unsealSemaphore <- struct{}{}:
+	default:
+		return ErrUnsealBusy
+	}
+	defer func() { <-unsealSemaphore }()
+
+	if PasswordChecksum(password, saltChecksum) != expectedChecksum {
+		return ErrIncorrectPassword
+	}
+	cipherKey, err := scrypt.Key([]byte(password), []byte(saltPw), 1048576, 8, 1, blockSize)
+	if err != nil {
+		return err
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !sealed {
+		// Another goroutine won the race and unsealed the instance while this call was
+		// deriving the key above; nothing left to do.
+		return nil
+	}
+	storeMasterKeyLocked(cipherKey)
+	sealed = false
+	return nil
+}
+
+// AcquireUnsealSemaphoreForTesting takes the process-wide unseal derivation slot (see
+// unsealSemaphore) without running a real scrypt derivation, so tests in other packages (e.g.
+// webserver/api) can cheaply simulate "a derivation is already in flight" and verify that a
+// concurrent Unseal/apiUnseal call is rejected with ErrUnsealBusy instead of also deriving.
+// Returns false if the slot was already held. The caller must release it again via
+// ReleaseUnsealSemaphoreForTesting once done.
+func AcquireUnsealSemaphoreForTesting() bool {
+	select {
+	case unsealSemaphore <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReleaseUnsealSemaphoreForTesting releases the slot taken by
+// AcquireUnsealSemaphoreForTesting.
+func ReleaseUnsealSemaphoreForTesting() {
+	<-unsealSemaphore
 }
 
 // getExternalKey reads the master key from the environment variable envMasterKey and returns
@@ -97,49 +254,6 @@ func getExternalKey(encLevel int) ([]byte, error) {
 	return key, nil
 }
 
-func initWithPassword(saltPw, expectedChecksum, saltChecksum string) {
-	if saltPw == "" || saltChecksum == "" {
-		log.Fatal("Empty salt provided. Please rerun setup with --reconfigure")
-	}
-	pw := readAndCheckPassword(expectedChecksum, saltChecksum)
-	cipherKey, err := scrypt.Key([]byte(pw), []byte(saltPw), 1048576, 8, 1, blockSize)
-	if err != nil {
-		cipherKey = []byte{}
-		log.Fatal(err)
-	}
-
-	storeMasterKey(cipherKey)
-}
-
-func readAndCheckPassword(expectedChecksum, saltChecksum string) string {
-	fmt.Println("Please enter encryption password:")
-	pw := helper.ReadPassword()
-	if pw == "" {
-		log.Fatal("Empty password provided")
-	}
-	fmt.Print("Checking password")
-
-	checksumFinished := false
-	go func() {
-		for !checksumFinished {
-			fmt.Print(".")
-			time.Sleep(time.Second)
-		}
-	}()
-
-	checkSum := PasswordChecksum(pw, saltChecksum)
-	checksumFinished = true
-
-	if checkSum != expectedChecksum {
-		pw = ""
-		fmt.Println("FAIL")
-		log.Fatal("Incorrect password provided")
-	}
-
-	fmt.Println("OK")
-	return pw
-}
-
 // PasswordChecksum creates a checksum which is used to check if the supplied password is correct
 func PasswordChecksum(pw, salt string) string {
 	cipherKey, err := scrypt.Key([]byte(pw), []byte(salt), 1048576, 8, 1, blockSize)
@@ -161,6 +275,14 @@ func initWithCipher(cipherKey []byte) {
 }
 
 func storeMasterKey(cipherKey []byte) {
+	mu.Lock()
+	defer mu.Unlock()
+	storeMasterKeyLocked(cipherKey)
+}
+
+// storeMasterKeyLocked is storeMasterKey's body, split out so Unseal can call it while it already
+// holds mu (see Unseal) without deadlocking on a second lock attempt.
+func storeMasterKeyLocked(cipherKey []byte) {
 	var err error
 	ramCipher, err = getRandomData(blockSize)
 	if err != nil {
@@ -173,7 +295,10 @@ func storeMasterKey(cipherKey []byte) {
 }
 
 func getMasterCipher() []byte {
-	key, err := EncryptDecryptBytes(encryptedKey, ramCipher, make([]byte, nonceSize), false) // Zero nonce: decrypts the single value storeMasterKey encrypted with this same ramCipher
+	mu.Lock()
+	ek, rc := encryptedKey, ramCipher
+	mu.Unlock()
+	key, err := EncryptDecryptBytes(ek, rc, make([]byte, nonceSize), false) // Zero nonce: decrypts the single value storeMasterKey encrypted with this same ramCipher
 	if err != nil {
 		key = []byte{}
 		log.Fatal(err)
@@ -351,10 +476,24 @@ func getStream(cipherKey []byte) *sio.Stream {
 	return stream
 }
 
+// fileCipherEncrypt and fileCipherDecrypt are the sole callers of getMasterCipher, and therefore
+// the choke point every other function in this package (Encrypt, DecryptReader, GetCipherFromFile,
+// IsCorrectKey, generateNewFileKey, ...) funnels through to touch the master key. Checking
+// IsSealed here - rather than relying on every call site above to remember to check it - is what
+// makes it safe for the storage/webserver layers to gate uploads and downloads without also
+// having to prove they covered every path into this package: even a path that forgot to check
+// IsSealed itself fails cleanly with ErrSealed here instead of reaching getMasterCipher with no
+// key loaded, which would otherwise be a fatal error.
 func fileCipherEncrypt(input, nonce []byte) ([]byte, error) {
+	if IsSealed() {
+		return nil, ErrSealed
+	}
 	return EncryptDecryptBytes(input, getMasterCipher(), nonce, true)
 }
 func fileCipherDecrypt(input, nonce []byte) ([]byte, error) {
+	if IsSealed() {
+		return nil, ErrSealed
+	}
 	return EncryptDecryptBytes(input, getMasterCipher(), nonce, false)
 }
 

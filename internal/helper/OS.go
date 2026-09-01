@@ -9,9 +9,6 @@ import (
 	"crypto/subtle"
 	"log"
 	"os"
-	"syscall"
-
-	"golang.org/x/term"
 )
 
 // FolderExists returns true if a folder exists
@@ -49,16 +46,6 @@ func ReadLine() string {
 	scanner.Scan()
 	text := scanner.Text()
 	return text
-}
-
-// ReadPassword reads a line without displaying input from the terminal and returns it as a string
-func ReadPassword() string {
-	// int conversion is required for Windows systems
-	pw, err := term.ReadPassword(int(syscall.Stdin))
-	if err == nil {
-		return string(pw)
-	}
-	return ReadLine()
 }
 
 // Check panics if err is not nil

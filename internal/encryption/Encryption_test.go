@@ -11,7 +11,9 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/scrypt"
 )
@@ -390,4 +392,244 @@ func TestEncryptDecryptStringNoMasterKey(t *testing.T) {
 	_, err = DecryptString([]byte("0123456789012345678901234567890123456789"))
 	test.IsNotNil(t, err)
 	test.IsEqualBool(t, err == ErrMasterKeyUnavailable, true)
+}
+
+// sealedTestConfig builds a Configuration for level at the given password, mirroring how
+// configuration/setup.parseEncryptionAndDelete populates Salt/Checksum/ChecksumSalt for the
+// Input encryption levels: an independent salt for the cipher-key derivation, and a
+// PasswordChecksum computed from a second, independent salt.
+func sealedTestConfig(level int, password string) models.Configuration {
+	return models.Configuration{Encryption: models.Encryption{
+		Level:        level,
+		Salt:         "sealed-test-cipher-salt",
+		ChecksumSalt: "sealed-test-checksum-salt",
+		Checksum:     PasswordChecksum(password, "sealed-test-checksum-salt"),
+	}}
+}
+
+// TestInitSealsInputLevels is the boot-time half of sealed boot: Init at the Input encryption
+// levels (LocalEncryptionInput/FullEncryptionInput) must record the instance as sealed rather
+// than block reading a password from stdin (which would crash-loop a detached, stdin-less
+// container - see the package doc comment on Init), and decryption must not be available until
+// Unseal succeeds.
+func TestInitSealsInputLevels(t *testing.T) {
+	for _, level := range []int{LocalEncryptionInput, FullEncryptionInput} {
+		Init(sealedTestConfig(level, "correct horse battery staple"))
+		test.IsEqualBool(t, IsSealed(), true)
+		test.IsEqualBool(t, IsDecryptionAvailable(), false)
+	}
+}
+
+// TestInitNeverSealsOtherLevels locks the requirement that NoEncryption, the Stored levels and
+// EndToEndEncryption are never sealed, and are unaffected by sealed boot - including after the
+// instance was sealed by a previous Init call for an Input level, which must not leak into a
+// later Init at one of these levels (see the sealed-state reset at the top of Init).
+func TestInitNeverSealsOtherLevels(t *testing.T) {
+	os.Unsetenv(envMasterKey)
+	Init(sealedTestConfig(FullEncryptionInput, "some password"))
+	test.IsEqualBool(t, IsSealed(), true)
+
+	Init(models.Configuration{Encryption: models.Encryption{Level: NoEncryption}})
+	test.IsEqualBool(t, IsSealed(), false)
+
+	cipher, err := GetRandomCipher()
+	test.IsNil(t, err)
+	for _, level := range []int{LocalEncryptionStored, FullEncryptionStored} {
+		// Re-seal before every iteration so each one independently proves this level clears it.
+		Init(sealedTestConfig(FullEncryptionInput, "some password"))
+		test.IsEqualBool(t, IsSealed(), true)
+
+		Init(models.Configuration{Encryption: models.Encryption{Level: level, Cipher: cipher}})
+		test.IsEqualBool(t, IsSealed(), false)
+		test.IsEqualBool(t, IsDecryptionAvailable(), true)
+	}
+
+	Init(sealedTestConfig(FullEncryptionInput, "some password"))
+	test.IsEqualBool(t, IsSealed(), true)
+	Init(models.Configuration{Encryption: models.Encryption{Level: EndToEndEncryption}})
+	test.IsEqualBool(t, IsSealed(), false)
+}
+
+// TestUnsealCorrectPassword covers the happy path: the correct password unseals the instance,
+// after which decryption is available and an encrypt/decrypt round trip through the newly loaded
+// master key succeeds.
+func TestUnsealCorrectPassword(t *testing.T) {
+	const password = "the correct password"
+	Init(sealedTestConfig(FullEncryptionInput, password))
+	test.IsEqualBool(t, IsSealed(), true)
+	test.IsEqualBool(t, IsDecryptionAvailable(), false)
+
+	err := Unseal(password)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, IsSealed(), false)
+	test.IsEqualBool(t, IsDecryptionAvailable(), true)
+
+	plaintext := []byte("plaintext only readable once unsealed")
+	var encrypted bytes.Buffer
+	encInfo := &models.EncryptionInfo{}
+	err = Encrypt(encInfo, bytes.NewReader(plaintext), &encrypted)
+	test.IsNil(t, err)
+	var decrypted bytes.Buffer
+	err = DecryptReader(*encInfo, &encrypted, &decrypted)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, plaintext, decrypted.Bytes())
+}
+
+// TestUnsealIncorrectPassword covers both failure inputs the endpoint has to reject: an empty
+// password and a wrong-but-nonempty one. Neither may store any key material or clear sealed.
+func TestUnsealIncorrectPassword(t *testing.T) {
+	Init(sealedTestConfig(FullEncryptionInput, "the correct password"))
+
+	err := Unseal("")
+	test.IsEqualBool(t, err == ErrIncorrectPassword, true)
+	test.IsEqualBool(t, IsSealed(), true)
+	test.IsEqualBool(t, IsDecryptionAvailable(), false)
+
+	err = Unseal("the WRONG password")
+	test.IsEqualBool(t, err == ErrIncorrectPassword, true)
+	test.IsEqualBool(t, IsSealed(), true)
+	test.IsEqualBool(t, IsDecryptionAvailable(), false)
+
+	// A correct attempt afterwards must still succeed - a failed attempt must not have wedged
+	// the sealed state.
+	err = Unseal("the correct password")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, IsSealed(), false)
+}
+
+// TestUnsealAlreadyUnsealedIsNoOp covers a retried unseal request after a successful one: it
+// must not error and must not disturb the already-loaded key.
+func TestUnsealAlreadyUnsealedIsNoOp(t *testing.T) {
+	Init(sealedTestConfig(FullEncryptionInput, "the correct password"))
+	err := Unseal("the correct password")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, IsSealed(), false)
+
+	err = Unseal("the correct password")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, IsSealed(), false)
+	test.IsEqualBool(t, IsDecryptionAvailable(), true)
+
+	// Also a no-op for a call that would otherwise have been an incorrect password - nothing
+	// left to verify against once already unsealed.
+	err = Unseal("anything at all")
+	test.IsNil(t, err)
+	test.IsEqualBool(t, IsSealed(), false)
+}
+
+// TestSealedOperationsFailCleanly is the "no panic, no crash-loop" half of the requirement:
+// while sealed, the functions that wrap/unwrap the master key must return ErrSealed rather than
+// call into getMasterCipher with no key loaded, which would otherwise be a fatal error and take
+// the whole process down rather than fail one request.
+func TestSealedOperationsFailCleanly(t *testing.T) {
+	Init(sealedTestConfig(FullEncryptionInput, "the correct password"))
+	test.IsEqualBool(t, IsSealed(), true)
+
+	encInfo := &models.EncryptionInfo{}
+	err := Encrypt(encInfo, bytes.NewReader([]byte("plaintext")), &bytes.Buffer{})
+	test.IsEqualBool(t, err == ErrSealed, true)
+
+	_, err = GetCipherFromFile(models.EncryptionInfo{DecryptionKey: make([]byte, 48), Nonce: make([]byte, 12)})
+	test.IsEqualBool(t, err == ErrSealed, true)
+
+	_, err = fileCipherEncrypt(make([]byte, 32), make([]byte, 12))
+	test.IsEqualBool(t, err == ErrSealed, true)
+	_, err = fileCipherDecrypt(make([]byte, 32), make([]byte, 12))
+	test.IsEqualBool(t, err == ErrSealed, true)
+}
+
+// TestUnsealConcurrent is the concurrency requirement: several goroutines racing to unseal the
+// same instance - some with the correct password, some wrong - must never corrupt state. Run
+// with -race to catch a data race, not just a logic bug. Kept to a modest worker count
+// deliberately: each call that actually reaches scrypt derives a real key at the production
+// N=1048576 parameter (~1GB of working memory per concurrent derivation) - though with
+// unsealSemaphore in place, at most one of these workers ever derives at a time, which is exactly
+// the property under test: the others must fail fast with ErrUnsealBusy rather than also running
+// scrypt. Since a wrong-password worker may transiently win the single derivation slot ahead of
+// every correct-password worker, the correct-password side retries against ErrUnsealBusy like a
+// real client would after a 429, rather than assuming its one attempt is guaranteed to land.
+func TestUnsealConcurrent(t *testing.T) {
+	const password = "the correct password"
+	Init(sealedTestConfig(FullEncryptionInput, password))
+
+	const wrongWorkers = 6
+	var wg sync.WaitGroup
+	wg.Add(wrongWorkers)
+	for i := 0; i < wrongWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			_ = Unseal("wrong password")
+		}()
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var err error
+	for {
+		err = Unseal(password)
+		if err != ErrUnsealBusy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("could not acquire the unseal derivation slot with the correct password before the deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	test.IsNil(t, err)
+	wg.Wait()
+
+	test.IsEqualBool(t, IsSealed(), false)
+	test.IsEqualBool(t, IsDecryptionAvailable(), true)
+
+	// The key that ended up loaded must still be the one derived from the correct password -
+	// readable via a round trip, not merely "some key or other".
+	plaintext := []byte("post-race plaintext")
+	var encrypted bytes.Buffer
+	encInfo := &models.EncryptionInfo{}
+	err = Encrypt(encInfo, bytes.NewReader(plaintext), &encrypted)
+	test.IsNil(t, err)
+	var decrypted bytes.Buffer
+	err = DecryptReader(*encInfo, &encrypted, &decrypted)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, plaintext, decrypted.Bytes())
+}
+
+// TestUnsealSemaphoreRejectsWhenBusy is the failing-first test for the process-wide concurrency
+// cap on the scrypt derivation (see unsealSemaphore on Unseal): at most one derivation may run at
+// a time, regardless of how many callers or IPs are involved. Exercised cheaply, without running
+// a real scrypt derivation at all: unsealSemaphore's single slot is taken directly here to
+// simulate "a derivation is already in flight", which works because Unseal's semaphore check runs
+// before either scrypt call it makes (the checksum verification in PasswordChecksum and the key
+// derivation itself) - so a second concurrent call must be rejected with ErrUnsealBusy without
+// ever touching scrypt, correct password or not.
+func TestUnsealSemaphoreRejectsWhenBusy(t *testing.T) {
+	const password = "semaphore busy test password"
+	Init(sealedTestConfig(FullEncryptionInput, password))
+
+	unsealSemaphore <- struct{}{}
+	err := Unseal(password)
+	test.IsEqualBool(t, err == ErrUnsealBusy, true)
+	test.IsEqualBool(t, IsSealed(), true)
+	<-unsealSemaphore // release, exactly as Unseal's own deferred release would have done
+
+	// With the slot free again, an otherwise-identical call must succeed normally.
+	err = Unseal(password)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, IsSealed(), false)
+}
+
+// TestUnsealSemaphoreReleasedOnIncorrectPassword confirms the derivation slot is released even
+// when Unseal returns early because the password is wrong (see the defer in Unseal), not only on
+// the success path - so one caller's wrong password can never wedge the slot for every
+// subsequent, legitimate attempt.
+func TestUnsealSemaphoreReleasedOnIncorrectPassword(t *testing.T) {
+	const password = "semaphore release test password"
+	Init(sealedTestConfig(FullEncryptionInput, password))
+
+	err := Unseal("the wrong password")
+	test.IsEqualBool(t, err == ErrIncorrectPassword, true)
+	test.IsEqualBool(t, IsSealed(), true)
+
+	err = Unseal(password)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, IsSealed(), false)
 }

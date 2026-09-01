@@ -352,6 +352,34 @@ func LogLogout(user models.User, r *http.Request) {
 	})
 }
 
+// LogUnsealAttempt records an attempt to unseal the instance's master encryption key via
+// POST /api/unseal (see encryption.Unseal and encryption.IsSealed). There is no models.User to
+// attribute this to: the endpoint is deliberately unauthenticated, since no session can exist to
+// verify against in the general case before the key is loaded - the IP address is the only
+// identifying information available. Recorded for both outcomes, mirroring
+// LogValidLogin/LogInvalidLogin, since a stream of failed unseal attempts against a sealed
+// instance is exactly the kind of signal an operator needs to see. Non-blocking.
+func LogUnsealAttempt(ip string, success bool) {
+	if success {
+		createLogEntry(categoryAuth, fmt.Sprintf("Instance unsealed successfully by IP %s", ip), false)
+		appendAuditEntryAsync(AuditEntry{
+			Category: categoryAuth,
+			Action:   "unseal",
+			Outcome:  OutcomeSuccess,
+			Ip:       ip,
+		})
+		return
+	}
+	createLogEntry(categoryAuth, fmt.Sprintf("Failed unseal attempt by IP %s", ip), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "unseal",
+		Outcome:  OutcomeFailure,
+		Ip:       ip,
+		Error:    "incorrect password",
+	})
+}
+
 // downloadFileConfig captures a file's sharing configuration for the audit chain
 func downloadFileConfig(file models.File) *AuditFileConfig {
 	return &AuditFileConfig{

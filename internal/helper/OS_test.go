@@ -39,13 +39,6 @@ func TestReadLine(t *testing.T) {
 	test.IsEqualString(t, output, "test")
 }
 
-func TestReadPassword(t *testing.T) {
-	original := test.StartMockInputStdin("testpw")
-	output := ReadPassword()
-	test.StopMockInputStdin(original)
-	test.IsEqualString(t, output, "testpw")
-}
-
 func TestGetFileSize(t *testing.T) {
 	os.WriteFile("testfile", []byte(""), 0777)
 	file, err := os.OpenFile("testfile", os.O_RDONLY, 0644)

@@ -16,6 +16,7 @@ var failedLoginLimiter = newLimiter()
 var failedIdLimiter = newLimiter()
 var failedDownloadPasswordLimiter = newLimiter()
 var failedApiKeyLimiter = newLimiter()
+var failedUnsealLimiter = newLimiter()
 
 // isUnitTest must be false and is only set to true for running test units
 // If true, rate limiting is disabled
@@ -61,6 +62,18 @@ func WaitOnApiAuthentication(ip string) {
 // Ten attempts without limiting, thereafter one attempt every 2 seconds
 func WaitOnDownloadPassword(ip string) {
 	_ = failedDownloadPasswordLimiter.Get(ip, 1, 20).WaitN(context.Background(), 2)
+}
+
+// AllowUnseal reports whether an unseal attempt from ip is allowed right now, without blocking.
+// Twenty attempts without limiting, thereafter one allowed every 2 seconds; unlike
+// WaitOnDownloadPassword this never blocks the caller - POST /api/unseal drives scrypt with
+// N=2^20 (~1 GiB RAM, 1-2s CPU) per attempt, so a caller that exceeds the burst must be turned
+// away with 429 immediately rather than parked on WaitN, which would hold the goroutine and
+// connection open for no benefit: an attacker can simply open more connections instead of waiting
+// on one. See also the process-wide derivation semaphore in package encryption, which bounds
+// actual scrypt concurrency regardless of how many IPs or connections are used.
+func AllowUnseal(ip string) bool {
+	return failedUnsealLimiter.Get(ip, 1, 20).Allow()
 }
 
 // WaitOnFailedId blocks the current goroutine until the rate limiter allows a request

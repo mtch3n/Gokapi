@@ -55,6 +55,24 @@ func Process(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Unauthenticated endpoint: /seal-status - see apiSealStatus. Like /auth/info above, this has
+	// to be reachable before any session/API key can be verified: at the Input encryption levels
+	// there is no key to check anything against until an admin unseals the instance.
+	if r.Method == "GET" && requestUrl == "/seal-status" {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		apiSealStatus(w, nil, models.User{}, models.ApiKey{})
+		return
+	}
+
+	// Unauthenticated endpoint: /unseal - see apiUnseal. Deliberately not routed through the
+	// authenticated routes table below: unlike every other endpoint there, this one exists
+	// specifically for the case where no key is loaded to authenticate against yet.
+	if r.Method == "POST" && requestUrl == "/unseal" {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		apiUnseal(w, r)
+		return
+	}
+
 	routing, ok := getRouting(requestUrl)
 	if !ok {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
@@ -457,6 +475,70 @@ func apiAuthInfo(w http.ResponseWriter, _ requestParser, _ models.User, _ models
 	_, _ = w.Write(resultJson)
 }
 
+// apiSealStatus reports whether the instance's master encryption key is currently loaded into
+// memory (see encryption.IsSealed) and which encryption level is configured. Unauthenticated
+// like /auth/info above: the SPA needs this to decide whether to show an unseal prompt before an
+// admin can even log in, in the general case. Leaks nothing beyond the two fields needed for
+// that decision.
+func apiSealStatus(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
+	type sealStatusResponse struct {
+		Sealed          bool `json:"sealed"`
+		EncryptionLevel int  `json:"encryptionLevel"`
+	}
+	result, err := json.Marshal(sealStatusResponse{
+		Sealed:          encryption.IsSealed(),
+		EncryptionLevel: configuration.Get().Encryption.Level,
+	})
+	helper.Check(err)
+	_, _ = w.Write(result)
+}
+
+// apiUnseal is the sole way to load the master key at runtime for the Input encryption levels
+// (LocalEncryptionInput/FullEncryptionInput) - see encryption.Unseal. Deliberately
+// unauthenticated: in the general case no session/API key can exist to check against before the
+// key is loaded. Rate limited per IP (see ratelimiter.AllowUnseal): once an IP exceeds its burst
+// it gets an immediate 429, never a blocked connection - each attempt drives scrypt with N=2^20
+// (~1 GiB RAM, 1-2s CPU), so blocking would only let an attacker pile up expensive derivations by
+// holding connections open. encryption.Unseal additionally enforces a process-wide cap of one
+// derivation in flight at a time (see ErrUnsealBusy); a second concurrent request also gets 429,
+// without ever touching scrypt, which bounds memory to ~1 GiB regardless of attacker concurrency
+// or how many IPs are used. Every attempt that actually reaches a password check - successful or
+// not - is written to the audit log (see logging.LogUnsealAttempt); the 429 paths above are
+// rate-limiting, not password attempts, so they are not logged as one. The response never
+// distinguishes "wrong password" from any other failure reason, so a caller learns nothing beyond
+// correct/incorrect.
+func apiUnseal(w http.ResponseWriter, r *http.Request) {
+	ip := logging.GetIpAddress(r)
+	if !ratelimiter.AllowUnseal(ip) {
+		sendError(w, http.StatusTooManyRequests, errorcodes.RateLimited, "Too many unseal attempts. Please wait before retrying")
+		return
+	}
+
+	const maxBodySize = 4 * 1024
+	bodyReader := http.MaxBytesReader(w, r.Body, maxBodySize)
+	var input struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(bodyReader).Decode(&input); err != nil {
+		logging.LogUnsealAttempt(ip, false)
+		sendError(w, http.StatusBadRequest, errorcodes.CannotParse, "Invalid request body")
+		return
+	}
+
+	err := encryption.Unseal(input.Password)
+	if err != nil {
+		if errors.Is(err, encryption.ErrUnsealBusy) {
+			sendError(w, http.StatusTooManyRequests, errorcodes.RateLimited, "Too many unseal attempts. Please wait before retrying")
+			return
+		}
+		logging.LogUnsealAttempt(ip, false)
+		sendError(w, http.StatusUnauthorized, errorcodes.InstanceSealed, "Incorrect password")
+		return
+	}
+	logging.LogUnsealAttempt(ip, true)
+	_, _ = io.WriteString(w, `{"Result":"OK"}`)
+}
+
 func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramUserCreate)
 	if !ok {
@@ -842,6 +924,10 @@ func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid st
 	file, err := fileupload.CompleteChunk(uuid, fileHeader, user.Id, uploadParameters)
 	if err != nil {
 		_ = chunking.DeleteChunk(uuid)
+		if errors.Is(err, storage.ErrorInstanceSealed) {
+			sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, err.Error())
+			return
+		}
 		sendError(w, http.StatusBadRequest, errorcodes.UnspecifiedError, err.Error())
 		return
 	}
@@ -1005,6 +1091,15 @@ func apiGetShareKey(w http.ResponseWriter, r requestParser, user models.User, _ 
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
 		return
 	}
+	// Checked explicitly, ahead of GetSharePassword: that call already fails safe while sealed
+	// (encryption.DecryptString refuses once encryption.IsDecryptionAvailable is false), but it
+	// reports that the same way as "no key was ever stored for this file" - a 404. An admin
+	// polling this endpoint while sealed needs to be able to tell "sealed, try again after
+	// unsealing" apart from "there was never a key to retrieve here".
+	if encryption.IsSealed() {
+		sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, "Instance is sealed")
+		return
+	}
 	password, ok := storage.GetSharePassword(file)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
@@ -1120,6 +1215,10 @@ func apiUploadFile(w http.ResponseWriter, r requestParser, user models.User, _ m
 	request.Request.Body = http.MaxBytesReader(w, request.Request.Body, maxUpload)
 	err := fileupload.ProcessCompleteFile(w, request.Request, user.Id, configuration.Get().MaxMemory)
 	if err != nil {
+		if errors.Is(err, storage.ErrorInstanceSealed) {
+			sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, err.Error())
+			return
+		}
 		sendError(w, http.StatusBadRequest, errorcodes.UnspecifiedError, err.Error())
 		return
 	}

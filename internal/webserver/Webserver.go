@@ -673,6 +673,17 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 	if file.RequiresClientDecryption() {
 		view.ClientSideDecryption = true
 		if !file.Encryption.IsEndToEndEncrypted {
+			// Only reachable for a server-side encrypted file that is not stored locally (e.g.
+			// FullEncryptionInput with S3/AWS storage - see models.File.RequiresClientDecryption).
+			// The page needs the file's cipher to hand the client so it can decrypt after
+			// download, which needs the master key; while sealed that key does not exist yet, so
+			// refuse cleanly here instead of letting GetCipherFromFile's error reach helper.Check
+			// (which would panic the request).
+			if encryption.IsSealed() {
+				errorHandling.RedirectToErrorPage(w, r, "Instance sealed",
+					"This server instance is sealed and cannot serve this file until an administrator unseals it.", errorHandling.WidthDefault)
+				return
+			}
 			cipher, err := encryption.GetCipherFromFile(file.Encryption)
 			helper.Check(err)
 			view.Cipher = base64.StdEncoding.EncodeToString(cipher)

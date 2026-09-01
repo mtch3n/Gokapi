@@ -54,10 +54,21 @@ var ErrorFileNotFound = errors.New("file not found")
 // ErrorInvalidPresign is raised when an invalid presign key has been passed or it has expired
 var ErrorInvalidPresign = errors.New("invalid presign")
 
+// ErrorInstanceSealed is returned by NewFile and NewFileFromChunk when the configured encryption
+// level requires the master key (see isEncryptionRequested) and the instance has not yet been
+// unsealed with the correct password (see encryption.IsSealed). Checked before either function
+// does any work, so a sealed instance refuses an upload cleanly instead of failing deep inside
+// generateHashAndEncrypt/encryptChunkFile, which call helper.Check on the encryption error and
+// would otherwise panic the request.
+var ErrorInstanceSealed = errors.New("instance is sealed")
+
 // NewFile creates a new file in the system. Called after an upload from the API has been completed. If a file with the same sha1 hash
 // already exists, it is deduplicated. This function gathers information about the file, creates an ID and saves
 // it into the global configuration. It is now only used by the API, the web UI uses NewFileFromChunk
 func NewFile(fileContent io.Reader, fileHeader *multipart.FileHeader, userId int, uploadRequest models.UploadParameters) (models.File, error) {
+	if isEncryptionRequested() && encryption.IsSealed() {
+		return models.File{}, ErrorInstanceSealed
+	}
 	if !isAllowedFileSize(fileHeader.Size) {
 		return models.File{}, ErrorFileTooLarge
 	}
@@ -150,6 +161,9 @@ func GetUploadCounts() map[int]int {
 // already exists, it is deduplicated. This function gathers information about the file, creates an ID and saves
 // it into the global configuration.
 func NewFileFromChunk(chunkId string, fileHeader chunking.FileHeader, userId int, uploadRequest models.UploadParameters) (models.File, error) {
+	if isEncryptionRequested() && encryption.IsSealed() {
+		return models.File{}, ErrorInstanceSealed
+	}
 	file, err := chunking.GetFileByChunkId(chunkId)
 	if err != nil {
 		return models.File{}, err
@@ -664,6 +678,18 @@ func GetFileByHotlink(id string) (models.File, bool) {
 // ServeFile subtracts a download allowance and serves the file to the browser
 // Returns false if the file expired during the request (most likely race condition due to parallel downloads, requires recheckExpiry)
 func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDownload, increaseCounter, forceDecryption, recheckExpiry bool) bool {
+	// A server-side encrypted file (i.e. not end-to-end encrypted, where the server never holds
+	// a key capable of decrypting it anyway) cannot be served while the instance is sealed: doing
+	// so would eventually call into encryption.GetCipherFromFile/DecryptReader with no master key
+	// loaded. Refused here, before the download allowance below is touched, rather than letting
+	// that call fail deep inside encryption/decryption. Written and returned exactly like the
+	// audit-write-failure case further down: the status is sent directly, and true is returned so
+	// none of the callers additionally render an "expired" page/image over the top of it.
+	if file.Encryption.IsEncrypted && !file.Encryption.IsEndToEndEncrypted && encryption.IsSealed() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("This server instance is sealed and cannot serve encrypted files until an administrator unseals it."))
+		return true
+	}
 	// apimutex only serialises this section within the current process; it is a local fast-path that
 	// avoids unnecessary database round trips under in-process contention. The invariant that a capped
 	// file cannot be downloaded more times than allowed is now enforced by the database itself (see
@@ -780,6 +806,19 @@ func makeFilenameUnique(filename string, nameMap *map[string]bool) string {
 
 // ServeFilesAsZip will zip all files and serve them to the browser. Can decrypt files if not end-to-end encrypted.
 func ServeFilesAsZip(files []models.File, filename string, w http.ResponseWriter, r *http.Request) {
+	// Checked - and refused, before any header is written - for the same reason as the identical
+	// guard at the top of ServeFile: a server-side encrypted member file cannot be decrypted while
+	// the instance is sealed, and letting the zip stream start before finding that out would leave
+	// the client with a truncated, half-written archive instead of a clean refusal.
+	if encryption.IsSealed() {
+		for _, file := range files {
+			if file.Encryption.IsEncrypted && !file.Encryption.IsEndToEndEncrypted {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("This server instance is sealed and cannot serve encrypted files until an administrator unseals it."))
+				return
+			}
+		}
+	}
 	if filename == "" {
 		filename = "Gokapi"
 	}

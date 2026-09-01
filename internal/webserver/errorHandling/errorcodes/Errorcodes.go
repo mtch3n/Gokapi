@@ -44,4 +44,7 @@ const (
 	// AuditWriteFailed is returned when an action was refused because its audit record could
 	// not be committed durably - see logging.LogDelete and logging.LogFolderDelete
 	AuditWriteFailed
+	// InstanceSealed is returned when an action requiring the master encryption key was refused
+	// because the instance is sealed - see encryption.IsSealed and POST /api/unseal
+	InstanceSealed
 )

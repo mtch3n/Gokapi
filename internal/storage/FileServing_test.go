@@ -1383,3 +1383,115 @@ func TestCleanUpRunsHotlinkPurge(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, storedFile.HotlinkId, "")
 }
+
+// sealAtInputLevel configures the instance as sealed at a given Input encryption level (see
+// encryption.Init/encryption.IsSealed) without ever deriving a real key - Init only records the
+// salts and sets the sealed flag, it never runs scrypt, so this is cheap to call from a test.
+// The returned func restores both the encryption level and the (unsealed, NoEncryption) instance
+// state, and must be deferred by the caller so a sealed instance never leaks into a later test in
+// this file.
+func sealAtInputLevel(t *testing.T, level int, saltSuffix string) func() {
+	t.Helper()
+	previousLevel := configuration.Get().Encryption.Level
+	configuration.Get().Encryption.Level = level
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:        level,
+		Salt:         "storage-seal-test-salt-" + saltSuffix,
+		ChecksumSalt: "storage-seal-test-checksum-salt-" + saltSuffix,
+		Checksum:     "irrelevant-while-only-sealing",
+	}})
+	test.IsEqualBool(t, encryption.IsSealed(), true)
+	return func() {
+		configuration.Get().Encryption.Level = previousLevel
+		encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+	}
+}
+
+// TestNewFileSealedRefusesUpload is the "uploads refuse cleanly while sealed" requirement for a
+// complete (non-chunked) upload: at an encryption level that needs the master key, NewFile must
+// return ErrorInstanceSealed rather than panic deep inside generateHashAndEncrypt, which is what
+// would happen if this reached encryption.Encrypt with no master key loaded (see
+// encryption.fileCipherEncrypt).
+func TestNewFileSealedRefusesUpload(t *testing.T) {
+	defer sealAtInputLevel(t, encryption.FullEncryptionInput, "newfile")()
+
+	content := []byte("sealed upload must be refused")
+	header, request := createRawTestFile(content)
+	_, err := NewFile(bytes.NewReader(content), &header, 99, request)
+	test.IsEqualBool(t, errors.Is(err, ErrorInstanceSealed), true)
+}
+
+// TestNewFileFromChunkSealedRefusesUpload is the chunked-upload counterpart of
+// TestNewFileSealedRefusesUpload: NewFileFromChunk must refuse the same way, before it ever
+// touches the reserved chunk file on disk.
+func TestNewFileFromChunkSealedRefusesUpload(t *testing.T) {
+	defer sealAtInputLevel(t, encryption.FullEncryptionInput, "newfilefromchunk")()
+
+	chunkId, header, request, err := createTestChunk()
+	test.IsNil(t, err)
+	defer os.Remove("test/data/chunk-" + chunkId)
+
+	_, err = NewFileFromChunk(chunkId, header, 99, request)
+	test.IsEqualBool(t, errors.Is(err, ErrorInstanceSealed), true)
+}
+
+// TestServeFileSealedRefusesDownload is the download half of the requirement: a server-side
+// encrypted file must not be served while sealed. Mirrors
+// TestServeFileAuditWriteFailureRefusesDownload's assertions exactly (handled == true, 503, and
+// nothing served) - the response is committed directly inside ServeFile, so no caller
+// additionally renders an "expired" page/image over the top of it.
+func TestServeFileSealedRefusesDownload(t *testing.T) {
+	defer sealAtInputLevel(t, encryption.FullEncryptionInput, "servefile")()
+
+	file := models.File{
+		Id:                 "sealedDownloadTestFile",
+		Name:               "sealed.txt",
+		Encryption:         models.EncryptionInfo{IsEncrypted: true},
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+
+	handled := ServeFile(file, w, r, true, true, false, false)
+
+	test.IsEqualBool(t, handled, true)
+	test.IsEqualInt(t, w.Code, http.StatusServiceUnavailable)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), file.Name), false)
+
+	// An end-to-end encrypted file never touches the server's master key at all (the server
+	// never holds a key capable of decrypting it), so it must not be blocked by the sealed check
+	// above - only IsEncrypted && !IsEndToEndEncrypted is gated.
+	e2eFile := models.File{
+		Id:                 "sealedDownloadE2EFile",
+		Name:               "sealed-e2e.txt",
+		Encryption:         models.EncryptionInfo{IsEncrypted: true, IsEndToEndEncrypted: true},
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	}
+	database.SaveMetaData(e2eFile)
+	r = httptest.NewRequest("GET", "/", nil)
+	w = httptest.NewRecorder()
+	handled = ServeFile(e2eFile, w, r, true, true, false, false)
+	test.IsEqualBool(t, handled, true)
+	test.IsEqualBool(t, w.Code == http.StatusServiceUnavailable, false)
+}
+
+// TestServeFilesAsZipSealedRefusesDownload is ServeFilesAsZip's counterpart to
+// TestServeFileSealedRefusesDownload: a bundle containing a server-side encrypted member must be
+// refused before the zip stream (and its 200 status) is ever started.
+func TestServeFilesAsZipSealedRefusesDownload(t *testing.T) {
+	defer sealAtInputLevel(t, encryption.FullEncryptionInput, "servefileszip")()
+
+	files := []models.File{{
+		Id:         "sealedZipTestFile",
+		Name:       "sealed.txt",
+		Encryption: models.EncryptionInfo{IsEncrypted: true},
+	}}
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+
+	ServeFilesAsZip(files, "bundle", w, r)
+
+	test.IsEqualInt(t, w.Code, http.StatusServiceUnavailable)
+}
