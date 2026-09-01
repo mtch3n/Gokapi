@@ -378,29 +378,34 @@ func createNewMetaData(hash string, fileHeader chunking.FileHeader, userId int, 
 
 // encryptSharePasswordIfEnabled returns the encrypted form of params.Password to store on the
 // new file's EncryptedSharePassword, or nil if it must not be stored.
-//
-// Storing it requires all of: the operator opted in (configuration.StoreShareKeys), the upload
-// actually signalled the password was auto-generated rather than typed by the uploader
-// (params.GeneratedPassword - a manual password must never be persisted this way), a password
-// was set at all, and the server master key is actually available to encrypt it with
-// (encryption.IsDecryptionAvailable - e.g. false for NoEncryption or EndToEndEncryption
-// instances, which never hold a server-side key). Any encryption failure is treated the same as
-// "master key unavailable": the feature no-ops rather than failing the upload.
 func encryptSharePasswordIfEnabled(params models.UploadParameters) []byte {
-	return EncryptSharePassword(params.Password, params.GeneratedPassword)
+	return EncryptSharePassword(params.Password)
 }
 
 // EncryptSharePassword returns the encrypted form of password to store on a file's
-// EncryptedSharePassword, or nil if it must not be stored. See encryptSharePasswordIfEnabled
-// for the conditions.
+// EncryptedSharePassword, or nil if it must not be stored.
+//
+// Storing it requires: the operator opted in (configuration.StoreShareKeys), a password was set
+// at all, and the server master key is available to encrypt it with
+// (encryption.IsDecryptionAvailable - false for NoEncryption or EndToEndEncryption instances,
+// and for a sealed one). Any encryption failure is treated the same as "master key unavailable":
+// the feature no-ops rather than failing the upload.
+//
+// A password the uploader TYPED is stored on the same terms as a generated one, so that the
+// owner can look up any key they set rather than only the ones this app minted. The tradeoff is
+// deliberate and visible to the person choosing the key: a typed password is more likely to be
+// one they use elsewhere, and this keeps it recoverable to anyone who can both reach
+// /api/files/{id}/sharekey and unseal the instance. The upload form says so at the point the key
+// is chosen. To restore the previous "generated keys only" rule, gate this on the caller's
+// GeneratedPassword signal again, which is still carried end to end.
 //
 // Exported for the edit path (apiEditFile), which changes a password without going through
 // UploadParameters at all. That path MUST call this on every password change and store the
 // result even when it is nil: leaving a previously stored key in place after the password has
 // been changed makes GET /api/files/{id}/sharekey serve a key that no longer opens the file,
 // which is worse than serving none.
-func EncryptSharePassword(password string, wasGenerated bool) []byte {
-	if !configuration.Get().StoreShareKeys || !wasGenerated || password == "" {
+func EncryptSharePassword(password string) []byte {
+	if !configuration.Get().StoreShareKeys || password == "" {
 		return nil
 	}
 	encrypted, err := encryption.EncryptString(password)

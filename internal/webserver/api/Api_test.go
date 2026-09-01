@@ -2829,15 +2829,20 @@ func TestApiGetShareKeyToggleOnGeneratedVsManual(t *testing.T) {
 	test.IsNil(t, err)
 	test.IsEqualString(t, result.Key, "generatedPassw0rd!")
 
+	// A typed password is stored on the same terms as a generated one, so the owner can look
+	// up any key they set. The GeneratedPassword signal is still carried end to end, but no
+	// longer gates storage.
 	manualFileId := chunkUploadWithPassword(t, apiKey.Id, "sharekeytoggleon2", "manuallyTypedPw1!", false)
 	file, ok = database.GetMetaDataById(manualFileId)
 	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt(t, len(file.EncryptedSharePassword), 0)
+	test.IsEqualBool(t, len(file.EncryptedSharePassword) > 0, true)
 
 	w, r = getShareKey(apiKey.Id, manualFileId)
 	Process(w, r)
-	test.IsEqualInt(t, w.Code, 404)
-	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"File not found","ErrorCode":5}`)
+	test.IsEqualInt(t, w.Code, 200)
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualString(t, result.Key, "manuallyTypedPw1!")
 }
 
 // Placed with the other share-key tests deliberately: withMasterKey has no teardown, so a test
@@ -2874,8 +2879,8 @@ func TestEditFileReplacesStoredShareKey(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, stored, "rotatedPassw0rd!")
 
-	// A typed replacement must clear the stored key entirely rather than leave the
-	// generated one it replaced.
+	// A typed replacement is stored too, and must be the NEW key rather than the generated
+	// one it replaced. Leaving the old value behind is the failure this guards.
 	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{
 		{Name: "id", Value: fileId},
 		{Name: "password", Value: "typedPassw0rd1!"},
@@ -2884,9 +2889,9 @@ func TestEditFileReplacesStoredShareKey(t *testing.T) {
 	test.IsEqualInt(t, w.Code, 200)
 	file, ok = database.GetMetaDataById(fileId)
 	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt(t, len(file.EncryptedSharePassword), 0)
-	_, ok = storage.GetSharePassword(file)
-	test.IsEqualBool(t, ok, false)
+	stored, ok = storage.GetSharePassword(file)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored, "typedPassw0rd1!")
 }
 
 func TestMinorFunctions(t *testing.T) {

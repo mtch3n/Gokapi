@@ -184,7 +184,7 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 		// that no longer opens the file. Assigning the result unconditionally also clears
 		// it when the new password was typed rather than generated, since a typed password
 		// must never be persisted in recoverable form.
-		file.EncryptedSharePassword = storage.EncryptSharePassword(newSharePassword, request.GeneratedPassword)
+		file.EncryptedSharePassword = storage.EncryptSharePassword(newSharePassword)
 		downloadPasswordToken.DeleteAllForFile(file.Id)
 	} else if removePassword {
 		file.PasswordHash = ""
