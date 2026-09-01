@@ -31,9 +31,12 @@ func GenerateRandomString(length int) string {
 }
 
 // passwordSpecialChars is the pool GenerateRandomPassword draws its guaranteed special
-// character from. Deliberately narrow: a generated password is usually copied through a
-// mail client, a URL or a terminal, and these survive all three without quoting.
-const passwordSpecialChars = "-_.!@#$%*+="
+// character from. Restricted to the two unreserved RFC 3986 punctuation characters (the
+// base64url alphabet), because a generated password travels inside a share link and through
+// mail clients that decide where a URL ends by looking at trailing punctuation: a password
+// ending in "!" or "." is silently cut out of the link, and "#", "%", "+", "&" and "=" collide
+// with URL syntax outright. These two survive every encoder, decoder and linkifier untouched.
+const passwordSpecialChars = "-_"
 
 // GenerateRandomPassword returns a securely generated random password of the given length
 // that is guaranteed to contain a lowercase letter, an uppercase letter, a digit and a

@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"net/url"
 	"testing"
 	"unicode"
 
@@ -347,4 +348,16 @@ func TestGenerateRandomPasswordMinimumLength(t *testing.T) {
 	// A length below the four required classes cannot satisfy them, so it is
 	// raised rather than returning a password that fails the policy.
 	test.IsEqualInt(t, len(GenerateRandomPassword(2)), 4)
+}
+
+func TestGenerateRandomPasswordIsUrlSafe(t *testing.T) {
+	// A generated password is published inside a share link, so every character
+	// has to be unreserved per RFC 3986: anything else is either escaped on the
+	// way out and mangled on the way back, or trimmed off the end by a mail
+	// client guessing where the URL stops.
+	for i := 0; i < 200; i++ {
+		password := GenerateRandomPassword(16)
+		test.IsEqualString(t, url.QueryEscape(password), password)
+		test.IsEqualString(t, url.PathEscape(password), password)
+	}
 }
