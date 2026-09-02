@@ -9,7 +9,8 @@ import (
 	"github.com/forceu/gokapi/internal/models"
 )
 
-const fileBundleColumns = "id, NameEncrypted, userid, creationdate, EncryptedSharePassword"
+const fileBundleColumns = `id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
+	PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads`
 
 type schemaFileBundle struct {
 	Id                     string
@@ -17,6 +18,11 @@ type schemaFileBundle struct {
 	UserId                 int
 	CreationDate           int64
 	EncryptedSharePassword []byte
+	PasswordHash           string
+	ExpireAt               int64
+	UnlimitedTime          bool
+	DownloadsRemaining     int
+	UnlimitedDownloads     bool
 }
 
 func (s schemaFileBundle) toFileBundle() models.FileBundle {
@@ -27,6 +33,11 @@ func (s schemaFileBundle) toFileBundle() models.FileBundle {
 		UserId:                 s.UserId,
 		CreationDate:           s.CreationDate,
 		EncryptedSharePassword: s.EncryptedSharePassword,
+		PasswordHash:           s.PasswordHash,
+		ExpireAt:               s.ExpireAt,
+		UnlimitedTime:          s.UnlimitedTime,
+		DownloadsRemaining:     s.DownloadsRemaining,
+		UnlimitedDownloads:     s.UnlimitedDownloads,
 	}
 }
 
@@ -37,7 +48,8 @@ func (p DatabaseProvider) GetFileBundle(id string) (models.FileBundle, bool) {
 	}
 	var rowResult schemaFileBundle
 	row := p.queryRow("SELECT "+fileBundleColumns+" FROM FileBundles WHERE id = $1", id)
-	err := row.Scan(&rowResult.Id, &rowResult.NameEncrypted, &rowResult.UserId, &rowResult.CreationDate, &rowResult.EncryptedSharePassword)
+	err := row.Scan(&rowResult.Id, &rowResult.NameEncrypted, &rowResult.UserId, &rowResult.CreationDate, &rowResult.EncryptedSharePassword,
+		&rowResult.PasswordHash, &rowResult.ExpireAt, &rowResult.UnlimitedTime, &rowResult.DownloadsRemaining, &rowResult.UnlimitedDownloads)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileBundle{}, false
@@ -58,7 +70,8 @@ func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
 	defer rows.Close()
 	for rows.Next() {
 		rowData := schemaFileBundle{}
-		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.UserId, &rowData.CreationDate, &rowData.EncryptedSharePassword)
+		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.UserId, &rowData.CreationDate, &rowData.EncryptedSharePassword,
+			&rowData.PasswordHash, &rowData.ExpireAt, &rowData.UnlimitedTime, &rowData.DownloadsRemaining, &rowData.UnlimitedDownloads)
 		helper.Check(err)
 		result = append(result, rowData.toFileBundle())
 	}
@@ -76,15 +89,37 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 		UserId:                 bundle.UserId,
 		CreationDate:           bundle.CreationDate,
 		EncryptedSharePassword: bundle.EncryptedSharePassword,
+		PasswordHash:           bundle.PasswordHash,
+		ExpireAt:               bundle.ExpireAt,
+		UnlimitedTime:          bundle.UnlimitedTime,
+		DownloadsRemaining:     bundle.DownloadsRemaining,
+		UnlimitedDownloads:     bundle.UnlimitedDownloads,
 	}
 
 	_, err = p.exec(`INSERT INTO FileBundles
-					(id, NameEncrypted, userid, creationdate, EncryptedSharePassword)
-					VALUES ($1, $2, $3, $4, $5)
+					(id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
+					 PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 					ON CONFLICT (id) DO UPDATE SET NameEncrypted = EXCLUDED.NameEncrypted, userid = EXCLUDED.userid,
-						creationdate = EXCLUDED.creationdate, EncryptedSharePassword = EXCLUDED.EncryptedSharePassword`,
-		newData.Id, newData.NameEncrypted, newData.UserId, newData.CreationDate, newData.EncryptedSharePassword)
+						creationdate = EXCLUDED.creationdate, EncryptedSharePassword = EXCLUDED.EncryptedSharePassword,
+						PasswordHash = EXCLUDED.PasswordHash, ExpireAt = EXCLUDED.ExpireAt,
+						UnlimitedTime = EXCLUDED.UnlimitedTime, DownloadsRemaining = EXCLUDED.DownloadsRemaining,
+						UnlimitedDownloads = EXCLUDED.UnlimitedDownloads`,
+		newData.Id, newData.NameEncrypted, newData.UserId, newData.CreationDate, newData.EncryptedSharePassword,
+		newData.PasswordHash, newData.ExpireAt, newData.UnlimitedTime, newData.DownloadsRemaining, newData.UnlimitedDownloads)
 	helper.Check(err)
+}
+
+// DecreaseBundleDownloadsRemaining atomically spends one of the bundle's own download allowance,
+// conditional on it being greater than 0 - mirrors metadata.go's IncreaseDownloadCount decrement
+// half. Returns false, and leaves the allowance untouched, if it was already exhausted.
+func (p DatabaseProvider) DecreaseBundleDownloadsRemaining(id string) bool {
+	result, err := p.exec(`UPDATE FileBundles SET DownloadsRemaining = DownloadsRemaining - 1
+		WHERE id = $1 AND DownloadsRemaining > 0`, id)
+	helper.Check(err)
+	rowsAffected, err := result.RowsAffected()
+	helper.Check(err)
+	return rowsAffected > 0
 }
 
 // encryptBundleNameForSave returns the value to store in NameEncrypted for this bundle. Mirrors

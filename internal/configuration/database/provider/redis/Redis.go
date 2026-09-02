@@ -21,7 +21,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 10
+const DatabaseSchemeVersion = 11
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -189,6 +189,47 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	// v10 would otherwise straddle this schema change with no valid IsOauth value.
 	if currentDbVersion < 10 {
 		p.DeleteAllSessions()
+	}
+	// The folder as the unit of sharing: PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining
+	// and UnlimitedDownloads move from being inferred off member files onto FileBundles itself.
+	// Redis has no ADD COLUMN with a DEFAULT: a bundle hash written before these fields existed
+	// simply lacks them, and redigo.ScanStruct returns their zero value - the same "unprotected,
+	// no downloads left" state a fresh, uninitialised bundle would report. Unlike a plain
+	// zero-value read, though, every existing bundle needs an explicit write here: the correct
+	// value for most of these fields is derived from its current members
+	// (models.DeriveBundleSettingsFromMembers), not simply "whatever the zero value happens to
+	// mean", so this backfill has to run once and touch every bundle rather than being left to
+	// happen lazily on the first save.
+	if currentDbVersion < 11 {
+		p.backfillBundleSettingsFromMembers()
+	}
+}
+
+// backfillBundleSettingsFromMembers derives every existing bundle's PasswordHash, ExpireAt,
+// UnlimitedTime, DownloadsRemaining and UnlimitedDownloads from its current members and writes
+// them - see models.DeriveBundleSettingsFromMembers for the merge rule. Deterministic in its
+// members, so re-running this reproduces the same values rather than drifting.
+func (p DatabaseProvider) backfillBundleSettingsFromMembers() {
+	allFiles := p.GetAllMetadata()
+	membersByBundle := make(map[string][]models.File)
+	for _, file := range allFiles {
+		if file.BundleId == "" {
+			continue
+		}
+		if !file.IsBundleMember(file.BundleId) {
+			continue
+		}
+		membersByBundle[file.BundleId] = append(membersByBundle[file.BundleId], file)
+	}
+	for _, bundle := range p.GetAllFileBundles() {
+		passwordHash, expireAt, unlimitedTime, downloadsRemaining, unlimitedDownloads :=
+			models.DeriveBundleSettingsFromMembers(membersByBundle[bundle.Id])
+		bundle.PasswordHash = passwordHash
+		bundle.ExpireAt = expireAt
+		bundle.UnlimitedTime = unlimitedTime
+		bundle.DownloadsRemaining = downloadsRemaining
+		bundle.UnlimitedDownloads = unlimitedDownloads
+		p.SaveFileBundle(bundle)
 	}
 }
 
@@ -408,6 +449,27 @@ return 1
 	conn := p.pool.Get()
 	defer conn.Close()
 	result, err := conn.Do("EVAL", script, "1", p.dbPrefix+id, decrementField, incrementField)
+	resultInt, err2 := redigo.Int(result, err)
+	helper.Check(err2)
+	return resultInt == 1
+}
+
+// decrementHashFieldIfPositiveOnly is decrementHashFieldIfPositive without a paired increment -
+// used for models.FileBundle.DownloadsRemaining, which (unlike a file's DownloadsRemaining) has
+// no companion DownloadCount field to bump alongside it. Same atomicity guarantee, via the same
+// one-script-per-call approach.
+func (p DatabaseProvider) decrementHashFieldIfPositiveOnly(id, decrementField string) bool {
+	const script = `
+local current = tonumber(redis.call('HGET', KEYS[1], ARGV[1]))
+if current == nil or current <= 0 then
+	return 0
+end
+redis.call('HINCRBY', KEYS[1], ARGV[1], -1)
+return 1
+`
+	conn := p.pool.Get()
+	defer conn.Close()
+	result, err := conn.Do("EVAL", script, "1", p.dbPrefix+id, decrementField)
 	resultInt, err2 := redigo.Int(result, err)
 	helper.Check(err2)
 	return resultInt == 1

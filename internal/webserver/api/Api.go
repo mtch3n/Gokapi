@@ -129,6 +129,19 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 		return
 	}
 
+	// A bundle member's password, expiry and download allowance are inert - the bundle owns them
+	// now (see models.FileBundle.PasswordHash and friends) - so an edit that would have touched
+	// any of them here is refused instead of silently doing nothing. Every field this endpoint
+	// currently knows how to change is one of these, so this refuses the whole request for a
+	// bundled file; a caller with no actual change requested (every header absent) still no-ops
+	// through to the end exactly as before.
+	if file.BundleId != "" && (request.IsPasswordSet || request.RemovePassword ||
+		request.UnlimitedDownloads || request.AllowedDownloads != 0 ||
+		request.UnlimitedExpiry || request.ExpiryTimestamp != 0) {
+		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "This file belongs to a folder; edit the folder instead.")
+		return
+	}
+
 	// Validated and hashed up front, before any field of file is touched, so that a
 	// rejected password change (too short, or whitespace that trims to nothing) leaves
 	// every other requested edit unsaved too, instead of applying a partial update.
@@ -794,7 +807,44 @@ func apiFolderCreate(w http.ResponseWriter, r requestParser, user models.User, _
 		return
 	}
 
+	// Validated and hashed up front, before the bundle is even created, so a rejected password
+	// (too short, or whitespace that trims to nothing) never leaves a half-configured folder
+	// behind - same reasoning as apiEditFile.
+	var newPasswordHash string
+	var newSharePassword string
+	if request.IsPasswordSet {
+		validatedPassword, err := configuration.ValidateSharePassword(request.Password, request.IsPasswordSet)
+		if err != nil {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+			return
+		}
+		newPasswordHash = configuration.HashPassword(validatedPassword, false, "")
+		newSharePassword = validatedPassword
+	}
+
 	bundle := filebundle.Create(request.Name, user.Id)
+
+	if request.IsPasswordSet {
+		bundle.PasswordHash = newPasswordHash
+		bundle.EncryptedSharePassword = storage.EncryptSharePassword(newSharePassword)
+	}
+	if request.UnlimitedDownloads {
+		bundle.UnlimitedDownloads = true
+	} else if request.AllowedDownloads != 0 {
+		bundle.DownloadsRemaining = request.AllowedDownloads
+		bundle.UnlimitedDownloads = false
+	}
+	if request.UnlimitedExpiry {
+		bundle.UnlimitedTime = true
+	} else if request.ExpiryTimestamp != 0 {
+		bundle.ExpireAt = request.ExpiryTimestamp
+		bundle.UnlimitedTime = false
+	}
+	// Creation paths are clamped to the retention cap the same way file uploads are - see
+	// fileupload.CreateUploadConfig.
+	bundle.ExpireAt, bundle.UnlimitedTime = fileupload.ClampExpiryTimestamp(bundle.ExpireAt, bundle.UnlimitedTime)
+	database.SaveFileBundle(bundle)
+
 	logging.LogFolderCreate(bundle, user)
 
 	type FolderCreateResponse struct {

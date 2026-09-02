@@ -2628,6 +2628,53 @@ func TestEditFileRejectsShortPassword(t *testing.T) {
 	test.IsEqualString(t, file.PasswordHash, "existinghash")
 }
 
+// TestEditFileRefusesSettingsChangeOnBundledMember proves PUT /files/modify refuses a
+// password/expiry/download-limit change on a file that belongs to a bundle - those fields are
+// inert on a member (models.FileBundle owns them now), so the request is rejected with "edit
+// the folder instead" rather than silently doing nothing. A rename-only-shaped request (every
+// settings header absent) is unaffected, since there is nothing on this endpoint left to refuse.
+func TestEditFileRefusesSettingsChangeOnBundledMember(t *testing.T) {
+	const apiUrl = "/files/modify"
+	apiKey := generateNewKey(true, idUser, "", "")
+	bundle := filebundle.Create("TestEditFileBundledMember", idUser)
+	database.SaveMetaData(models.File{
+		Id:                 "editbundledmember",
+		Name:               "editbundledmember.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		UserId:             idUser,
+		BundleId:           bundle.Id,
+	})
+	t.Cleanup(func() {
+		database.DeleteMetaData("editbundledmember")
+		filebundle.Delete(bundle)
+	})
+
+	cases := []struct {
+		name    string
+		headers []test.Header
+	}{
+		{"password", []test.Header{{Name: "id", Value: "editbundledmember"}, {Name: "password", Value: "AValidPassword1!"}}},
+		{"removePassword", []test.Header{{Name: "id", Value: "editbundledmember"}, {Name: "removePassword", Value: "true"}}},
+		{"allowedDownloads", []test.Header{{Name: "id", Value: "editbundledmember"}, {Name: "allowedDownloads", Value: "5"}}},
+		{"expiryTimestamp", []test.Header{{Name: "id", Value: "editbundledmember"}, {Name: "expiryTimestamp", Value: strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w, r := getRecorder(apiUrl, apiKey.Id, c.headers)
+			Process(w, r)
+			test.IsEqualInt(t, w.Code, 400)
+		})
+	}
+
+	// A request with no settings header at all (the shape a rename-only request would have,
+	// since this endpoint has no filename field to rename with today) still succeeds.
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{Name: "id", Value: "editbundledmember"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+}
+
 // TestEditFileAcceptsValidPassword confirms the fix does not block a legitimate password
 // change: a password that meets the minimum length is hashed and stored as before.
 func TestEditFileAcceptsValidPassword(t *testing.T) {
@@ -4428,6 +4475,53 @@ func TestFolderCreate(t *testing.T) {
 	w, r = getRecorder("/folder/create", apiKey.Id, []test.Header{{Name: "name", Value: encodedName}})
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
+}
+
+// TestFolderCreateWithPasswordExpiryDownloads proves POST /folder/create can give the folder
+// its own password, expiry and download allowance directly - the fields that used to be derived
+// entirely from member files (see models.FileBundle.PasswordHash and friends). Omitting a
+// setting leaves filebundle.Create's own default (open, unlimited) in place.
+func TestFolderCreateWithPasswordExpiryDownloads(t *testing.T) {
+	apiKey := testAuthorisation(t, "/folder/create", models.ApiPermUpload)
+
+	expiry := time.Now().Add(48 * time.Hour).Unix()
+	w, r := getRecorder("/folder/create", apiKey.Id, []test.Header{
+		{Name: "name", Value: "TestFolderCreateSettings"},
+		{Name: "password", Value: "AValidFolderPw1!"},
+		{Name: "allowedDownloads", Value: "3"},
+		{Name: "expiryTimestamp", Value: strconv.FormatInt(expiry, 10)},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response struct {
+		FileBundle struct{ Id string }
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+
+	stored, ok := database.GetFileBundle(response.FileBundle.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.PasswordHash != "", true)
+	test.IsEqualBool(t, stored.UnlimitedDownloads, false)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 3)
+	test.IsEqualBool(t, stored.UnlimitedTime, false)
+	test.IsEqualInt64(t, stored.ExpireAt, expiry)
+
+	// A folder created with no settings stays open - filebundle.Create's own default.
+	w2, r2 := getRecorder("/folder/create", apiKey.Id, []test.Header{
+		{Name: "name", Value: "TestFolderCreateNoSettings"},
+	})
+	Process(w2, r2)
+	test.IsEqualInt(t, w2.Code, 200)
+	var response2 struct {
+		FileBundle struct{ Id string }
+	}
+	test.IsNil(t, json.Unmarshal(w2.Body.Bytes(), &response2))
+	storedOpen, ok := database.GetFileBundle(response2.FileBundle.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, storedOpen.PasswordHash, "")
+	test.IsEqualBool(t, storedOpen.UnlimitedDownloads, true)
+	test.IsEqualBool(t, storedOpen.UnlimitedTime, true)
 }
 
 func testFolderCreateCall(t *testing.T, apiKey models.ApiKey, name string, resultCode int, expectedResponse string) {

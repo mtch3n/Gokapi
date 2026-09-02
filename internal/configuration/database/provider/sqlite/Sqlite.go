@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 26
+const DatabaseSchemeVersion = 27
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -318,6 +318,54 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			helper.Check(err)
 		}
 	}
+	// The folder as the unit of sharing: PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining
+	// and UnlimitedDownloads move from being inferred off member files (see the removed
+	// isValidFolderPassword member scan) onto FileBundles itself. Same idempotency guard as the
+	// v17 step above. The backfill below derives every existing bundle's values from its current
+	// members (models.File.IsBundleMember) and needs no master key - see
+	// models.DeriveBundleSettingsFromMembers for the merge rule used when members disagree - so,
+	// unlike the name migration, it runs directly in the ladder instead of waiting for an unseal.
+	if currentDbVersion < 27 {
+		if !p.columnExists("FileBundles", "PasswordHash") {
+			err := p.rawSqlite(`ALTER TABLE FileBundles ADD COLUMN "PasswordHash" TEXT NOT NULL DEFAULT '';
+			ALTER TABLE FileBundles ADD COLUMN "ExpireAt" INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE FileBundles ADD COLUMN "UnlimitedTime" INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE FileBundles ADD COLUMN "DownloadsRemaining" INTEGER NOT NULL DEFAULT 0;
+			ALTER TABLE FileBundles ADD COLUMN "UnlimitedDownloads" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+		p.backfillBundleSettingsFromMembers()
+	}
+}
+
+// backfillBundleSettingsFromMembers derives every existing bundle's PasswordHash, ExpireAt,
+// UnlimitedTime, DownloadsRemaining and UnlimitedDownloads from its current members and writes
+// them - see models.DeriveBundleSettingsFromMembers for the merge rule. Deterministic in its
+// members, so re-running this (e.g. a crash-recovery replay of the v27 step, the same scenario
+// TestDatabaseProvider_UpgradeV17Idempotent covers for the v17 step) reproduces the same values
+// rather than drifting.
+func (p DatabaseProvider) backfillBundleSettingsFromMembers() {
+	allFiles := p.GetAllMetadata()
+	membersByBundle := make(map[string][]models.File)
+	for _, file := range allFiles {
+		if file.BundleId == "" {
+			continue
+		}
+		if !file.IsBundleMember(file.BundleId) {
+			continue
+		}
+		membersByBundle[file.BundleId] = append(membersByBundle[file.BundleId], file)
+	}
+	for _, bundle := range p.GetAllFileBundles() {
+		passwordHash, expireAt, unlimitedTime, downloadsRemaining, unlimitedDownloads :=
+			models.DeriveBundleSettingsFromMembers(membersByBundle[bundle.Id])
+		bundle.PasswordHash = passwordHash
+		bundle.ExpireAt = expireAt
+		bundle.UnlimitedTime = unlimitedTime
+		bundle.DownloadsRemaining = downloadsRemaining
+		bundle.UnlimitedDownloads = unlimitedDownloads
+		p.SaveFileBundle(bundle)
+	}
 }
 
 // tableExists returns true if the given table is present. Used to make a
@@ -553,6 +601,11 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"userid"	INTEGER NOT NULL,
 			"creationdate"	INTEGER NOT NULL,
 			"EncryptedSharePassword"	BLOB,
+			"PasswordHash"	TEXT NOT NULL DEFAULT '',
+			"ExpireAt"	INTEGER NOT NULL DEFAULT 0,
+			"UnlimitedTime"	INTEGER NOT NULL DEFAULT 0,
+			"DownloadsRemaining"	INTEGER NOT NULL DEFAULT 0,
+			"UnlimitedDownloads"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("id")
 		);`
 	err := p.rawSqlite(sqlStmt)

@@ -10,13 +10,18 @@ import (
 	"github.com/forceu/gokapi/internal/storage"
 )
 
-// Create creates a new file bundle
+// Create creates a new file bundle. It starts open - unprotected, no expiry, no download limit -
+// the same default a caller gets by leaving every optional setting off models.UploadParameters
+// for a plain file. apiFolderCreate applies any explicit password/expiry/downloads on top of this
+// once the bundle exists.
 func Create(name string, userId int) models.FileBundle {
 	bundle := models.FileBundle{
-		Id:           helper.GenerateRandomString(configuration.GetEnvironment().LengthId),
-		Name:         name,
-		UserId:       userId,
-		CreationDate: time.Now().Unix(),
+		Id:                 helper.GenerateRandomString(configuration.GetEnvironment().LengthId),
+		Name:               name,
+		UserId:             userId,
+		CreationDate:       time.Now().Unix(),
+		UnlimitedTime:      true,
+		UnlimitedDownloads: true,
 	}
 	database.SaveFileBundle(bundle)
 	return bundle

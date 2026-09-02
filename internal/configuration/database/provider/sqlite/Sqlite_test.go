@@ -983,6 +983,79 @@ func TestMigratePlaintextBundleAndRequestNames(t *testing.T) {
 	test.IsEqualInt(t, instance.MigratePlaintextFileNames(), 0)
 }
 
+// TestBackfillBundleSettingsFromMembers covers the v27 migration step: existing bundles have no
+// password/expiry/downloads of their own until this runs, and the values it backfills come from
+// the bundle's CURRENT members - see models.DeriveBundleSettingsFromMembers for the merge rule.
+// Three bundles: members that agree on every field (the simple case), members that disagree on
+// every field (must land on the most restrictive value along each axis, not an arbitrary
+// member's), and a bundle with no surviving members at all (stays at the zero-value defaults).
+func TestBackfillBundleSettingsFromMembers(t *testing.T) {
+	instance, err := New(models.DbConnection{HostUrl: "./test/newfolder/gokapi_bundle_backfill.sqlite"})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	agreeBundle := models.FileBundle{Id: "agreeBundle", UserId: 1, CreationDate: time.Now().Unix()}
+	instance.SaveFileBundle(agreeBundle)
+	const sharedHash = "sharedhash123"
+	instance.SaveMetaData(models.File{Id: "agreeMember1", BundleId: agreeBundle.Id, SHA1: "a",
+		PasswordHash: sharedHash, ExpireAt: 1800000000, DownloadsRemaining: 4, UploadDate: 100})
+	instance.SaveMetaData(models.File{Id: "agreeMember2", BundleId: agreeBundle.Id, SHA1: "a",
+		PasswordHash: sharedHash, ExpireAt: 1800000000, DownloadsRemaining: 4, UploadDate: 200})
+
+	disagreeBundle := models.FileBundle{Id: "disagreeBundle", UserId: 1, CreationDate: time.Now().Unix()}
+	instance.SaveFileBundle(disagreeBundle)
+	// Uploaded first, unprotected, the loosest expiry and the largest download cap.
+	instance.SaveMetaData(models.File{Id: "disagreeEarlier", BundleId: disagreeBundle.Id, SHA1: "a",
+		ExpireAt: 1900000000, DownloadsRemaining: 9, UploadDate: 50})
+	// Uploaded second, but protected, with a tighter expiry and a smaller download cap.
+	instance.SaveMetaData(models.File{Id: "disagreeLater", BundleId: disagreeBundle.Id, SHA1: "a",
+		PasswordHash: "laterhash", ExpireAt: 1700000000, DownloadsRemaining: 2, UploadDate: 150})
+
+	emptyBundle := models.FileBundle{Id: "emptyBundle", UserId: 1, CreationDate: time.Now().Unix()}
+	instance.SaveFileBundle(emptyBundle)
+
+	// Replay the v27 step against a database whose schema is already current (New() writes it,
+	// including these columns at their zero default) but whose stored version claims v26 - the
+	// same crash-recovery/fresh-backfill shape TestDatabaseProvider_UpgradeV18WipesSessions uses.
+	instance.Upgrade(26)
+
+	agreeStored, ok := instance.GetFileBundle(agreeBundle.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, agreeStored.PasswordHash, sharedHash)
+	test.IsEqualInt64(t, agreeStored.ExpireAt, 1800000000)
+	test.IsEqualBool(t, agreeStored.UnlimitedTime, false)
+	test.IsEqualInt(t, agreeStored.DownloadsRemaining, 4)
+	test.IsEqualBool(t, agreeStored.UnlimitedDownloads, false)
+
+	disagreeStored, ok := instance.GetFileBundle(disagreeBundle.Id)
+	test.IsEqualBool(t, ok, true)
+	// Any member ever protected makes the bundle protected - unprotected would be strictly more
+	// accessible than before. disagreeEarlier has no password, so the earliest PROTECTED member
+	// (disagreeLater) is the one whose hash is used.
+	test.IsEqualString(t, disagreeStored.PasswordHash, "laterhash")
+	// Most restrictive (smallest) expiry wins, not the earliest-uploaded member's.
+	test.IsEqualInt64(t, disagreeStored.ExpireAt, 1700000000)
+	test.IsEqualBool(t, disagreeStored.UnlimitedTime, false)
+	// Most restrictive (smallest) download cap wins.
+	test.IsEqualInt(t, disagreeStored.DownloadsRemaining, 2)
+	test.IsEqualBool(t, disagreeStored.UnlimitedDownloads, false)
+
+	emptyStored, ok := instance.GetFileBundle(emptyBundle.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, emptyStored.PasswordHash, "")
+	test.IsEqualInt64(t, emptyStored.ExpireAt, 0)
+	test.IsEqualBool(t, emptyStored.UnlimitedTime, false)
+	test.IsEqualInt(t, emptyStored.DownloadsRemaining, 0)
+	test.IsEqualBool(t, emptyStored.UnlimitedDownloads, false)
+
+	// Re-running the step (a crash-recovery replay) reproduces the same values rather than
+	// drifting: it is a pure function of the members, which have not changed.
+	instance.Upgrade(26)
+	agreeStoredAgain, ok := instance.GetFileBundle(agreeBundle.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, agreeStoredAgain, agreeStored)
+}
+
 // TestClearingNoteActuallyClears guards the Note write path against the bug the "empty means
 // sealed" heuristic (correct for Name, see encryptRequestNameForSave) would reintroduce if reused
 // for Note: an empty note is a normal value an owner can set by clearing a note they previously

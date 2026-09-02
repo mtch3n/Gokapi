@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 26
+const DatabaseSchemeVersion = 27
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -258,6 +258,48 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	if currentDbVersion < 26 {
 		_, err := p.exec(`ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS ClosedAt BIGINT NOT NULL DEFAULT 0;`)
 		helper.Check(err)
+	}
+	// The folder as the unit of sharing: PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining
+	// and UnlimitedDownloads move from being inferred off member files onto FileBundles itself.
+	// IF NOT EXISTS keeps this idempotent, same as the steps above. The backfill needs no master
+	// key - see models.DeriveBundleSettingsFromMembers for the merge rule used when members
+	// disagree - so it runs directly here instead of waiting for an unseal.
+	if currentDbVersion < 27 {
+		_, err := p.exec(`ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS PasswordHash TEXT NOT NULL DEFAULT '';
+		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS ExpireAt BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS UnlimitedTime BOOLEAN NOT NULL DEFAULT false;
+		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS DownloadsRemaining BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS UnlimitedDownloads BOOLEAN NOT NULL DEFAULT false;`)
+		helper.Check(err)
+		p.backfillBundleSettingsFromMembers()
+	}
+}
+
+// backfillBundleSettingsFromMembers derives every existing bundle's PasswordHash, ExpireAt,
+// UnlimitedTime, DownloadsRemaining and UnlimitedDownloads from its current members and writes
+// them - see models.DeriveBundleSettingsFromMembers for the merge rule. Deterministic in its
+// members, so re-running this reproduces the same values rather than drifting.
+func (p DatabaseProvider) backfillBundleSettingsFromMembers() {
+	allFiles := p.GetAllMetadata()
+	membersByBundle := make(map[string][]models.File)
+	for _, file := range allFiles {
+		if file.BundleId == "" {
+			continue
+		}
+		if !file.IsBundleMember(file.BundleId) {
+			continue
+		}
+		membersByBundle[file.BundleId] = append(membersByBundle[file.BundleId], file)
+	}
+	for _, bundle := range p.GetAllFileBundles() {
+		passwordHash, expireAt, unlimitedTime, downloadsRemaining, unlimitedDownloads :=
+			models.DeriveBundleSettingsFromMembers(membersByBundle[bundle.Id])
+		bundle.PasswordHash = passwordHash
+		bundle.ExpireAt = expireAt
+		bundle.UnlimitedTime = unlimitedTime
+		bundle.DownloadsRemaining = downloadsRemaining
+		bundle.UnlimitedDownloads = unlimitedDownloads
+		p.SaveFileBundle(bundle)
 	}
 }
 
@@ -471,6 +513,11 @@ func (p DatabaseProvider) createNewDatabase() error {
 			userid	INTEGER NOT NULL,
 			creationdate	BIGINT NOT NULL,
 			EncryptedSharePassword	BYTEA,
+			PasswordHash	TEXT NOT NULL DEFAULT '',
+			ExpireAt	BIGINT NOT NULL DEFAULT 0,
+			UnlimitedTime	BOOLEAN NOT NULL DEFAULT false,
+			DownloadsRemaining	BIGINT NOT NULL DEFAULT 0,
+			UnlimitedDownloads	BOOLEAN NOT NULL DEFAULT false,
 			PRIMARY KEY(id)
 		);`
 	err := p.rawPostgres(sqlStmt)
