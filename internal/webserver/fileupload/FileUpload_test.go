@@ -269,7 +269,7 @@ func (t testData) Get(key string) string {
 
 func TestApplyMaxExpiry(t *testing.T) {
 	// Unset: upstream behaviour, permanent files still allowed
-	os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	os.Unsetenv("GOKAPI_MAX_EXPIRY")
 	days, unlimited := applyMaxExpiry(30, false)
 	test.IsEqualInt(t, days, 30)
 	test.IsEqualBool(t, unlimited, false)
@@ -277,8 +277,8 @@ func TestApplyMaxExpiry(t *testing.T) {
 	test.IsEqualInt(t, days, 0)
 	test.IsEqualBool(t, unlimited, true)
 
-	os.Setenv("GOKAPI_MAX_EXPIRY_DAYS", "7")
-	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	os.Setenv("GOKAPI_MAX_EXPIRY", "7d")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY")
 
 	// A permanent upload is forced to the cap. This is the file-request case,
 	// which is created with unlimitedTime set.
@@ -306,12 +306,34 @@ func TestApplyMaxExpiry(t *testing.T) {
 	test.IsEqualBool(t, unlimited, false)
 }
 
+func TestCreateUploadConfigWithExpiryTimestamp(t *testing.T) {
+	os.Unsetenv("GOKAPI_MAX_EXPIRY")
+
+	// A non-zero expiryTimestamp takes precedence over expiryDays and passes through
+	// unchanged when no maximum is configured.
+	wanted := time.Now().Add(3 * 24 * time.Hour).Unix()
+	config, err := CreateUploadConfig(0, 14, wanted, "", false, true, false, 0, "", "", false)
+	test.IsNil(t, err)
+	test.IsEqualInt64(t, config.ExpiryTimestamp, wanted)
+	test.IsEqualBool(t, config.UnlimitedTime, false)
+
+	// With a maximum configured, an expiryTimestamp beyond it is clamped, at the
+	// timestamp's own precision rather than rounded up to whole days.
+	os.Setenv("GOKAPI_MAX_EXPIRY", "12h")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY")
+	latest := time.Now().Add(12 * time.Hour).Unix()
+	config, err = CreateUploadConfig(0, 0, wanted, "", false, true, false, 0, "", "", false)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, config.UnlimitedTime, false)
+	test.IsEqualBool(t, config.ExpiryTimestamp <= latest+2 && config.ExpiryTimestamp >= latest-2, true)
+}
+
 func TestCreateUploadConfigEnforcesExpiry(t *testing.T) {
-	os.Setenv("GOKAPI_MAX_EXPIRY_DAYS", "7")
-	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	os.Setenv("GOKAPI_MAX_EXPIRY", "7d")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY")
 
 	// The file-request path asks for an unlimited lifetime; it must not get one
-	config, err := CreateUploadConfig(0, 0, "", true, true, false, 0, "somerequest", "", false)
+	config, err := CreateUploadConfig(0, 0, 0, "", true, true, false, 0, "somerequest", "", false)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.UnlimitedTime, false)
 	test.IsEqualInt(t, config.Expiry, 7)
@@ -329,27 +351,27 @@ func TestCreateUploadConfigRejectsE2EWhenNotConfigured(t *testing.T) {
 	for _, level := range []int{encryption.NoEncryption, encryption.LocalEncryptionStored,
 		encryption.LocalEncryptionInput, encryption.FullEncryptionStored, encryption.FullEncryptionInput} {
 		configuration.Get().Encryption.Level = level
-		_, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "", "", false)
+		_, err := CreateUploadConfig(1, 14, 0, "", false, false, true, 100, "", "", false)
 		test.IsNotNil(t, err)
 		test.IsEqualBool(t, errors.Is(err, ErrE2ENotConfigured), true)
 	}
 
 	configuration.Get().Encryption.Level = encryption.EndToEndEncryption
-	config, err := CreateUploadConfig(1, 14, "", false, false, true, 100, "", "", false)
+	config, err := CreateUploadConfig(1, 14, 0, "", false, false, true, 100, "", "", false)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.IsEndToEndEncrypted, true)
 	test.IsEqualInt64(t, config.RealSize, 100)
 
 	// Unchanged behaviour: isEnd2End=false never triggers the check, regardless of level.
 	configuration.Get().Encryption.Level = encryption.NoEncryption
-	config, err = CreateUploadConfig(1, 14, "", false, false, false, 0, "", "", false)
+	config, err = CreateUploadConfig(1, 14, 0, "", false, false, false, 0, "", "", false)
 	test.IsNil(t, err)
 	test.IsEqualBool(t, config.IsEndToEndEncrypted, false)
 }
 
 func TestClampExpiryTimestamp(t *testing.T) {
 	// Unset: upstream behaviour preserved, permanent files still allowed
-	os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	os.Unsetenv("GOKAPI_MAX_EXPIRY")
 	future := time.Now().Add(365 * 24 * time.Hour).Unix()
 	ts, unlimited := ClampExpiryTimestamp(future, false)
 	test.IsEqualBool(t, ts == future, true)
@@ -357,8 +379,8 @@ func TestClampExpiryTimestamp(t *testing.T) {
 	_, unlimited = ClampExpiryTimestamp(0, true)
 	test.IsEqualBool(t, unlimited, true)
 
-	os.Setenv("GOKAPI_MAX_EXPIRY_DAYS", "30")
-	defer os.Unsetenv("GOKAPI_MAX_EXPIRY_DAYS")
+	os.Setenv("GOKAPI_MAX_EXPIRY", "30d")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY")
 	latest := time.Now().Add(30 * 24 * time.Hour).Unix()
 
 	// An unlimited lifetime is refused and pinned to the cap

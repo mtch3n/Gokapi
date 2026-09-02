@@ -978,6 +978,7 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 	}
 	uploadParams, err := fileupload.CreateUploadConfig(request.AllowedDownloads,
 		request.ExpiryDays,
+		request.ExpiryTimestamp,
 		validatedPassword,
 		request.UnlimitedTime,
 		request.UnlimitedDownloads,
@@ -1051,7 +1052,7 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 		return
 	}
 	uploadParams, err := fileupload.CreateUploadConfig(0,
-		0, "", true, true,
+		0, 0, "", true, true,
 		false, request.FileSize, fileRequest.Id, "", false)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
@@ -1333,6 +1334,7 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 	}
 	uploadConfig, err := fileupload.CreateUploadConfig(request.AllowedDownloads,
 		request.ExpiryDays,
+		0, // a duplicate has no timestamp of its own to offer; it clamps by day count like the original upload did
 		request.Password,
 		request.UnlimitedTime,
 		request.UnlimitedDownloads,
@@ -2151,7 +2153,11 @@ func apiURequestSave(w http.ResponseWriter, r requestParser, user models.User, _
 		uploadRequest.Name = request.Name
 	}
 	if request.IsExpirySet {
-		uploadRequest.Expiry = request.Expiry
+		// A file request's Expiry of 0 means unlimited (see models.FileRequest.IsUnlimitedTime),
+		// so that is exactly the unlimitedTime signal ClampExpiryTimestamp needs. Without this
+		// call a request could be saved with an expiry beyond GOKAPI_MAX_EXPIRY, or with no
+		// expiry at all, the same gap apiFilesModify closed for single files below.
+		uploadRequest.Expiry, _ = fileupload.ClampExpiryTimestamp(request.Expiry, request.Expiry == 0)
 	}
 	if request.IsMaxFilesSet {
 		uploadRequest.MaxFiles = request.MaxFiles

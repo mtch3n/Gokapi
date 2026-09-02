@@ -494,7 +494,16 @@
           {
             "name": "expiryDays",
             "in": "header",
-            "description": "How many days the file will be stored. Default of 14 will be used if empty. Unlimited if 0 is passed.",
+            "description": "How many days the file will be stored. Default of 14 will be used if empty. Unlimited if 0 is passed. Ignored if expiryTimestamp is also passed and non-zero.",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "expiryTimestamp",
+            "in": "header",
+            "description": "An absolute Unix timestamp for the file's expiry, e.g. picked from a date/time control. Takes precedence over expiryDays if non-zero. Must not be in the past. Either header is clamped to the server's configured maximum expiry, if one is set.",
             "required": false,
             "schema": {
               "type": "integer"

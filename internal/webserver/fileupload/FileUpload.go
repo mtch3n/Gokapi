@@ -151,16 +151,30 @@ var ErrE2ENotConfigured = errors.New("end-to-end encryption is not enabled on th
 // CreateUploadConfig populates a new models.UploadParameters struct.
 // It returns ErrE2ENotConfigured if isEnd2End is set while the server's
 // encryption level is not encryption.EndToEndEncryption.
-func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string, bundleId string, generatedPassword bool) (models.UploadParameters, error) {
+//
+// expiryTimestamp, if non-zero, is an absolute Unix timestamp supplied by the caller (e.g. a
+// date picked in the SPA) and takes precedence over expiryDays; it is clamped with
+// ClampExpiryTimestamp, at whatever precision GOKAPI_MAX_EXPIRY was configured with. A zero
+// expiryTimestamp falls back to the day-count behaviour: expiryDays is clamped with
+// applyMaxExpiry and converted to an absolute timestamp from there. Every caller that does not
+// have a real timestamp to offer - file requests, the duplicate-file API and the legacy web
+// form - passes 0.
+func CreateUploadConfig(allowedDownloads, expiryDays int, expiryTimestamp int64, password string, unlimitedTime, unlimitedDownload, isEnd2End bool, realSize int64, fileRequestId string, bundleId string, generatedPassword bool) (models.UploadParameters, error) {
 	settings := configuration.Get()
 	if isEnd2End && settings.Encryption.Level != encryption.EndToEndEncryption {
 		return models.UploadParameters{}, ErrE2ENotConfigured
 	}
-	expiryDays, unlimitedTime = applyMaxExpiry(expiryDays, unlimitedTime)
+	var ts int64
+	if expiryTimestamp != 0 {
+		ts, unlimitedTime = ClampExpiryTimestamp(expiryTimestamp, unlimitedTime)
+	} else {
+		expiryDays, unlimitedTime = applyMaxExpiry(expiryDays, unlimitedTime)
+		ts = time.Now().Add(time.Duration(expiryDays) * time.Hour * 24).Unix()
+	}
 	return models.UploadParameters{
 		AllowedDownloads:    allowedDownloads,
 		Expiry:              expiryDays,
-		ExpiryTimestamp:     time.Now().Add(time.Duration(expiryDays) * time.Hour * 24).Unix(),
+		ExpiryTimestamp:     ts,
 		Password:            password,
 		GeneratedPassword:   generatedPassword,
 		ExternalUrl:         settings.ServerUrl,
@@ -177,7 +191,7 @@ func CreateUploadConfig(allowedDownloads, expiryDays int, password string, unlim
 func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	fileRequestId := values.Get("fileRequestId")
 	if fileRequestId != "" {
-		return CreateUploadConfig(0, 0, "",
+		return CreateUploadConfig(0, 0, 0, "",
 			true, true, false, 0, fileRequestId, "", false)
 	}
 	allowedDownloads := values.Get("allowedDownloads")
@@ -221,33 +235,41 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 		}
 	}
 	generatedPassword := values.Get("generatedpassword") == "true"
-	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, validatedPassword, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "", "", generatedPassword)
+	return CreateUploadConfig(allowedDownloadsInt, expiryDaysInt, 0, validatedPassword, unlimitedTime, unlimitedDownload, isEnd2End, realSize, "", "", generatedPassword)
 }
 
 type formOrHeader interface {
 	Get(key string) string
 }
 
-// applyMaxExpiry clamps an upload's lifetime to GOKAPI_MAX_EXPIRY_DAYS.
+// applyMaxExpiry clamps an upload's lifetime to GOKAPI_MAX_EXPIRY.
 //
 // Every upload path funnels through CreateUploadConfig, so enforcing here covers
 // the web form, the API and file requests alike. File requests matter most: they
 // are created with unlimitedTime set, so without this a file uploaded by an
 // external party would never expire.
 //
+// expiryDays only has day granularity, but GOKAPI_MAX_EXPIRY can be finer (e.g. "12h"), so
+// the maximum is rounded up to whole days here rather than truncated - truncating a sub-day
+// maximum down to 0 days would silently disable the cap for this path instead of enforcing
+// it strictly. ClampExpiryTimestamp, used by every absolute-timestamp path, applies the
+// configured maximum at its native precision.
+//
 // A value of 0 keeps the upstream behaviour of allowing permanent files.
 func applyMaxExpiry(expiryDays int, unlimitedTime bool) (int, bool) {
-	maxExpiryDays := environment.New().MaxExpiryDays
-	if maxExpiryDays < 1 {
+	maxExpiry := time.Duration(environment.New().MaxExpiry)
+	if maxExpiry <= 0 {
 		return expiryDays, unlimitedTime
 	}
+	const day = 24 * time.Hour
+	maxExpiryDays := int((maxExpiry + day - 1) / day)
 	if unlimitedTime || expiryDays < 1 || expiryDays > maxExpiryDays {
 		return maxExpiryDays, false
 	}
 	return expiryDays, false
 }
 
-// ClampExpiryTimestamp applies GOKAPI_MAX_EXPIRY_DAYS to an absolute expiry timestamp.
+// ClampExpiryTimestamp applies GOKAPI_MAX_EXPIRY to an absolute expiry timestamp.
 //
 // CreateUploadConfig covers every path that creates a file, but the edit API sets an
 // expiry directly on existing metadata rather than going through an upload config, so
@@ -256,11 +278,11 @@ func applyMaxExpiry(expiryDays int, unlimitedTime bool) (int, bool) {
 //
 // A maximum of 0 keeps the upstream behaviour of permitting permanent files.
 func ClampExpiryTimestamp(expiryTimestamp int64, unlimitedTime bool) (int64, bool) {
-	maxExpiryDays := environment.New().MaxExpiryDays
-	if maxExpiryDays < 1 {
+	maxExpiry := time.Duration(environment.New().MaxExpiry)
+	if maxExpiry <= 0 {
 		return expiryTimestamp, unlimitedTime
 	}
-	latest := time.Now().Add(time.Duration(maxExpiryDays) * time.Hour * 24).Unix()
+	latest := time.Now().Add(maxExpiry).Unix()
 	if unlimitedTime || expiryTimestamp <= 0 || expiryTimestamp > latest {
 		return latest, false
 	}

@@ -3212,6 +3212,92 @@ func TestChunkCompleteSanitisationUnit(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(p.FileHeader.Filename, "\n"), false)
 }
 
+// TestChunkCompleteExpiryTimestampRejectsPast proves paramChunkComplete.ProcessParameter
+// refuses a non-zero expiryTimestamp that has already passed, in the same style as the
+// filename check just above: a validation error returned directly from ProcessParameter,
+// before any file is created.
+func TestChunkCompleteExpiryTimestampRejectsPast(t *testing.T) {
+	p := &paramChunkComplete{}
+	p.foundHeaders = map[string]bool{"realsize": true}
+	p.RealSize = 10
+	p.FileSize = 10
+	p.FileName = "test.txt"
+	p.ExpiryTimestamp = time.Now().Add(-time.Hour).Unix()
+
+	err := p.ProcessParameter(nil)
+	test.IsNotNil(t, err)
+
+	// A zero expiryTimestamp (not supplied) is never rejected as "in the past".
+	p2 := &paramChunkComplete{}
+	p2.foundHeaders = map[string]bool{"realsize": true}
+	p2.RealSize = 10
+	p2.FileSize = 10
+	p2.FileName = "test.txt"
+	p2.ExpiryTimestamp = 0
+
+	test.IsNil(t, p2.ProcessParameter(nil))
+
+	// A future expiryTimestamp is accepted.
+	p3 := &paramChunkComplete{}
+	p3.foundHeaders = map[string]bool{"realsize": true}
+	p3.RealSize = 10
+	p3.FileSize = 10
+	p3.FileName = "test.txt"
+	p3.ExpiryTimestamp = time.Now().Add(time.Hour).Unix()
+
+	test.IsNil(t, p3.ProcessParameter(nil))
+}
+
+// TestApiURequestSaveClampsExpiry proves apiURequestSave no longer writes a file request's
+// Expiry straight from client input - GOKAPI_MAX_EXPIRY must be enforced here the same way
+// apiFilesModify already enforces it for a single file's ExpireAt.
+func TestApiURequestSaveClampsExpiry(t *testing.T) {
+	os.Setenv("GOKAPI_MAX_EXPIRY", "7d")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY")
+	latest := time.Now().Add(7 * 24 * time.Hour).Unix()
+
+	admin := models.User{Id: idAdmin, UserLevel: models.UserLevelAdmin, Permissions: models.UserPermissionAll}
+
+	// A far-future expiry is clamped down to the maximum.
+	w := httptest.NewRecorder()
+	farFuture := time.Now().Add(365 * 24 * time.Hour).Unix()
+	request := &paramURequestSave{
+		Name:         "clamp-test-request",
+		Expiry:       farFuture,
+		IsExpirySet:  true,
+		foundHeaders: map[string]bool{},
+	}
+	apiURequestSave(w, request, admin, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response struct {
+		FileRequest models.FileRequest
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	saved, ok := database.GetFileRequest(response.FileRequest.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, saved.Expiry <= latest+2, true)
+
+	// An unlimited (0) expiry is likewise refused and pinned to the maximum.
+	w2 := httptest.NewRecorder()
+	request2 := &paramURequestSave{
+		Name:         "clamp-test-request-unlimited",
+		Expiry:       0,
+		IsExpirySet:  true,
+		foundHeaders: map[string]bool{},
+	}
+	apiURequestSave(w2, request2, admin, models.ApiKey{})
+	test.IsEqualInt(t, w2.Code, 200)
+
+	var response2 struct {
+		FileRequest models.FileRequest
+	}
+	test.IsNil(t, json.Unmarshal(w2.Body.Bytes(), &response2))
+	saved2, ok := database.GetFileRequest(response2.FileRequest.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, saved2.Expiry <= latest+2 && saved2.Expiry > 0, true)
+}
+
 func TestLogsAudit(t *testing.T) {
 	const apiUrl = "/logs/audit"
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageLogs)

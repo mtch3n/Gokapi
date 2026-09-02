@@ -1171,6 +1171,19 @@ func (p *paramChunkComplete) ParseRequest(r *http.Request) error {
 		}
 	}
 
+	// RequestParser header value "expiryTimestamp", required: false
+	exists, err = checkHeaderExists(r, "expiryTimestamp", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["expiryTimestamp"] = exists
+	if exists {
+		p.ExpiryTimestamp, err = parseHeaderInt64(r, "expiryTimestamp")
+		if err != nil {
+			return fmt.Errorf("invalid value in header expiryTimestamp supplied")
+		}
+	}
+
 	// RequestParser header value "password", required: false, has base64support
 	exists, err = checkHeaderExists(r, "password", false, true)
 	if err != nil {

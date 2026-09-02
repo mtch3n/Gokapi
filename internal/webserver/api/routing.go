@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/helper"
@@ -912,7 +913,11 @@ type paramChunkComplete struct {
 	ContentType      string `header:"contenttype"`
 	AllowedDownloads int    `header:"allowedDownloads"`
 	ExpiryDays       int    `header:"expiryDays"`
-	Password         string `header:"password" supportBase64:"true"`
+	// ExpiryTimestamp, if set, is an absolute Unix timestamp and takes precedence over
+	// ExpiryDays - see fileupload.CreateUploadConfig. Named the same as paramFilesModify's
+	// header of the same purpose.
+	ExpiryTimestamp int64  `header:"expiryTimestamp"`
+	Password        string `header:"password" supportBase64:"true"`
 	// GeneratedPassword signals that Password was generated client-side by the SPA rather than
 	// typed by the uploader (its accessMode is "generated", not "manual"). Only meaningful
 	// together with a non-empty password. Informational only: it gates nothing today, because
@@ -958,6 +963,10 @@ func (p *paramChunkComplete) ProcessParameter(r *http.Request) error {
 		if p.ExpiryDays > 100000 {
 			p.UnlimitedTime = true
 		}
+	}
+
+	if p.ExpiryTimestamp != 0 && p.ExpiryTimestamp < time.Now().Unix() {
+		return errors.New("expiryTimestamp is in the past")
 	}
 
 	p.FileName = helper.SanitiseFilename(p.FileName)

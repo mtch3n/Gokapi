@@ -2252,11 +2252,25 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 			"chunkSizeMB":        config.ChunkSize,
 			"maxParallelUploads": config.MaxParallelUploads,
 			"minPasswordLength":  env.MinLengthPassword,
+			// maxExpirySeconds is 0 if no maximum is configured (GOKAPI_MAX_EXPIRY unset), the
+			// same "0 means uncapped" convention used throughout this API for expiry values.
+			"maxExpirySeconds":     int64(time.Duration(env.MaxExpiry).Seconds()),
+			"expiryOptionsSeconds": expiryOptionsSeconds(env.ExpiryOptions),
 		},
 	}
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+}
+
+// expiryOptionsSeconds converts environment.Environment.ExpiryOptions (already validated and
+// sorted by environment.New) to whole seconds for the client, which works in Unix timestamps.
+func expiryOptionsSeconds(options []environment.Duration) []int64 {
+	result := make([]int64, len(options))
+	for i, opt := range options {
+		result[i] = int64(time.Duration(opt).Seconds())
+	}
+	return result
 }
 
 // respondAuditWriteFailed refuses a request whose audit record could not be committed to

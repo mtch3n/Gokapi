@@ -5,13 +5,27 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"sort"
 	"strconv"
+	"time"
 
 	envParser "github.com/caarlos0/env/v6"
 	"github.com/forceu/gokapi/internal/environment/deprecation"
 	"github.com/forceu/gokapi/internal/environment/flagparser"
 	"github.com/forceu/gokapi/internal/helper"
 )
+
+// defaultExpiryOptions mirrors the envDefault tag on Environment.ExpiryOptions. Kept as a
+// separate literal, rather than parsed from the tag, so normalizeExpiryOptions has a fallback
+// that does not depend on parsing succeeding.
+var defaultExpiryOptions = []Duration{
+	Duration(time.Hour),
+	Duration(24 * time.Hour),
+	Duration(7 * 24 * time.Hour),
+	Duration(14 * 24 * time.Hour),
+	Duration(30 * 24 * time.Hour),
+	Duration(365 * 24 * time.Hour),
+}
 
 // DefaultPort for the webserver
 const DefaultPort = 53842
@@ -53,12 +67,20 @@ type Environment struct {
 	// Sets the amount of RAM in MB that can be allocated for an upload chunk or file
 	// Any chunk or file with a size greater than that will be written to a temporary file
 	MaxMemory int `env:"MAX_MEMORY_UPLOAD" envDefault:"50" onlyPositive:"true" persistent:"true"`
-	// Sets the maximum number of days after which an upload expires. Any upload that
-	// requests a longer expiry, or no expiry at all, is clamped to this value. This
-	// applies to every upload path, including file requests, so that no file can be
-	// stored permanently.
-	// Set to 0 to allow permanent files
-	MaxExpiryDays int `env:"MAX_EXPIRY_DAYS" envDefault:"0" onlyPositive:"true" persistent:"true"`
+	// Sets the furthest expiry allowed for an upload. Any upload that requests a longer
+	// expiry, or no expiry at all, is clamped to this value. This applies to every upload
+	// path, including file requests, so that no file can be stored permanently. Accepts a
+	// Go duration such as "12h", plus "d" (day) and "w" (week) suffixes, e.g. "365d".
+	// Set to 0 to allow permanent files. Not persistent: the clamp is re-read from the
+	// environment on every use, so it can be raised or lowered without a reconfiguration,
+	// but it must therefore be present on every start, the same way production supplies it
+	// through deploy config
+	MaxExpiry Duration `env:"MAX_EXPIRY" envDefault:"0"`
+	// Sets the expiry presets a client offers for a new upload, e.g. "1h,1d,7d,14d,30d,365d".
+	// Comma separated, same format as GOKAPI_MAX_EXPIRY per entry. An entry that is not
+	// positive, a duplicate, or greater than GOKAPI_MAX_EXPIRY is dropped; if that empties
+	// the list, the default list above is used instead
+	ExpiryOptions []Duration `env:"EXPIRY_OPTIONS" envSeparator:"," envDefault:"1h,1d,7d,14d,30d,365d"`
 	// Sets the maximum number of files that can be uploaded per file requests created by
 	// non-admin users
 	// Set to 0 to allow unlimited file count for all users
@@ -73,7 +95,8 @@ type Environment struct {
 	MaxParallelUploads int `env:"MAX_PARALLEL_UPLOADS" envDefault:"3" onlyPositive:"true" persistent:"true"`
 	// Sets the minimum free space on the disk in MB for accepting an upload
 	MinFreeSpaceMB int `env:"MIN_FREE_SPACE" envDefault:"400" onlyPositive:"true"`
-	// Sets the minimum password length
+	// Sets the minimum password length. Regardless of this value, every password
+	// must also contain a lowercase letter, an uppercase letter, a number and a special character
 	MinLengthPassword int `env:"MIN_LENGTH_PASSWORD" envDefault:"8" minValue:"6"`
 	// Allows all users by default to create file requests, if set to true
 	PermRequestGrantedByDefault bool `env:"GUEST_UPLOAD_BY_DEFAULT" envDefault:"false"`
@@ -139,9 +162,40 @@ func New() Environment {
 		osExit(1)
 	}
 	result = parseFlags(result)
+	normalizeExpiryOptions(&result)
 	result.ActiveDeprecations = deprecation.GetActive()
 
 	return result
+}
+
+// normalizeExpiryOptions cleans up ExpiryOptions. enforceIntLimits only understands
+// reflect.Int* kinds (see its switch below) and silently skips slices and custom types, so
+// its onlyPositive handling never applies to a []Duration - this is the dedicated pass for it.
+// Options are de-duplicated and sorted ascending so a client always sees a clean, ordered
+// picker. An option above MaxExpiry is dropped rather than clamped: clamping it would leave
+// two presets that silently resolve to the same value, which is more confusing than one
+// fewer preset. If dropping empties the list entirely, e.g. because MaxExpiry is lower than
+// every configured option, the upstream default list is used instead - a broken config must
+// never leave a client with no options at all.
+func normalizeExpiryOptions(result *Environment) {
+	seen := make(map[Duration]bool, len(result.ExpiryOptions))
+	options := make([]Duration, 0, len(result.ExpiryOptions))
+	for _, opt := range result.ExpiryOptions {
+		if opt <= 0 || seen[opt] {
+			continue
+		}
+		if result.MaxExpiry > 0 && opt > result.MaxExpiry {
+			fmt.Printf("Warning: GOKAPI_EXPIRY_OPTIONS contains %s, which is greater than GOKAPI_MAX_EXPIRY and was dropped\n", time.Duration(opt))
+			continue
+		}
+		seen[opt] = true
+		options = append(options, opt)
+	}
+	sort.Slice(options, func(i, j int) bool { return options[i] < options[j] })
+	if len(options) == 0 {
+		options = append([]Duration{}, defaultExpiryOptions...)
+	}
+	result.ExpiryOptions = options
 }
 
 func parseEnvVars(result Environment) Environment {

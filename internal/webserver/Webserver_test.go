@@ -2682,6 +2682,15 @@ func TestPublicApiConfig(t *testing.T) {
 		if _, ok := limits["minPasswordLength"]; !ok {
 			t.Errorf("Missing minPasswordLength field in limits")
 		}
+		if _, ok := limits["maxExpirySeconds"]; !ok {
+			t.Errorf("Missing maxExpirySeconds field in limits")
+		}
+		options, ok := limits["expiryOptionsSeconds"].([]interface{})
+		if !ok {
+			t.Errorf("Missing or invalid expiryOptionsSeconds field in limits")
+		} else if len(options) == 0 {
+			t.Errorf("expiryOptionsSeconds must never be empty")
+		}
 	}
 }
 
