@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 24
+const DatabaseSchemeVersion = 25
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -242,6 +242,13 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	if currentDbVersion < 24 {
 		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS DisposedAt BIGINT NOT NULL DEFAULT 0;
 		ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS DisposalReason INTEGER NOT NULL DEFAULT 0;`)
+		helper.Check(err)
+	}
+	// File request collaborators (models.FileRequest.Collaborators): a JSON array of user ids,
+	// typed JSONB so the server validates what is written. '[]' rather than '' as the default so
+	// every row is valid JSON. IF NOT EXISTS keeps this idempotent, same as the steps above.
+	if currentDbVersion < 25 {
+		_, err := p.exec(`ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS Collaborators JSONB NOT NULL DEFAULT '[]'::jsonb;`)
 		helper.Check(err)
 	}
 }
@@ -404,6 +411,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			ApiKey	TEXT NOT NULL UNIQUE,
 			NoteEncrypted	BYTEA,
 			Closed	BOOLEAN NOT NULL DEFAULT FALSE,
+			Collaborators	JSONB NOT NULL DEFAULT '[]'::jsonb,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Statistics (
