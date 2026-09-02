@@ -1881,6 +1881,63 @@ func TestListSingle(t *testing.T) {
 	apiListSingle(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
+// TestListDisposedAtCrossesApiBoundary guards the regression this field fixes: the client
+// receives DisposedAt only if it survives the marshalled JSON response, not merely the database
+// row and models.File - FileApiOutput used to lack the field entirely, so it was silently absent
+// from every /files/list response no matter what storage.CleanUp had written.
+//
+// This uses /files/list rather than /files/list/{id}: the single-file lookup goes through
+// storage.GetFile, which deliberately refuses a disposed record (see getFilesForUser's doc
+// comment), so a disposed file is only ever visible through the list endpoint.
+func TestListDisposedAtCrossesApiBoundary(t *testing.T) {
+	const apiUrl = "/files/list"
+	const fileId = "disposedListFile"
+	disposedAt := int64(1750852108)
+	database.SaveMetaData(models.File{
+		Id:             fileId,
+		Name:           fileId,
+		SHA1:           "03cfd743661f07975fa2f1220c5194cbaff48451",
+		ExpireAt:       2147483646,
+		UserId:         idUser,
+		DisposedAt:     disposedAt,
+		DisposalReason: models.DisposalReasonExpired,
+	})
+	defer database.DeleteMetaData(fileId)
+
+	apiKey := testAuthorisation(t, apiUrl, models.ApiPermView)
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var result []models.FileApiOutput
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	found := false
+	for _, file := range result {
+		if file.Id == fileId {
+			found = true
+			test.IsEqualInt64(t, file.DisposedAt, disposedAt)
+		}
+	}
+	test.IsEqualBool(t, found, true)
+
+	// Decode into a generic map too: unmarshalling into models.FileApiOutput would report a
+	// zero value regardless of whether the key was ever on the wire, which is exactly the
+	// failure mode this test exists to catch.
+	var raw []map[string]any
+	err = json.Unmarshal(w.Body.Bytes(), &raw)
+	test.IsNil(t, err)
+	rawFound := false
+	for _, entry := range raw {
+		if entry["Id"] == fileId {
+			rawFound = true
+			_, exists := entry["DisposedAt"]
+			test.IsEqualBool(t, exists, true)
+		}
+	}
+	test.IsEqualBool(t, rawFound, true)
+}
+
 func TestUpload(t *testing.T) {
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermUpload)

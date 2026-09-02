@@ -32,8 +32,8 @@ func TestToJsonResult(t *testing.T) {
 		UnlimitedTime:      true,
 		PendingDeletion:    100,
 	}
-	test.IsEqualString(t, file.ToJsonResult("serverurl/", false), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","HotlinkId":"hotlinkid","ContentType":"text/html","ExpireAtString":"2025-06-25 11:48:28","UrlDownload":"serverurl/d?id=testId","UrlHotlink":"","FileRequestId":"","BundleId":"","UploadDate":1748180908,"ExpireAt":1750852108,"SizeBytes":10,"DownloadsRemaining":1,"DownloadCount":3,"UnlimitedDownloads":true,"UnlimitedTime":true,"RequiresClientSideDecryption":true,"IsEncrypted":true,"IsEndToEndEncrypted":false,"IsPasswordProtected":true,"IsSavedOnLocalStorage":false,"Status":"deleted","IsFileRequest":false,"UploaderId":2},"IncludeFilename":false}`)
-	test.IsEqualString(t, file.ToJsonResult("serverurl/", true), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","HotlinkId":"hotlinkid","ContentType":"text/html","ExpireAtString":"2025-06-25 11:48:28","UrlDownload":"serverurl/d/testId/testName","UrlHotlink":"","FileRequestId":"","BundleId":"","UploadDate":1748180908,"ExpireAt":1750852108,"SizeBytes":10,"DownloadsRemaining":1,"DownloadCount":3,"UnlimitedDownloads":true,"UnlimitedTime":true,"RequiresClientSideDecryption":true,"IsEncrypted":true,"IsEndToEndEncrypted":false,"IsPasswordProtected":true,"IsSavedOnLocalStorage":false,"Status":"deleted","IsFileRequest":false,"UploaderId":2},"IncludeFilename":true}`)
+	test.IsEqualString(t, file.ToJsonResult("serverurl/", false), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","HotlinkId":"hotlinkid","ContentType":"text/html","ExpireAtString":"2025-06-25 11:48:28","UrlDownload":"serverurl/d?id=testId","UrlHotlink":"","FileRequestId":"","BundleId":"","UploadDate":1748180908,"ExpireAt":1750852108,"SizeBytes":10,"DownloadsRemaining":1,"DownloadCount":3,"UnlimitedDownloads":true,"UnlimitedTime":true,"DisposedAt":0,"RequiresClientSideDecryption":true,"IsEncrypted":true,"IsEndToEndEncrypted":false,"IsPasswordProtected":true,"IsSavedOnLocalStorage":false,"Status":"deleted","IsFileRequest":false,"UploaderId":2},"IncludeFilename":false}`)
+	test.IsEqualString(t, file.ToJsonResult("serverurl/", true), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","HotlinkId":"hotlinkid","ContentType":"text/html","ExpireAtString":"2025-06-25 11:48:28","UrlDownload":"serverurl/d/testId/testName","UrlHotlink":"","FileRequestId":"","BundleId":"","UploadDate":1748180908,"ExpireAt":1750852108,"SizeBytes":10,"DownloadsRemaining":1,"DownloadCount":3,"UnlimitedDownloads":true,"UnlimitedTime":true,"DisposedAt":0,"RequiresClientSideDecryption":true,"IsEncrypted":true,"IsEndToEndEncrypted":false,"IsPasswordProtected":true,"IsSavedOnLocalStorage":false,"Status":"deleted","IsFileRequest":false,"UploaderId":2},"IncludeFilename":true}`)
 }
 
 func TestIsLocalStorage(t *testing.T) {
@@ -100,4 +100,33 @@ func TestToFileApiOutputFileRequest(t *testing.T) {
 	test.IsEqualString(t, output.UrlDownload, "")
 	test.IsEqualString(t, output.UrlHotlink, "")
 	test.IsEqualInt(t, output.UploaderId, 2)
+}
+
+// TestToFileApiOutputDisposedAtCrossesApiBoundary guards the regression this file's DisposedAt
+// field fixes: FileApiOutput used to lack the field entirely, so copier.Copy had nothing to
+// populate and every client saw DisposedAt as absent, no matter what was stored.
+func TestToFileApiOutputDisposedAtCrossesApiBoundary(t *testing.T) {
+	file := File{
+		Id:             "disposedFile",
+		Name:           "disposedFile",
+		UserId:         2,
+		DisposedAt:     1750852108,
+		DisposalReason: DisposalReasonExpired,
+	}
+	output, err := file.ToFileApiOutput("serverurl/", false)
+	test.IsNil(t, err)
+	test.IsEqualInt64(t, output.DisposedAt, file.DisposedAt)
+}
+
+func TestToFileApiOutputActiveFileHasZeroDisposedAt(t *testing.T) {
+	file := File{
+		Id:                 "activeFile",
+		Name:               "activeFile",
+		UserId:             2,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	}
+	output, err := file.ToFileApiOutput("serverurl/", false)
+	test.IsNil(t, err)
+	test.IsEqualInt64(t, output.DisposedAt, 0)
 }

@@ -2957,6 +2957,12 @@
             "description": "True if the uploader did not limit the time",
             "example": "false"
           },
+          "DisposedAt": {
+            "type": "integer",
+            "description": "UTC timestamp the file's content was deleted, or 0 if not disposed",
+            "format": "int64",
+            "example": "1708175321"
+          },
           "RequiresClientSideDecryption": {
             "type": "boolean",
             "description": "True if the file has to be decrypted client-side",
