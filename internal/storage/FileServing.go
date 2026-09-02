@@ -1064,6 +1064,7 @@ func CleanUp(periodic bool) {
 	purgeHotlinksIfDisabled()
 	cleanInvalidApiKeys()
 	cleanInvalidFileRequests()
+	cleanExpiredFileRequests()
 	cleanInvalidBundles()
 	database.CleanUpExpiredShareLoginTokens(timeNow)
 	cleanOrphanShareGrants()
@@ -1123,6 +1124,51 @@ func cleanInvalidFileRequests() {
 			database.DeleteFileRequest(fileRequest)
 		}
 
+	}
+}
+
+// DeleteFileRequest deletes a file request together with every file it received and its upload
+// API key. This is the one place that cascade is implemented: filerequest.Delete delegates here
+// rather than assembling the same three steps itself, because storage/filerequest imports this
+// package for DeleteFiles - a dependency the other direction would make circular, which is also
+// why cleanExpiredFileRequests below calls this directly instead of going through
+// storage/filerequest.
+func DeleteFileRequest(request models.FileRequest) {
+	var files []models.File
+	for _, file := range database.GetAllMetadata() {
+		if file.UploadRequestId == request.Id {
+			files = append(files, file)
+		}
+	}
+	DeleteFiles(files, true)
+	database.DeleteFileRequest(request)
+	database.DeleteApiKey(request.ApiKey)
+}
+
+// cleanExpiredFileRequests deletes file requests, and everything DeleteFileRequest cascades to,
+// once they have been expired or closed for at least GOKAPI_FILEREQUEST_RETENTION. Skipped
+// entirely when that is 0, the default: nothing an existing install already holds is removed by
+// upgrading, only what an operator explicitly opts into by setting the duration.
+//
+// A request's clock starts at whichever end state applies to it: Expiry for one that ran out on
+// its own, ClosedAt for one closed early. Both are checked independently, so a request that is
+// both closed and expired is eligible the moment either window elapses. ClosedAt is 0 for a
+// request that has never been closed, and also for one that was closed before this field existed
+// (its ALTER TABLE backfill defaults it to 0, the same as FileMetaData.DisposedAt's did) - such a
+// request is left for Expiry to catch instead of being treated as closed at the epoch.
+func cleanExpiredFileRequests() {
+	retention := time.Duration(environment.New().FileRequestRetention)
+	if retention <= 0 {
+		return
+	}
+	timeNow := time.Now().Unix()
+	retentionSeconds := int64(retention.Seconds())
+	for _, request := range database.GetAllFileRequests() {
+		expiredPastRetention := request.IsExpired() && timeNow-request.Expiry >= retentionSeconds
+		closedPastRetention := request.Closed && request.ClosedAt > 0 && timeNow-request.ClosedAt >= retentionSeconds
+		if expiredPastRetention || closedPastRetention {
+			DeleteFileRequest(request)
+		}
 	}
 }
 

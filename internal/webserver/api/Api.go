@@ -2623,6 +2623,11 @@ func apiURequestSave(w http.ResponseWriter, r requestParser, user models.User, _
 		uploadRequest.Notes = request.Notes
 	}
 	if request.IsClosedSet {
+		if request.Closed && !wasClosed {
+			uploadRequest.ClosedAt = time.Now().Unix()
+		} else if !request.Closed {
+			uploadRequest.ClosedAt = 0
+		}
 		uploadRequest.Closed = request.Closed
 	}
 	database.SaveFileRequest(uploadRequest)
@@ -2668,6 +2673,7 @@ func apiURequestComplete(w http.ResponseWriter, r requestParser, user models.Use
 	}
 	if !uploadRequest.Closed {
 		uploadRequest.Closed = true
+		uploadRequest.ClosedAt = time.Now().Unix()
 		database.SaveFileRequest(uploadRequest)
 		logging.LogCloseFileRequest(uploadRequest, user, true)
 	}
@@ -2683,6 +2689,7 @@ func closeFullFileRequest(fr models.FileRequest, user models.User) {
 		return
 	}
 	stored.Closed = true
+	stored.ClosedAt = time.Now().Unix()
 	database.SaveFileRequest(stored)
 	logging.LogFileRequestFull(stored, user)
 }

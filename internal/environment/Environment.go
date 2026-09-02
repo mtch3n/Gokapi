@@ -83,6 +83,15 @@ type Environment struct {
 	// the same reason as GOKAPI_MAX_EXPIRY: storage.CleanUp re-reads it from the environment on
 	// every sweep, so it must be present on every start.
 	MetadataRetention Duration `env:"METADATA_RETENTION" envDefault:"7d"`
+	// Sets how long a file request is kept, together with every file it received and its upload
+	// API key, once it has expired or been marked closed. Accepts a Go duration such as "12h",
+	// plus "d" (day) and "w" (week) suffixes, e.g. "365d". Set to 0 (default) to disable: nothing
+	// is removed just because a request expired or closed, matching the behaviour prior to this
+	// setting existing. An operator opts in per instance; upgrading never deletes what an existing
+	// install already holds. Not persistent, for the same reason as GOKAPI_MAX_EXPIRY:
+	// storage.CleanUp re-reads it from the environment on every sweep, so it must be present on
+	// every start.
+	FileRequestRetention Duration `env:"FILEREQUEST_RETENTION" envDefault:"0"`
 	// Sets the expiry presets a client offers for a new upload, e.g. "1h,1d,7d,14d,30d,365d".
 	// Comma separated, same format as GOKAPI_MAX_EXPIRY per entry. An entry that is not
 	// positive, a duplicate, or greater than GOKAPI_MAX_EXPIRY is dropped; if that empties

@@ -179,3 +179,20 @@ startup. If the conversion did not finish, the affected names are left unreadabl
 **Fix:** Check the log for an ``Encrypted N name(s)/note(s) that were stored in plaintext``
 entry, which is written once the conversion completes. If it is missing, unseal the instance
 again - the conversion resumes where it stopped and is safe to repeat.
+
+
+Files received through a file request disappeared
+-------------------------------------------------
+
+**Symptom:** A file request that expired or was marked closed - along with every file it
+received and its own upload API key - is gone.
+
+**Cause:** ``GOKAPI_FILEREQUEST_RETENTION`` is set. Once a file request expires or is closed,
+by default it and everything it collected are kept forever, even though the request can no
+longer accept uploads. Setting this variable opts an instance into deleting a request, and every
+file it received, once it has been expired or closed for longer than the configured duration -
+this is not enabled unless explicitly configured.
+
+**Fix:** This is expected once the variable is set; there is no undo. If it was set without
+intending files to be deleted, unset it (or set it back to ``0``, the default) before the
+retention window elapses on anything you still need. See :ref:`availenvvar`.

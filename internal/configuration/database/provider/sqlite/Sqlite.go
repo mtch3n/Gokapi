@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 25
+const DatabaseSchemeVersion = 26
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -305,6 +305,19 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			helper.Check(err)
 		}
 	}
+	// File request retention (models.FileRequest.ClosedAt): the timestamp Closed last became true,
+	// so storage.CleanUp's retention sweep can measure "closed for longer than N" the same way it
+	// already measures "disposed for longer than N" off FileMetaData.DisposedAt. DEFAULT 0 for the
+	// same reason as that column: every row that already exists was closed, if at all, before this
+	// field could record when, so 0 ("unknown") is correct with no backfill possible - the sweep
+	// treats that as ineligible via Closed rather than assuming it happened at the epoch. Same
+	// idempotency guard as the v17 step above.
+	if currentDbVersion < 26 {
+		if !p.columnExists("UploadRequests", "ClosedAt") {
+			err := p.rawSqlite(`ALTER TABLE UploadRequests ADD COLUMN "ClosedAt" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+	}
 }
 
 // tableExists returns true if the given table is present. Used to make a
@@ -492,6 +505,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"NoteEncrypted"	BLOB,
 			"closed"	INTEGER NOT NULL DEFAULT 0,
 			"Collaborators"	TEXT NOT NULL DEFAULT '[]',
+			"ClosedAt"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("id")
 		);
 		CREATE TABLE "Statistics" (

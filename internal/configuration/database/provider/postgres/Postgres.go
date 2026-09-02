@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 25
+const DatabaseSchemeVersion = 26
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -247,6 +247,16 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	// every row is valid JSON. IF NOT EXISTS keeps this idempotent, same as the steps above.
 	if currentDbVersion < 25 {
 		_, err := p.exec(`ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS Collaborators JSONB NOT NULL DEFAULT '[]'::jsonb;`)
+		helper.Check(err)
+	}
+	// File request retention (models.FileRequest.ClosedAt): the timestamp Closed last became true,
+	// so storage.CleanUp's retention sweep can measure "closed for longer than N" the same way it
+	// already measures "disposed for longer than N" off FileMetaData.DisposedAt. DEFAULT 0 for the
+	// same reason as that column: every row that already exists was closed, if at all, before this
+	// field could record when, so 0 ("unknown") is correct with no backfill possible. IF NOT EXISTS
+	// keeps this idempotent, same as the steps above.
+	if currentDbVersion < 26 {
+		_, err := p.exec(`ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS ClosedAt BIGINT NOT NULL DEFAULT 0;`)
 		helper.Check(err)
 	}
 }
@@ -410,6 +420,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			NoteEncrypted	BYTEA,
 			Closed	BOOLEAN NOT NULL DEFAULT FALSE,
 			Collaborators	JSONB NOT NULL DEFAULT '[]'::jsonb,
+			ClosedAt	BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Statistics (
