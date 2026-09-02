@@ -2647,17 +2647,21 @@ func TestSingleFileNoCascadeWhenBundleUnrestrictedOrAbsent(t *testing.T) {
 	}
 }
 
-// TestFolderZipBundleAllowanceCheckedBeforeMemberCounters is a regression test for a
-// correctness nit: pubApiFolderZip used to burn every member's per-file download count (and
-// each individually-restricted member's own recipient allowance) in the zip-building loop,
-// and only afterwards checked and consumed the bundle's own allowance. If the bundle allowance
-// turned out to be exhausted, the handler returned not-found having already spent member
-// counters for a zip that was never delivered.
+// TestFolderZipExhaustedBundleAllowanceStillRefusesWhole is a regression test for the opposite
+// ordering bug from TestFolderZipRaceWindowLeavesBundleAllowanceUntouched: pubApiFolderZip now
+// consumes the bundle's own allowance last, immediately before serving, specifically so that a
+// failure in the member-metering loop never burns the bundle allowance for a zip never
+// delivered. The accepted cost of that reordering, symmetric to the member-counter cost the
+// metering loop's own comment already documents for its race window, is that when the bundle
+// allowance was already exhausted before the request even arrived, the metering loop still
+// spends every member's own counters before the bundle check - now last - catches the
+// exhaustion and refuses the whole request. There is no way to check the bundle's remaining
+// allowance for free before doing that member work without either a non-atomic peek (its own
+// TOCTOU race) or a refund primitive, neither of which this fix introduces.
 //
-// This asserts that when the bundle's allowance for the requesting recipient is already
-// exhausted, /pubapi/folderzip denies the request as not-found and leaves every member's
-// DownloadCount completely untouched.
-func TestFolderZipBundleAllowanceCheckedBeforeMemberCounters(t *testing.T) {
+// This asserts that the whole request is still correctly refused as not-found, and documents
+// that member counters are, unlike the bundle allowance, no longer protected in this scenario.
+func TestFolderZipExhaustedBundleAllowanceStillRefusesWhole(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestZipOrdering_" + helper.GenerateRandomString(8)
 	bundle := filebundle.Create(uniqueName, 999)
@@ -2735,13 +2739,16 @@ func TestFolderZipBundleAllowanceCheckedBeforeMemberCounters(t *testing.T) {
 		t.Errorf("Expected /pubapi/folderzip to deny an exhausted bundle allowance as not found, got status %d", resp.StatusCode)
 	}
 
+	// The metering loop runs before the (now-last) bundle check, so both members are spent on
+	// a zip that is never delivered. See the doc comment above: this is the accepted cost of
+	// no longer burning the bundle allowance on a later failure.
 	for _, id := range []string{file1Id, file2Id} {
 		file, ok := database.GetMetaDataById(id)
 		if !ok {
 			t.Fatalf("Fixture file %s vanished after the request", id)
 		}
-		if file.DownloadCount != countsBefore[id] {
-			t.Errorf("Expected DownloadCount for %s to stay at %d, got %d", id, countsBefore[id], file.DownloadCount)
+		if file.DownloadCount != countsBefore[id]+1 {
+			t.Errorf("Expected DownloadCount for %s to be spent by the metering loop before the bundle check refuses the request, got %d, want %d", id, file.DownloadCount, countsBefore[id]+1)
 		}
 	}
 }
@@ -3793,6 +3800,108 @@ func TestFolderZipRaceWindowRefusesWhole(t *testing.T) {
 	}
 	if remaining := database.GetDownloadsRemaining(racedId); remaining != 0 {
 		t.Errorf("Expected racedId's allowance to stay at 0 (not go negative), got %d remaining", remaining)
+	}
+}
+
+// TestFolderZipRaceWindowLeavesBundleAllowanceUntouched is a regression test for the ordering
+// bug fixed alongside TestFolderZipRaceWindowRefusesWhole: pubApiFolderZip used to consume the
+// recipient's bundle-level allowance up front, before the zip metering loop that can still fail
+// - including via the exact race window that test exercises, where a member is exhausted by a
+// concurrent download between the availability check and the metering loop. A recipient whose
+// folder download fails that way lost one of their bundle downloads for an archive they never
+// received, with no way to get it back: there is no refund primitive anywhere in this codebase.
+//
+// This reuses TestFolderZipRaceWindowRefusesWhole's exact race setup (the folderZipRaceHooks test
+// seam exhausting the second member's own DownloadsRemaining the instant the metering loop reaches
+// it) but against a bundle restricted to one recipient, and asserts that the recipient's bundle
+// grant is completely unused after the refused request - not just that the request was refused.
+func TestFolderZipRaceWindowLeavesBundleAllowanceUntouched(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestFolderRaceAllowance_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	firstId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 firstId,
+		Name:               "first.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: false,
+		DownloadsRemaining: 5,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	racedId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 racedId,
+		Name:               "raced.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: false,
+		DownloadsRemaining: 1,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "zip-race-allowance-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 3)
+
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(firstId)
+		database.DeleteMetaData(racedId)
+		filebundle.Delete(bundle)
+	})
+
+	// Registers the race: fires the instant the metering loop reaches racedId, consuming its
+	// only remaining download out from under it - exactly what a second, concurrent request for
+	// the same file would do if it won that race in production. LoadAndDelete makes this
+	// one-shot, and it is keyed by racedId's own random id, so it cannot affect any other test's
+	// bundle running in parallel.
+	folderZipRaceHooks.Store(racedId, func() {
+		if !database.IncreaseDownloadCount(racedId, true) {
+			t.Errorf("Race setup failed: expected to be able to consume racedId's only download")
+		}
+	})
+	t.Cleanup(func() { folderZipRaceHooks.Delete(racedId) })
+
+	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+firstId+","+racedId, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.Header.Set("Cookie", cookie.Name+"="+cookie.Value)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to request folderzip: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("Expected the whole request refused once the race window exhausts a member mid-loop, got %d: %s", resp.StatusCode, body)
+	}
+
+	grants := database.GetShareGrants(models.ShareResourceBundle, bundle.Id)
+	if len(grants) != 1 {
+		t.Fatalf("Expected exactly one grant on the bundle, got %d", len(grants))
+	}
+	if grants[0].DownloadsUsed != 0 {
+		t.Errorf("Expected the recipient's bundle allowance to be untouched by a request that failed in the metering loop, got DownloadsUsed=%d, want 0", grants[0].DownloadsUsed)
 	}
 }
 
