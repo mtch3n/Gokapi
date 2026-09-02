@@ -67,7 +67,7 @@ func hybridFixtureConfig() models.Configuration {
 	}
 }
 
-// TestLoadNormalizesOnlyRegisteredUsersForHybrid verifies BLOCKER W17-3-1: real config.json files
+// TestLoadNormalizesOnlyRegisteredUsersForHybrid verifies that real config.json files
 // always carry an explicit "OnlyRegisteredUsers" key (see hybridFixtureConfig), so a check for
 // "was the key present" can never distinguish a hand-edited hybrid config from an ordinary one.
 // The forcing must be unconditional on Method+OAuthEnabledAlongsideInternal, not gated on key

@@ -224,7 +224,7 @@ func TestFileMetaData(t *testing.T) {
 // winners, never two winners, DownloadsRemaining never goes negative.
 // This test does NOT prove: end-to-end correctness of storage.ServeFile, or behaviour with a true
 // second OS process. See TestServeFile-adjacent coverage in internal/storage for the single-process
-// serving path, and the W8/W20 staging smoke test for the two-process case.
+// serving path, and a staging smoke test for the two-process case.
 func TestIncreaseDownloadCountAtomicAcrossInstances(t *testing.T) {
 	config := testConfig(t)
 	instanceA := dbInstance
@@ -364,7 +364,7 @@ func TestSessions(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 }
 
-// TestUpgradeV18WipesSessions verifies MINOR-5: a session created before the v18 IsOauth column
+// TestUpgradeV18WipesSessions verifies that a session created before the v18 IsOauth column
 // existed has no valid value for it, and the column's DEFAULT (false) has no way to know whether
 // that session was actually created by the OAuth callback. Without wiping sessions in the v18
 // step, such a session would silently renew as a password session from then on, skipping the

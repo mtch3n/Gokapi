@@ -502,8 +502,8 @@ func TestNewFileFromChunk(t *testing.T) {
 }
 
 // TestNewFileFromChunkConcurrentCompletionIsIdempotent is the failing-first regression test for
-// H3: before NewFileFromChunk serialised on chunkId (see its doc comment), N goroutines racing to
-// complete the exact same chunk id each passed chunking.GetFileByChunkId successfully and each ran
+// the case where, before NewFileFromChunk serialised on chunkId (see its doc comment), N goroutines
+// racing to complete the exact same chunk id each passed chunking.GetFileByChunkId successfully and each ran
 // a full, redundant hash-and-encrypt pass before racing to remove the one shared source file - the
 // losers of that race leaked their fully-encrypted tempFileEnc copy (see encryptChunkFile) until
 // the periodic sweep, and an anonymous caller could multiply that cost at will simply by firing
@@ -561,7 +561,7 @@ func TestNewFileFromChunkConcurrentCompletionIsIdempotent(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 
 	// No orphaned "upload*" temp file (encryptChunkFile's tempFileEnc) may remain in the data
-	// directory - a leaked one is exactly the disk-exhaustion vector H3 describes.
+	// directory - a leaked one is exactly the disk-exhaustion vector described above.
 	entries, err := os.ReadDir(configuration.Get().DataDir)
 	test.IsNil(t, err)
 	for _, e := range entries {
@@ -571,11 +571,6 @@ func TestNewFileFromChunkConcurrentCompletionIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestNewFileFromChunkDedupReusesKeyAndCiphertext locks the invariant on the
-// production dedup path: when a chunk hashes to a file that already exists,
-// copyEncryptionInfo must copy the existing key/nonce and leave the
-// existing ciphertext blob untouched, never re-encrypt the new upload's
-// content under that old key.
 // TestNewFileFromChunkDedupAtNoEncryption covers the one path where
 // deduplication still happens. Encrypted uploads now get a random,
 // content-independent identifier so they are never deduplicated, which
@@ -917,7 +912,7 @@ func TestServeFileDeniedWhenExhaustedWithoutRecheck(t *testing.T) {
 	test.IsEqualInt(t, database.GetDownloadsRemaining(file.Id), 0)
 }
 
-// TestServeFileAuditWriteFailureRefusesDownload verifies the W7 fail-closed design: if the
+// TestServeFileAuditWriteFailureRefusesDownload verifies the fail-closed design: if the
 // durable local audit record for a download cannot be written, the file must not be served.
 func TestServeFileAuditWriteFailureRefusesDownload(t *testing.T) {
 	auditPath := "test/data/audit.jsonl"

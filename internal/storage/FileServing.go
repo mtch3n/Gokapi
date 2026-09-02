@@ -161,7 +161,7 @@ func GetUploadCounts() map[int]int {
 // already exists, it is deduplicated. This function gathers information about the file, creates an ID and saves
 // it into the global configuration.
 //
-// Serialised end-to-end on chunkId via apimutex (see H3): without this, N parallel completion
+// Serialised end-to-end on chunkId via apimutex: without this, N parallel completion
 // requests for the exact same chunk id all pass chunking.GetFileByChunkId successfully - the
 // chunk file backing chunkId is only removed near the very end of this function, by
 // encryptChunkFile or the MoveToFilesystem call below - so every one of them would redundantly
@@ -283,8 +283,8 @@ func encryptChunkFile(file *os.File, metadata *models.File) (*os.File, error) {
 
 	}
 
-	// removeEncryptedTemp cleans up tempFileEnc on every error path below once it exists (see
-	// H3): previously, once os.CreateTemp had succeeded, any later error - a failed encrypt, a
+	// removeEncryptedTemp cleans up tempFileEnc on every error path below once it exists:
+	// previously, once os.CreateTemp had succeeded, any later error - a failed encrypt, a
 	// failed seek, or a failed close/remove of the plain-text source (e.g. because a concurrent
 	// caller for the same chunk id already removed it) - returned without ever closing or
 	// removing this fully-encrypted temp file, leaking it on disk until the periodic sweep.
@@ -793,7 +793,7 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	// did not fully complete), never serve content with no record of it. See
 	// internal/logging/AuditLog.go for the chain design.
 	//
-	// Note the increaseCounter block above (W2's territory) already ran: if increaseCounter was
+	// Note the increaseCounter block above already ran: if increaseCounter was
 	// set, this file's download allowance was already decremented before this point, so a
 	// failure here is an irreversible state change with no audit record of it - not merely a
 	// refused request. logging.LogAuditWriteFailure is a best-effort attempt to still record
@@ -1126,7 +1126,8 @@ func cleanInvalidFileRequests() {
 	}
 }
 
-// cleanInvalidBundles removes bundles that have zero non-pending members and are older than 24 hours
+// cleanInvalidBundles removes bundles older than 24 hours that have no live members left, every
+// member being either pending deletion or already disposed of.
 func cleanInvalidBundles() {
 	bundles := database.GetAllFileBundles()
 	files := database.GetAllMetadata()

@@ -248,11 +248,12 @@ func TestGetCipherFromFile(t *testing.T) {
 // even if it is asked to encrypt byte-identical plaintext. Encrypt itself
 // has no notion of deduplication - it always encrypts what it is given
 // under a brand new key - so this must hold unconditionally. (Storage-layer
-// deduplication for identical content, which intentionally reuses a key
-// instead of calling Encrypt again, is a separate, safe exception covered
-// by TestNewFileFromChunkDedupReusesKeyAndCiphertext in the storage
-// package; what would be catastrophic is a key covering two *different*
-// plaintexts, which is what this test guards against.)
+// deduplication for identical content only happens when nothing is
+// encrypted in the first place - see TestNewFileFromChunkDedupAtNoEncryption
+// in the storage package; encrypted uploads are never deduplicated, so no
+// key is ever reused instead of calling Encrypt again. What would be
+// catastrophic is a key covering two *different* plaintexts, which is what
+// this test guards against.)
 func TestEncryptGeneratesFreshKeyPerCall(t *testing.T) {
 	key := make([]byte, 32)
 	_, err := rand.Read(key)

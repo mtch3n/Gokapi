@@ -98,8 +98,8 @@ func TestIsCorrectUsernameAndPassword(t *testing.T) {
 	test.IsEqualBool(t, csfrOk, false)
 }
 
-// TestIsCorrectUsernameAndPasswordRejectsNonInternalProvider is the reverse-direction guard for
-// MAJOR W17-2a: before this fix, IsCorrectUsernameAndPassword only checked that the stored
+// TestIsCorrectUsernameAndPasswordRejectsNonInternalProvider is the reverse-direction guard:
+// before this fix, IsCorrectUsernameAndPassword only checked that the stored
 // password hash was non-empty, never AuthProvider. So a Google-provisioned row that somehow
 // obtained a password hash (e.g. an admin calling apiResetPassword on it before that path was
 // closed) could authenticate through the internal password door, bypassing the IdP's MFA and
@@ -323,7 +323,7 @@ func TestGetOrCreateUserAllowList(t *testing.T) {
 	authSettings.OnlyRegisteredUsers = false
 }
 
-// TestGetOrCreateUserRejectsGoogleProvisionedThroughHeaderDoor verifies MINOR-7: the header-auth
+// TestGetOrCreateUserRejectsGoogleProvisionedThroughHeaderDoor verifies that the header-auth
 // door (isGrantedHeader always calls getOrCreateUser with provider == models.AuthProviderInternal)
 // must not authenticate a row that was deliberately provisioned for Google, just because a
 // reverse proxy presents a matching username. Before this fix, the allow-list check only ran when
@@ -348,7 +348,7 @@ func TestGetOrCreateUserRejectsGoogleProvisionedThroughHeaderDoor(t *testing.T) 
 	test.IsEqualString(t, user.Name, "headerdoorinternal@test.com")
 }
 
-// TestGoogleProvisionedUserOidcSucceedsPasswordRejected ties together W17-1 and W17-2a: a user
+// TestGoogleProvisionedUserOidcSucceedsPasswordRejected asserts that a user
 // deliberately provisioned with the google AuthProvider (as an admin now can via the
 // authprovider header on /user/create, see users.Create) must authenticate successfully through
 // the OIDC path (getOrCreateUser) while being rejected outright through the password path

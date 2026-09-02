@@ -13,9 +13,9 @@ type UploadParameters struct {
 	IsEndToEndEncrypted bool
 	Password            string
 	// GeneratedPassword signals that Password was generated client-side rather than typed by
-	// the uploader (see the SPA's accessMode: "generated" vs "manual"). Only ever used to gate
-	// whether the password may be stored encrypted for later retrieval (see
-	// configuration.StoreShareKeys) - a manual password must never be persisted this way.
+	// the uploader (see the SPA's accessMode: "generated" vs "manual"). Informational only: it
+	// gates nothing, since storage.EncryptSharePassword stores a typed password on the same
+	// terms as a generated one.
 	GeneratedPassword bool
 	ExternalUrl       string
 	FileRequestId     string

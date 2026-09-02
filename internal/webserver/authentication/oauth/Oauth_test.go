@@ -245,7 +245,7 @@ func TestHandlerLogin(t *testing.T) {
 		test.IsEqualBool(t, len(rr.Result().Cookies()) > 0, true)
 	})
 
-	// TestHandlerLogin/With_force-consent_cookie_no_query verifies BLOCKER W17-3a: a hybrid-mode
+	// TestHandlerLogin/With_force-consent_cookie_no_query verifies that a hybrid-mode
 	// logout sets CookieForceConsent (see showLogin) rather than relying on the query parameter
 	// being forwarded, since the SPA's own client-side navigation to /oauth-login does not always
 	// carry query strings through. HandlerLogin must honour the cookie on its own and clear it, so
@@ -279,7 +279,7 @@ func TestHandlerLogin(t *testing.T) {
 	})
 }
 
-// TestHandlerLogin_HybridDefaultsToSelectAccount verifies MAJOR W17-3-2: in hybrid mode,
+// TestHandlerLogin_HybridDefaultsToSelectAccount verifies that in hybrid mode,
 // /oauth-login is reached only by an explicit "Sign in with Google" click, never by a
 // server-side redirect on page load the way OAuth2-only mode reaches it. Defaulting that click to
 // prompt=none would silently reauthenticate whoever the browser's live Google session belongs to

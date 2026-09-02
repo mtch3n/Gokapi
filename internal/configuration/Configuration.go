@@ -69,8 +69,9 @@ func loadFromFile(path string) (models.Configuration, error) {
 
 // normalizeOnlyRegisteredUsers unconditionally forces OnlyRegisteredUsers to true whenever hybrid
 // auth (internal method with OAuth enabled alongside it) is on. The setup wizard already defaults
-// this the same way (see setup.parseAuthentication), but hybrid mode can currently only be turned
-// on by hand-editing config.json, which never goes through the wizard. Every config.json Gokapi
+// this the same way, in the hybrid branch that builds the authentication settings, but hybrid
+// mode can currently only be turned on by hand-editing config.json, which never goes through the
+// wizard. Every config.json Gokapi
 // has ever written already contains an explicit "OnlyRegisteredUsers" key (models.Configuration
 // has no omitempty on that field), so a "was the key present" check can never distinguish a
 // hand-edited hybrid config from a normal one - it must always be forced instead. An operator who
