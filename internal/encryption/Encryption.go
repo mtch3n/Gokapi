@@ -315,11 +315,10 @@ func Encrypt(encInfo *models.EncryptionInfo, input io.Reader, output io.Writer) 
 	stream := getStream(key)
 	// Zero nonce is safe only as long as a given key is ever paired with exactly one
 	// distinct plaintext. generateNewFileKey draws a fresh key here on every call, so
-	// that holds today (see TestEncryptGeneratesFreshKeyPerCall). The storage layer's
-	// dedup path (copyEncryptionInfo) reuses an existing key for identical plaintext,
-	// which is still safe - it never calls Encrypt again for that content. What would be
-	// catastrophic is a key covering two *different* plaintexts, e.g. a change that fed
-	// new content through an existing key instead of a fresh one.
+	// that holds today (see TestEncryptGeneratesFreshKeyPerCall). Encrypted uploads are
+	// never deduplicated (see storage.NewFile), so a key is never paired with a second
+	// plaintext. What would be catastrophic is a key covering two *different* plaintexts,
+	// e.g. a change that fed new content through an existing key instead of a fresh one.
 	nonce := make([]byte, stream.NonceSize())
 	reader := stream.EncryptReader(input, nonce, nil)
 	_, err = io.Copy(output, reader)

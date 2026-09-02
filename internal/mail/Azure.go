@@ -158,8 +158,10 @@ func (a *azureSender) Send(ctx context.Context, msg Message) (Receipt, error) {
 
 	// A successful send is asynchronous: the API returns 202 Accepted with an
 	// Operation-Location header naming a status resource. Delivery is not
-	// confirmed at this point, only acceptance. See the gap noted in the
-	// package documentation.
+	// confirmed at this point, only acceptance. The returned Receipt carries the
+	// operation id from that header, which is recorded in the audit log so a send
+	// can be correlated with the connector's own delivery status; nothing here
+	// polls it.
 	if response.StatusCode == http.StatusAccepted || response.StatusCode == http.StatusOK {
 		return Receipt{MessageId: operationIdFromLocation(response.Header.Get("Operation-Location"))}, nil
 	}

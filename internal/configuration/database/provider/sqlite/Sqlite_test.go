@@ -739,7 +739,7 @@ func TestDatabaseProvider_UpgradeV17Idempotent(t *testing.T) {
 	instance.Upgrade(16)
 }
 
-// TestDatabaseProvider_UpgradeV18WipesSessions verifies MINOR-5: a session created before the
+// TestDatabaseProvider_UpgradeV18WipesSessions verifies that a session created before the
 // v18 IsOauth column existed has no valid value for it, and the column's DEFAULT (0/false) has no
 // way to know whether that session was actually created by the OAuth callback. Without wiping
 // sessions in the v18 step, such a session would silently renew as a password session from then

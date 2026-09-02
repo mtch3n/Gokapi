@@ -69,7 +69,7 @@ func TestParseConfig(t *testing.T) {
 	test.IsEqualBool(t, config.UnlimitedDownload, true)
 
 	// isE2E is only honoured while the server is configured for end-to-end
-	// encryption; the server, not the caller, is authoritative here (F2).
+	// encryption; the server, not the caller, is authoritative here.
 	data.isE2E = "true"
 	data.realSize = "200"
 	previousLevel := configuration.Get().Encryption.Level
@@ -340,7 +340,7 @@ func TestCreateUploadConfigEnforcesExpiry(t *testing.T) {
 	test.IsEqualBool(t, config.ExpiryTimestamp > time.Now().Unix(), true)
 }
 
-// TestCreateUploadConfigRejectsE2EWhenNotConfigured is the choke-point test for F2:
+// TestCreateUploadConfigRejectsE2EWhenNotConfigured is the choke-point test asserting that
 // the server, not a client-supplied isEnd2End flag, must decide whether a file is
 // end-to-end encrypted. Asserting E2E at any level other than EndToEndEncryption
 // must be rejected, and the flag must keep working once that level is configured.

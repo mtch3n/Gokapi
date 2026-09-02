@@ -945,7 +945,7 @@ func TestMigration(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 }
 
-// TestMigrationNormalizesEmptyAuthProvider verifies MAJOR-2: migrating from a source below
+// TestMigrationNormalizesEmptyAuthProvider verifies that migrating from a source below
 // schema v9/v17 can yield a user with an empty AuthProvider, since Migrate's destination is only
 // ever New()'d, never Upgrade()'d, so the v9/v17 AuthProvider backfill never runs on the copied
 // rows. SaveUser's explicit column list bypasses the SQL DEFAULT, so without normalization the

@@ -115,10 +115,8 @@ func (p DatabaseProvider) GetType() int {
 }
 
 // Upgrade migrates the DB to a new Gokapi version, if required.
-// The Postgres provider was introduced at DatabaseSchemeVersion 15, so every
-// Postgres database is created at the current scheme and there is no legacy
-// ladder to walk. Databases populated by the migration tool are written through
-// the provider interface and are therefore already at the current scheme.
+// The Postgres provider was introduced at DatabaseSchemeVersion 15, so there is no pre-15
+// ladder; every step below covers a change made since.
 func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	if currentDbVersion > DatabaseSchemeVersion {
 		fmt.Printf("Error: Database scheme version is %d, but this Gokapi version only supports up to %d. Please update Gokapi.\n",

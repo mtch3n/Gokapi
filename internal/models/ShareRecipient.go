@@ -90,11 +90,11 @@ func (g ShareGrant) HasDownloadsLeft() bool {
 //
 // The link is therefore a bearer credential with the lifetime of the resource.
 // Anyone holding it has access. Forwarding the mail forwards the access, which
-// the project has accepted as the recipient's own choice (see GAPS.md).
+// the project has accepted as the recipient's own choice.
 //
 // Only the SHA-256 of the token is stored, never the token itself, so a
 // database disclosure cannot be replayed into access. The existing Sessions
-// and ApiKeys tables still hold their secrets in plain text (W21), and this
+// and ApiKeys tables still hold their secrets in plain text, and this
 // table is deliberately not inheriting that debt.
 type ShareLoginToken struct {
 	TokenHash    string `redis:"TokenHash"`
