@@ -1027,6 +1027,18 @@ func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid st
 		chunkreservation.SetComplete(uploadParameters.FileRequestId, uuid)
 	}
 	fr, _ := filerequest.Get(uploadParameters.FileRequestId)
+	if fr.Id != "" {
+		// A restricted request's public upload page already exchanged the mailed token for a
+		// cookie before the guest ever reached the chunk-complete call (pubApiUploadRequest ->
+		// recipientFor). Reading it back here attributes the upload to the person who actually
+		// uploaded it rather than to fr's owner, who moves into LogUpload's Detail instead. An
+		// unrestricted request has no such cookie, so this is a no-op and behaviour is unchanged.
+		if recipientId, ok := shareaccess.ReadCookie(r, models.ShareResourceFileRequest, fr.Id); ok {
+			if recipient, ok := database.GetShareRecipient(recipientId); ok {
+				r = logging.WithRecipient(r, recipient)
+			}
+		}
+	}
 	err = logging.LogUpload(file, user, fr, r, configuration.Get().SaveIp)
 	if err != nil {
 		// Fail closed: without a durable audit record of this upload, the file must not be

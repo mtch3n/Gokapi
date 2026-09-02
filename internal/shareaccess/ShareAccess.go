@@ -130,6 +130,7 @@ func GrantAccess(resource Resource, emails []string, actor models.User, download
 		if !existed {
 			recipient = models.ShareRecipient{Email: email, CreatedAt: now.Unix()}
 			recipient.Id = database.SaveShareRecipient(recipient)
+			logging.LogShareRecipientCreated(recipient, actor)
 		}
 		recipientIds = append(recipientIds, recipient.Id)
 		recipients = append(recipients, recipient)
@@ -224,36 +225,41 @@ func issueAndSend(resource Resource, recipient models.ShareRecipient, baseUrl, r
 // The grant is re-checked here rather than trusted from the token, so that
 // removing a recipient from the list, or blocking them, takes effect on the
 // next request instead of waiting for the link to expire.
-func ValidateToken(rawToken string, resourceType int, resourceId string) (models.ShareRecipient, error) {
+//
+// firstUse is true when this recipient had never redeemed a link before (their
+// LastLoginAt was zero), so the caller can raise share.link.redeemed exactly
+// once per recipient/resource pair rather than on every visit.
+func ValidateToken(rawToken string, resourceType int, resourceId string) (recipient models.ShareRecipient, firstUse bool, err error) {
 	if rawToken == "" {
-		return models.ShareRecipient{}, ErrInvalidToken
+		return models.ShareRecipient{}, false, ErrInvalidToken
 	}
 	token, ok := database.GetShareLoginToken(hashToken(rawToken))
 	if !ok || token.IsRevoked {
-		return models.ShareRecipient{}, ErrInvalidToken
+		return models.ShareRecipient{}, false, ErrInvalidToken
 	}
 	if token.ExpiresAt < time.Now().Unix() {
-		return models.ShareRecipient{}, ErrInvalidToken
+		return models.ShareRecipient{}, false, ErrInvalidToken
 	}
 	// A link is bound to the one resource it was issued for, so a token for a
 	// file cannot be replayed against a different file or a bundle.
 	if token.ResourceType != resourceType || token.ResourceId != resourceId {
-		return models.ShareRecipient{}, ErrInvalidToken
+		return models.ShareRecipient{}, false, ErrInvalidToken
 	}
 	if !database.HasShareGrant(resourceType, resourceId, token.RecipientId) {
-		return models.ShareRecipient{}, ErrInvalidToken
+		return models.ShareRecipient{}, false, ErrInvalidToken
 	}
-	recipient, ok := database.GetShareRecipient(token.RecipientId)
+	recipient, ok = database.GetShareRecipient(token.RecipientId)
 	if !ok || recipient.IsBlocked {
-		return models.ShareRecipient{}, ErrInvalidToken
+		return models.ShareRecipient{}, false, ErrInvalidToken
 	}
 
 	database.MarkShareLoginTokenUsed(token.TokenHash, time.Now().Unix())
-	if recipient.LastLoginAt == 0 {
+	firstUse = recipient.LastLoginAt == 0
+	if firstUse {
 		recipient.LastLoginAt = time.Now().Unix()
 		database.SaveShareRecipient(recipient)
 	}
-	return recipient, nil
+	return recipient, firstUse, nil
 }
 
 // ConsumeDownload records one download against the recipient's own allowance.

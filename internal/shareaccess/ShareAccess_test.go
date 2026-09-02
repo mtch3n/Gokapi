@@ -116,10 +116,40 @@ func TestGrantAccessCreatesRecipientsAndGrants(t *testing.T) {
 		test.IsEqualInt(t, found, 2)
 	})
 
+	// A brand-new email address logs share.recipient.created, once per new address, with the
+	// granting staff user as actor.
+	t.Run("logs share.recipient.created for each new address", func(t *testing.T) {
+		entries, _ := logging.GetAuditEntriesSince(0, 1000)
+		found := 0
+		for _, entry := range entries {
+			if entry.Action != "share.recipient.created" {
+				continue
+			}
+			if entry.Detail != "alice@example.com" && entry.Detail != "bob@example.com" {
+				continue
+			}
+			found++
+			test.IsEqualInt(t, entry.Actor.UserId, 42)
+		}
+		test.IsEqualInt(t, found, 2)
+	})
+
 	// Re-granting to a known address does not create a second recipient.
 	results, err = GrantAccess(resource, []string{"alice@example.com"}, testActor(42), 3, "https://x.test/")
 	test.IsNil(t, err)
 	test.IsEqualBool(t, results[0].IsNewRecipient, false)
+
+	// Nor does it log a second share.recipient.created for that address.
+	t.Run("does not re-log share.recipient.created for a known address", func(t *testing.T) {
+		entries, _ := logging.GetAuditEntriesSince(0, 1000)
+		found := 0
+		for _, entry := range entries {
+			if entry.Action == "share.recipient.created" && entry.Detail == "alice@example.com" {
+				found++
+			}
+		}
+		test.IsEqualInt(t, found, 1)
+	})
 
 	// Replacing the list revokes the address that was dropped.
 	bob, ok := database.GetShareRecipientByEmail("bob@example.com")
@@ -156,26 +186,26 @@ func TestValidateToken(t *testing.T) {
 
 	rawToken := issueTokenForTest(t, resource, carol.Id)
 
-	recipient, err := ValidateToken(rawToken, resource.Type, resource.Id)
+	recipient, _, err := ValidateToken(rawToken, resource.Type, resource.Id)
 	test.IsNil(t, err)
 	test.IsEqualInt(t, recipient.Id, carol.Id)
 
 	// Reusable by design: a second use still works. A single-use link would be
 	// burned by a mail scanner before the human ever clicked.
-	_, err = ValidateToken(rawToken, resource.Type, resource.Id)
+	_, _, err = ValidateToken(rawToken, resource.Type, resource.Id)
 	test.IsNil(t, err)
 
 	t.Run("is bound to one resource", func(t *testing.T) {
-		_, err := ValidateToken(rawToken, resource.Type, "another-resource")
+		_, _, err := ValidateToken(rawToken, resource.Type, "another-resource")
 		test.IsEqual(t, err, ErrInvalidToken)
-		_, err = ValidateToken(rawToken, models.ShareResourceBundle, resource.Id)
+		_, _, err = ValidateToken(rawToken, models.ShareResourceBundle, resource.Id)
 		test.IsEqual(t, err, ErrInvalidToken)
 	})
 
 	t.Run("rejects unknown and empty tokens", func(t *testing.T) {
-		_, err := ValidateToken("", resource.Type, resource.Id)
+		_, _, err := ValidateToken("", resource.Type, resource.Id)
 		test.IsEqual(t, err, ErrInvalidToken)
-		_, err = ValidateToken("not-a-real-token", resource.Type, resource.Id)
+		_, _, err = ValidateToken("not-a-real-token", resource.Type, resource.Id)
 		test.IsEqual(t, err, ErrInvalidToken)
 	})
 
@@ -183,7 +213,7 @@ func TestValidateToken(t *testing.T) {
 	t.Run("refuses a blocked recipient", func(t *testing.T) {
 		carol.IsBlocked = true
 		database.SaveShareRecipient(carol)
-		_, err := ValidateToken(rawToken, resource.Type, resource.Id)
+		_, _, err := ValidateToken(rawToken, resource.Type, resource.Id)
 		test.IsEqual(t, err, ErrInvalidToken)
 		carol.IsBlocked = false
 		database.SaveShareRecipient(carol)
@@ -192,9 +222,40 @@ func TestValidateToken(t *testing.T) {
 	// Removing the grant revokes immediately, without touching the token.
 	t.Run("refuses once the grant is gone", func(t *testing.T) {
 		database.DeleteShareGrants(resource.Type, resource.Id)
-		_, err := ValidateToken(rawToken, resource.Type, resource.Id)
+		_, _, err := ValidateToken(rawToken, resource.Type, resource.Id)
 		test.IsEqual(t, err, ErrInvalidToken)
 	})
+}
+
+// TestValidateTokenReportsFirstUseOnlyOnce is a regression test for Part F: a mailed link's
+// first redemption must be distinguishable from every visit after it, so share.link.redeemed
+// can be raised exactly once per recipient/resource pair rather than on every open.
+func TestValidateTokenReportsFirstUseOnlyOnce(t *testing.T) {
+	enableMail(t)
+	defer disableMail(t)
+	resource := testResource("res-firstuse")
+
+	_, err := GrantAccess(resource, []string{"kim@example.com"}, testActor(1), 0, "https://x.test/")
+	test.IsNil(t, err)
+	kim, _ := database.GetShareRecipientByEmail("kim@example.com")
+	test.IsEqualInt64(t, kim.LastLoginAt, 0)
+
+	rawToken := issueTokenForTest(t, resource, kim.Id)
+
+	_, firstUse, err := ValidateToken(rawToken, resource.Type, resource.Id)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, firstUse, true)
+
+	_, firstUse, err = ValidateToken(rawToken, resource.Type, resource.Id)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, firstUse, false)
+
+	// A second token for the same recipient and resource is still not a first use: firstUse
+	// tracks the recipient (LastLoginAt), not the token.
+	secondToken := issueTokenForTest(t, resource, kim.Id)
+	_, firstUse, err = ValidateToken(secondToken, resource.Type, resource.Id)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, firstUse, false)
 }
 
 func TestValidateTokenRejectsExpired(t *testing.T) {
@@ -214,7 +275,7 @@ func TestValidateTokenRejectsExpired(t *testing.T) {
 		CreatedAt:    time.Now().Add(-2 * time.Hour).Unix(),
 		ExpiresAt:    time.Now().Add(-time.Hour).Unix(),
 	})
-	_, err = ValidateToken(rawToken, resource.Type, resource.Id)
+	_, _, err = ValidateToken(rawToken, resource.Type, resource.Id)
 	test.IsEqual(t, err, ErrInvalidToken)
 }
 
@@ -235,7 +296,7 @@ func TestResendRetiresPreviousLinkAndThrottles(t *testing.T) {
 	database.SetShareGrants(resource.Type, resource.Id, []int{erinId}, 1, 0)
 
 	firstToken := issueTokenForTest(t, resource, erinId)
-	_, err := ValidateToken(firstToken, resource.Type, resource.Id)
+	_, _, err := ValidateToken(firstToken, resource.Type, resource.Id)
 	test.IsNil(t, err)
 
 	// A link was just issued, so an immediate resend is throttled.
@@ -253,7 +314,7 @@ func TestResendRetiresPreviousLinkAndThrottles(t *testing.T) {
 	test.IsNil(t, ResendLink(resource, "erin@example.com", "https://x.test/", "1.2.3.4"))
 
 	// The link that was in the older mail is now dead.
-	_, err = ValidateToken(firstToken, resource.Type, resource.Id)
+	_, _, err = ValidateToken(firstToken, resource.Type, resource.Id)
 	test.IsEqual(t, err, ErrInvalidToken)
 }
 
@@ -309,7 +370,7 @@ func TestResendFailedSendDoesNotStrandRecipient(t *testing.T) {
 	test.IsEqualBool(t, errors.Is(err, ErrInvalidToken), false)
 
 	// The old link must still work: nothing was revoked.
-	_, err = ValidateToken(oldToken, resource.Type, resource.Id)
+	_, _, err = ValidateToken(oldToken, resource.Type, resource.Id)
 	test.IsNil(t, err)
 
 	// The failure must not vanish silently: a genuine send failure on the
@@ -549,13 +610,13 @@ func TestAccessGateEndToEnd(t *testing.T) {
 	test.IsEqualBool(t, database.IsShareRestricted(resource.Type, resource.Id), true)
 
 	// A stranger holding the link but no token gets nothing.
-	_, err = ValidateToken("some-token-a-stranger-guessed", resource.Type, resource.Id)
+	_, _, err = ValidateToken("some-token-a-stranger-guessed", resource.Type, resource.Id)
 	test.IsEqual(t, err, ErrInvalidToken)
 
 	// A real recipient's token resolves, and exchanges for a cookie so the
 	// token stops riding in later URLs.
 	ivyToken := issueTokenForTest(t, resource, ivy.Id)
-	recipient, err := ValidateToken(ivyToken, resource.Type, resource.Id)
+	recipient, _, err := ValidateToken(ivyToken, resource.Type, resource.Id)
 	test.IsNil(t, err)
 	test.IsEqualInt(t, recipient.Id, ivy.Id)
 
@@ -579,7 +640,7 @@ func TestAccessGateEndToEnd(t *testing.T) {
 	// Revoking Ivy takes effect at once, without waiting for her link or her
 	// cookie to expire.
 	GrantAccess(resource, []string{"jack@example.com"}, testActor(1), 2, "https://x.test/")
-	_, err = ValidateToken(ivyToken, resource.Type, resource.Id)
+	_, _, err = ValidateToken(ivyToken, resource.Type, resource.Id)
 	test.IsEqual(t, err, ErrInvalidToken)
 	test.IsEqualBool(t, database.HasShareGrant(resource.Type, resource.Id, ivy.Id), false)
 

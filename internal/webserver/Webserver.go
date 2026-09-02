@@ -1263,7 +1263,8 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	// itself is also independently restricted, and before anything else below, so a
 	// non-recipient never learns more than "not found".
 	if savedFile.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, savedFile.BundleId) {
-		if !mayAccessShare(w, r, models.ShareResourceBundle, savedFile.BundleId) {
+		bundleRecipientId := recipientFor(w, r, models.ShareResourceBundle, savedFile.BundleId)
+		if bundleRecipientId == 0 {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"no valid recipient access for the file's restricted bundle"); err != nil {
 				respondAuditWriteFailed(w)
@@ -1276,6 +1277,9 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 			}
 			return
 		}
+		// A member downloaded via its own id, as a recipient of the restricted bundle rather
+		// than of the file itself, is still attributed to that recipient.
+		r = attachRecipient(r, bundleRecipientId)
 	}
 	// An identity-restricted file is refused before the passcode branch below,
 	// because a recipient list supersedes a passcode entirely. Refused as
@@ -1296,6 +1300,10 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 			}
 			return
 		}
+		// Attached before the allowance check below, and before storage.ServeFile is reached,
+		// so both a denial for an exhausted allowance and the eventual download are attributed
+		// to this recipient rather than recorded as anonymous.
+		r = attachRecipient(r, recipientId)
 		// The allowance is spent per recipient, so one recipient exhausting
 		// theirs does not consume anyone else's.
 		if shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, recipientId) != nil {
@@ -1875,9 +1883,18 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 
 	// See the identical check in pubApiFolder: a restricted bundle is refused as
 	// "not found" for a non-authorised requester, before any bytes are served.
-	if !mayAccessShare(w, r, models.ShareResourceBundle, bundle.Id) {
-		respondPubApiNotFound(w, r)
-		return
+	// recipientFor is used instead of mayAccessShare so the id is available to attach below;
+	// for an unrestricted bundle it returns 0 and attachRecipient below is then a no-op.
+	if database.IsShareRestricted(models.ShareResourceBundle, bundle.Id) {
+		bundleRecipientId := recipientFor(w, r, models.ShareResourceBundle, bundle.Id)
+		if bundleRecipientId == 0 {
+			respondPubApiNotFound(w, r)
+			return
+		}
+		// Attached once here, before either the zip branch or the single-member branch below
+		// serves anything, so every LogDownload entry that follows - one per zip member, or the
+		// one for a single requested member - is attributed to this recipient.
+		r = attachRecipient(r, bundleRecipientId)
 	}
 
 	// Get all files once, do exactly one database scan

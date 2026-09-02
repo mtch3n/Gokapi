@@ -22,6 +22,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/helper"
+	"github.com/forceu/gokapi/internal/logging"
 	gokapimail "github.com/forceu/gokapi/internal/mail"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/shareaccess"
@@ -171,7 +172,7 @@ func TestLogin(t *testing.T) {
 	})
 }
 
-// TestShowLoginSetsForceConsentCookieInHybridMode verifies BLOCKER W17-3a: logout redirects to
+// TestShowLoginSetsForceConsentCookieInHybridMode verifies that logout redirects to
 // login?consent=true for an OAuth session, but in hybrid mode showLogin does not take the
 // oauth-login redirect branch (it shows the login choice page instead), so that query parameter
 // used to simply be dropped - the SPA's own "Sign in with Google" button navigated to
@@ -206,7 +207,7 @@ func TestShowLoginSetsForceConsentCookieInHybridMode(t *testing.T) {
 	}
 }
 
-// TestAdminHybridResetPasswordGate verifies MAJOR-3 W17-2c: the guard in requireLogin that
+// TestAdminHybridResetPasswordGate verifies the guard in requireLogin that
 // forces a logged-in user into the changePassword flow. Before this fix, the condition was
 // authConfig.Method == models.AuthenticationInternal || (isHybrid && ...) - but isHybrid already
 // implies Method == AuthenticationInternal, so the first disjunct made the whole condition true
@@ -365,9 +366,9 @@ func TestInvalidLink(t *testing.T) {
 	})
 }
 
-// TestInvalidLinkIsAudited is a W7 coverage test: an unknown-id probe against a public download
-// link (the most common denial case, and one PLAN.md explicitly calls out as an enumeration
-// signal worth recording) must produce a "denied" audit entry, not just the redirect.
+// TestInvalidLinkIsAudited asserts that an unknown-id probe against a public download link (the
+// most common denial case, and an enumeration signal worth recording) must produce a "denied"
+// audit entry, not just the redirect.
 func TestInvalidLinkIsAudited(t *testing.T) {
 	t.Parallel()
 	const unknownId = "doesNotExistW7auditCoverageTest"
@@ -510,7 +511,7 @@ func TestDownloadNoPassword(t *testing.T) {
 	test.HttpPageResult(t, test.HttpTestConfig{
 		Url:             "http://127.0.0.1:53843/d?id=Wzol7LyY2QVczXynJtVo",
 		IsHtml:          true,
-		RequiredContent: []string{"smallfile2", "Retention period"}, // W7 privacy notice
+		RequiredContent: []string{"smallfile2", "Retention period"}, // checks the retention-period notice is shown
 	})
 	// Download
 	test.HttpPageResult(t, test.HttpTestConfig{
@@ -536,7 +537,7 @@ func TestDownloadPagePassword(t *testing.T) {
 	test.HttpPageResult(t, test.HttpTestConfig{
 		Url:             "http://127.0.0.1:53843/d?id=jpLXGJKigM4hjtA6T6sN",
 		IsHtml:          true,
-		RequiredContent: []string{"Password required", "Retention period"}, // W7 privacy notice
+		RequiredContent: []string{"Password required", "Retention period"}, // checks the retention-period notice is shown
 	})
 }
 func TestDownloadPageIncorrectPassword(t *testing.T) {
@@ -2313,9 +2314,9 @@ func TestPublicApiShareResendCooldownIsIndistinguishableFromNonRecipient(t *test
 	}
 }
 
-// TestPublicApiShareResendExpiredFileRequestMailsNothing is a regression test for bug 3:
-// describeShareResource resolved a resource with a raw metadata lookup and no liveness
-// check, so /pubapi/share/resend would keep mailing a valid-looking link for an
+// TestPublicApiShareResendExpiredFileRequestMailsNothing guards against describeShareResource
+// resolving a resource with a raw metadata lookup and no liveness check, which let
+// /pubapi/share/resend keep mailing a valid-looking link for an
 // already-expired file request indefinitely - cleanInvalidFileRequests only ever removes a
 // request whose owning user is gone, never one that merely expired or was closed. This
 // asserts a resend against an expired file request sends no mail (no ShareLoginToken is
@@ -2606,6 +2607,313 @@ func TestFolderZipBundleAllowanceCheckedBeforeMemberCounters(t *testing.T) {
 			t.Errorf("Expected DownloadCount for %s to stay at %d, got %d", id, countsBefore[id], file.DownloadCount)
 		}
 	}
+}
+
+// lastDownloadEntry returns the most recently written audit entry matching fileId and outcome,
+// so a test can assert on the actor it was attributed to. Fails the test if none is found.
+func lastDownloadEntry(t *testing.T, fileId string, outcome logging.AuditOutcome) logging.AuditEntry {
+	t.Helper()
+	entries, _ := logging.GetAuditEntriesSince(0, 2000)
+	var found logging.AuditEntry
+	ok := false
+	for _, entry := range entries {
+		if entry.Action != "download" || entry.FileId != fileId || entry.Outcome != outcome {
+			continue
+		}
+		found = entry
+		ok = true
+	}
+	if !ok {
+		t.Fatalf("Expected a %q download audit entry for file %s, found none", outcome, fileId)
+	}
+	return found
+}
+
+// TestSingleFileRestrictedDownloadAttributesRecipient is a regression test for Part F: a
+// recipient downloading a file directly restricted to them (not merely a bundle member) used to
+// be recorded as anonymous, even though serveFile had already resolved their recipient id via
+// recipientFor before calling storage.ServeFile. It must now be attributed to that recipient.
+func TestSingleFileRestrictedDownloadAttributesRecipient(t *testing.T) {
+	t.Parallel()
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "restricted_single.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "single-file-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	cookie := testShareAccessCookie(models.ShareResourceFile, fileId, recipientId)
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		RequiredContent: []string{"789"},
+		Cookies:         []test.Cookie{cookie},
+	})
+
+	entry := lastDownloadEntry(t, fileId, logging.OutcomeSuccess)
+	test.IsEqualBool(t, entry.Actor.Anonymous, false)
+	test.IsEqualInt(t, entry.Actor.RecipientId, recipientId)
+	test.IsEqualString(t, entry.Actor.RecipientEmail, "single-file-recipient@example.com")
+}
+
+// TestSingleFileUnrestrictedDownloadStaysAnonymous proves the recipient-attribution change in
+// serveFile is additive: a file with no recipient list at all is downloaded exactly as before,
+// with no user and no recipient attached to the request, and its audit entry stays anonymous.
+func TestSingleFileUnrestrictedDownloadStaysAnonymous(t *testing.T) {
+	t.Parallel()
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "unrestricted_single.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+	t.Cleanup(func() {
+		database.DeleteMetaData(fileId)
+	})
+
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		RequiredContent: []string{"789"},
+	})
+
+	entry := lastDownloadEntry(t, fileId, logging.OutcomeSuccess)
+	test.IsEqualBool(t, entry.Actor.Anonymous, true)
+	test.IsEqualInt(t, entry.Actor.RecipientId, 0)
+	test.IsEqualString(t, entry.Actor.RecipientEmail, "")
+}
+
+// TestSingleFileRestrictedAllowanceExhaustedDenialAttributesRecipient proves the recipient is
+// attached before both LogDownloadDenied calls in the restricted-file branch of serveFile, not
+// only before the eventual successful LogDownload: a denial for an exhausted per-recipient
+// allowance must also name who was denied, rather than falling back to anonymous.
+func TestSingleFileRestrictedAllowanceExhaustedDenialAttributesRecipient(t *testing.T) {
+	t.Parallel()
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "restricted_exhausted.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "exhausted-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 1)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	cookie := testShareAccessCookie(models.ShareResourceFile, fileId, recipientId)
+
+	// First download spends the one allowed download.
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		RequiredContent: []string{"789"},
+		Cookies:         []test.Cookie{cookie},
+	})
+
+	// The second is refused - allowance exhausted - and must still be attributed.
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/downloadFile?id="+fileId, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to request download: %v", err)
+	}
+	defer resp.Body.Close()
+
+	entry := lastDownloadEntry(t, fileId, logging.OutcomeDenied)
+	test.IsEqualBool(t, entry.Actor.Anonymous, false)
+	test.IsEqualInt(t, entry.Actor.RecipientId, recipientId)
+	test.IsEqualString(t, entry.Actor.RecipientEmail, "exhausted-recipient@example.com")
+	test.IsEqualString(t, entry.Error, "recipient download allowance exhausted")
+}
+
+// TestFolderZipRestrictedAttributesEveryMemberToRecipient proves that ServeFilesAsZip's
+// per-member LogDownload calls, driven from pubApiFolderZip, are all attributed to the
+// recipient the bundle's restriction was resolved for - not just the top-level zip request.
+func TestFolderZipRestrictedAttributesEveryMemberToRecipient(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestZipAttribution_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	file1Id := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 file1Id,
+		Name:               "zip_attrib_one.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+	file2Id := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 file2Id,
+		Name:               "zip_attrib_two.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "c4f9375f9834b4e7f0a528cc65c055702bf5f24a",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "zip-attribution-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(file1Id)
+		database.DeleteMetaData(file2Id)
+		filebundle.Delete(bundle)
+	})
+
+	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.Header.Set("Cookie", cookie.Name+"="+cookie.Value)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to request folderzip: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected the zip request to succeed, got status %d", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	for _, memberId := range []string{file1Id, file2Id} {
+		entry := lastDownloadEntry(t, memberId, logging.OutcomeSuccess)
+		test.IsEqualBool(t, entry.Actor.Anonymous, false)
+		test.IsEqualInt(t, entry.Actor.RecipientId, recipientId)
+		test.IsEqualString(t, entry.Actor.RecipientEmail, "zip-attribution-recipient@example.com")
+	}
+}
+
+// TestShareLinkRedeemedLogsOnlyOnFirstOpen proves ShareGuard.recipientFor raises
+// share.link.redeemed exactly once per recipient/resource pair: the first request presenting a
+// valid access token logs the event, and a second request presenting the very same token again
+// (recipientFor validates a presented token on every call, regardless of any cookie already
+// held) does not log it a second time.
+func TestShareLinkRedeemedLogsOnlyOnFirstOpen(t *testing.T) {
+	t.Parallel()
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "redeemed_once.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "redeemed-once@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	// A raw token, stored hashed the same way shareaccess.hashToken does it (SHA-256, hex),
+	// bypassing the mail send so the test controls the raw value directly.
+	rawToken := "raw-token-redeemed-" + helper.GenerateRandomString(8)
+	sum := sha256.Sum256([]byte(rawToken))
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    hex.EncodeToString(sum[:]),
+		RecipientId:  recipientId,
+		ResourceType: models.ShareResourceFile,
+		ResourceId:   fileId,
+		CreatedAt:    time.Now().Unix(),
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
+
+	countRedeemed := func() int {
+		entries, _ := logging.GetAuditEntriesSince(0, 2000)
+		count := 0
+		for _, entry := range entries {
+			if entry.Action == "share.link.redeemed" && entry.FileId == fileId {
+				count++
+			}
+		}
+		return count
+	}
+
+	// First open: presents the token, is served, and logs the redemption once.
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId + "&token=" + rawToken,
+		RequiredContent: []string{"789"},
+	})
+	time.Sleep(200 * time.Millisecond)
+	test.IsEqualInt(t, countRedeemed(), 1)
+
+	// Second open with the very same token: still served, but must not log a second redemption.
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId + "&token=" + rawToken,
+		RequiredContent: []string{"789"},
+	})
+	time.Sleep(200 * time.Millisecond)
+	test.IsEqualInt(t, countRedeemed(), 1)
 }
 
 // TestPublicApiConfig tests GET /pubapi/config for non-sensitive configuration values
@@ -2968,8 +3276,8 @@ func TestFolderLockedLeaksNothing(t *testing.T) {
 	}
 }
 
-// TestPublicApiFolderDeadMembersLeaksNothing is a regression test for bug 1: pubApiFolder
-// returned 200 with `"name": bundle.Name` even when its only member had expired, because
+// TestPublicApiFolderDeadMembersLeaksNothing guards against pubApiFolder returning 200 with
+// `"name": bundle.Name` even when its only member had expired, because
 // isProtected was computed by scanning the (now empty) servable-member list rather than the
 // bundle's true membership - a password-protected folder whose members had all expired
 // therefore reported requiresPassword: false and handed back its name with no password
@@ -3062,8 +3370,9 @@ func TestPublicApiFolderDeadMembersLeaksNothing(t *testing.T) {
 // member dropped. The bundle deliberately has TWO members and the request omits ids=, so
 // control cannot take the single-file serveBundleFile shortcut (len(requestedMembers) == 1).
 // A previous version of this test asserted the second request still succeeded with the
-// exhausted member silently excluded from the archive; that was exactly bug 2 (a folder zip
-// silently omitting an unservable member), inverted here to assert the fix instead.
+// exhausted member silently excluded from the archive; that was exactly the failure this test
+// now inverts, asserting the whole request is refused instead of serving a zip with a member
+// silently dropped.
 func TestFolderZipCounterEnforced(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestFolderCounter_" + helper.GenerateRandomString(8)
@@ -3103,8 +3412,8 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 
 	client := &http.Client{}
 
-	// No ids= parameter: both members are requested, so len(filesToServe) == 2 and control must
-	// go through the multi-member zip path and its metering loop.
+	// No ids= parameter: both members are requested, so len(requestedMembers) == 2 and control
+	// must go through the multi-member zip path and its metering loop.
 	firstReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
 		t.Errorf("Failed to create first request: %v", err)
@@ -3171,11 +3480,11 @@ func mustGetMetaData(t *testing.T, id string) models.File {
 	return file
 }
 
-// TestFolderZipThreeMembersTwoExhaustedRefusesWhole is a regression test for the second half
-// of bug 2: servableBundleMembers used storage.IsExpiredFile, which counts
+// TestFolderZipThreeMembersTwoExhaustedRefusesWhole guards against the other half of the same
+// failure mode: servableBundleMembers used storage.IsExpiredFile, which counts
 // DownloadsRemaining < 1 as expired, to build the member list itself - so a 3-member bundle
 // with 2 exhausted members silently narrowed down to a set of one before pubApiFolderZip ever
-// decided how to serve it, and len(filesToServe) == 1 then took the raw-single-file shortcut
+// decided how to serve it, and len(requestedMembers) == 1 then took the raw-single-file shortcut
 // instead of a zip, serving the wrong member as if it were the only thing ever in the bundle.
 // This asserts the request omits ids= (so the shortcut cannot be legitimised by an explicit
 // single id) and is refused as a whole - no archive, and specifically not served as a bare

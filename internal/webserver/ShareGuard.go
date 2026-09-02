@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/shareaccess"
 )
@@ -44,10 +45,13 @@ func recipientFor(w http.ResponseWriter, r *http.Request, resourceType int, reso
 		rawToken = r.URL.Query().Get(shareTokenParam)
 	}
 	if rawToken != "" {
-		recipient, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
+		recipient, firstUse, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
 		if err == nil {
 			if w != nil {
 				shareaccess.WriteCookie(w, r, resourceType, resourceId, recipient.Id)
+			}
+			if firstUse {
+				logging.LogShareLinkRedeemed(resourceType, resourceId, recipient, r)
 			}
 			return recipient.Id
 		}
@@ -63,6 +67,24 @@ func recipientFor(w http.ResponseWriter, r *http.Request, resourceType int, reso
 		return 0
 	}
 	return recipientId
+}
+
+// attachRecipient looks up recipientId and, if it names a real recipient, returns a shallow
+// copy of r with it attached via logging.WithRecipient - the sibling of WithActor - so that a
+// download or upload served through r afterwards is attributed to that recipient instead of
+// being recorded as anonymous. recipientId == 0 (an unrestricted resource) and an id that no
+// longer resolves are both a no-op, returning r unchanged. Must be called before the resource is
+// served or the request is refused, so every audit entry written from then on - including a
+// denial for an exhausted allowance - carries the identity.
+func attachRecipient(r *http.Request, recipientId int) *http.Request {
+	if recipientId == 0 {
+		return r
+	}
+	recipient, ok := database.GetShareRecipient(recipientId)
+	if !ok {
+		return r
+	}
+	return logging.WithRecipient(r, recipient)
 }
 
 // mayAccessShare reports whether the request may reach this resource at all.
@@ -101,7 +123,10 @@ func consumeShareDownload(r *http.Request, resourceType int, resourceId string) 
 		// fragment the server never sees, but this fallback remains for pre-fragment mailed
 		// links (?token= form, valid up to 30 days) presented directly to a download URL.
 		if rawToken := r.URL.Query().Get(shareTokenParam); rawToken != "" {
-			recipient, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
+			// firstUse is not raised here: this fallback only feeds the download-consuming
+			// path, and recipientFor - which does raise share.link.redeemed - is always the
+			// first call to validate a token for a given request.
+			recipient, _, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
 			if err != nil {
 				return false
 			}

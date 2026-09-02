@@ -21,6 +21,7 @@ import (
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
+	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/storage"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/test"
@@ -467,14 +468,14 @@ func TestUserCreateNonAsciiRoundTrips(t *testing.T) {
 	test.IsEqualBool(t, found, true)
 }
 
-// TestUserCreateWithAuthProvider verifies BLOCKER W17: an admin can deliberately provision an
+// TestUserCreateWithAuthProvider verifies that an admin can deliberately provision an
 // OIDC user through the create-user API by passing the authprovider header. A user created with
 // the google provider must have AuthProvider set to google and no password hash, so the internal
 // password login path stays closed for that account (see IsCorrectUsernameAndPassword). Before
 // this fix, apiCreateUser hardcoded models.AuthProviderInternal, so this header had no effect and
 // the created user's AuthProvider would be "internal" instead of "google".
 //
-// OAuth must actually be configured for the google provider to be accepted (see MINOR-2 /
+// OAuth must actually be configured for the google provider to be accepted (see
 // TestUserCreateGoogleAuthProviderRejectedWithoutOauth below), so this test enables hybrid mode
 // on the shared test configuration for its duration and restores it afterwards.
 func TestUserCreateWithAuthProvider(t *testing.T) {
@@ -565,7 +566,7 @@ func TestUserCreateInvalidAuthProvider(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 }
 
-// TestUserCreateGoogleAuthProviderRejectedWithoutOauth verifies MINOR-2: authprovider: google
+// TestUserCreateGoogleAuthProviderRejectedWithoutOauth verifies that authprovider: google
 // must be rejected when OAuth is not configured at all (Method is internal, hybrid not enabled).
 // Without this, an admin (or a script run before OAuth is set up) could create a row that can log
 // in through neither door, and that row becomes a live, silently self-registering SSO account the
@@ -890,7 +891,7 @@ func TestUserPasswordReset(t *testing.T) {
 	apiResetPassword(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
-// TestUserPasswordResetRefusesNonInternalProvider verifies MAJOR W17-2a: an admin holding
+// TestUserPasswordResetRefusesNonInternalProvider verifies that an admin holding
 // PERM_USERS must not be able to mint a plaintext password for a Google-provisioned user, since
 // that would bypass the IdP entirely (its MFA and deprovisioning) the moment the row has a
 // password hash. Before this fix, apiResetPassword never checked AuthProvider at all.
@@ -3260,6 +3261,107 @@ func TestChunkUploadRequestClosesOnLastFile(t *testing.T) {
 	test.IsEqualBool(t, saved2.Closed, false)
 }
 
+// uploadChunkToFileRequestWithCookie behaves like uploadChunkToFileRequest but, when cookie is
+// non-nil, attaches it to the chunk-complete call - the same access cookie a real recipient's
+// browser carries after exchanging their mailed token on the public upload page (see
+// ShareGuard.recipientFor / pubApiUploadRequest). Used to prove the resulting upload is
+// attributed to that recipient rather than to the request's owner.
+func uploadChunkToFileRequestWithCookie(t *testing.T, frId, publicKey, tmpName string, cookie *http.Cookie) {
+	w, r := getRecorderWithBody("/uploadrequest/chunk/reserve", publicKey, "POST", []test.Header{
+		{Name: "id", Value: frId},
+	}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var reserved struct {
+		Uuid string
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &reserved))
+
+	err := os.WriteFile("test/"+tmpName, []byte("closetest"), 0600)
+	test.IsNil(t, err)
+	body, formcontent := test.FileToMultipartFormBody(t, test.HttpTestConfig{
+		UploadFileName:  "test/" + tmpName,
+		UploadFieldName: "file",
+		PostValues: []test.PostBody{{
+			Key:   "filesize",
+			Value: "9",
+		}, {
+			Key:   "offset",
+			Value: "0",
+		}, {
+			Key:   "uuid",
+			Value: reserved.Uuid,
+		}},
+	})
+	w, r = getRecorderWithBody("/uploadrequest/chunk/add", publicKey, "POST", []test.Header{
+		{Name: "fileRequestId", Value: frId},
+	}, body)
+	r.Header.Add("Content-Type", formcontent)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	w, r = getRecorderWithBody("/uploadrequest/chunk/complete", publicKey, "POST", []test.Header{
+		{Name: "uuid", Value: reserved.Uuid},
+		{Name: "filename", Value: tmpName + ".upload"},
+		{Name: "filesize", Value: "9"},
+		{Name: "fileRequestId", Value: frId},
+	}, nil)
+	if cookie != nil {
+		r.AddCookie(cookie)
+	}
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+}
+
+// TestChunkUploadRequestAttributesUploadToRecipient proves that an upload into a file request
+// restricted to named recipients is audited under the recipient who actually uploaded it, not
+// the request's owner - the mis-attribution F5/F2 fix. The owner still appears, moved into
+// Detail rather than Actor.
+func TestChunkUploadRequestAttributesUploadToRecipient(t *testing.T) {
+	admin := models.User{Id: idAdmin, UserLevel: models.UserLevelAdmin, Permissions: models.UserPermissionAll}
+	owner, ok := database.GetUser(idAdmin)
+	test.IsEqualBool(t, ok, true)
+
+	w := httptest.NewRecorder()
+	request := &paramURequestSave{
+		Name:         "recipient-attribution-request",
+		foundHeaders: map[string]bool{},
+	}
+	apiURequestSave(w, request, admin, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+	var response struct {
+		FileRequest models.FileRequest
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	frId := response.FileRequest.Id
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email: "guest-uploader@example.com", CreatedAt: time.Now().Unix()})
+	database.SetShareGrants(models.ShareResourceFileRequest, frId, []int{recipientId}, idAdmin, 0)
+
+	recorder := httptest.NewRecorder()
+	cookieReq := httptest.NewRequest(http.MethodGet, "https://x.test/r/"+frId, nil)
+	shareaccess.WriteCookie(recorder, cookieReq, models.ShareResourceFileRequest, frId, recipientId)
+	cookie := recorder.Result().Cookies()[0]
+
+	uploadChunkToFileRequestWithCookie(t, frId, response.FileRequest.ApiKey, "recipient-attrib-uuid", cookie)
+
+	time.Sleep(200 * time.Millisecond)
+	entries, _ := logging.GetAuditEntriesSince(0, 2000)
+	found := false
+	for _, entry := range entries {
+		if entry.Action != "upload.filerequest" || entry.RequestId != frId {
+			continue
+		}
+		found = true
+		test.IsEqualInt(t, entry.Actor.RecipientId, recipientId)
+		test.IsEqualString(t, entry.Actor.RecipientEmail, "guest-uploader@example.com")
+		test.IsEqualInt(t, entry.Actor.UserId, 0)
+		test.IsEqualBool(t, strings.Contains(entry.Detail, owner.Name), true)
+	}
+	test.IsEqualBool(t, found, true)
+}
+
 func TestFilesDuplicateSanitisation(t *testing.T) {
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermUpload)
@@ -3763,7 +3865,7 @@ func TestFolderDelete(t *testing.T) {
 	removeUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
 }
 
-// TestFolderDeleteWritesBatchedAuditRecord verifies MAJOR-2: deleting a folder with several
+// TestFolderDeleteWritesBatchedAuditRecord verifies that deleting a folder with several
 // member files records one contiguous, correctly hash-chained batch of audit entries (one per
 // member plus one for the folder), rather than each member racing the next for the shared audit
 // mutex through N separate synchronous fsyncs. See TestAuditChainBatchedWriteAllOrNothingOnFailure
@@ -3894,7 +3996,7 @@ func postUnseal(password string) (*httptest.ResponseRecorder, *http.Request) {
 		Password string `json:"password"`
 	}{Password: password})
 	w, r := test.GetRecorder("POST", "/api/unseal", nil, nil, bytes.NewReader(body))
-	// apiUnseal only accepts a direct loopback connection (see isDirectLoopbackRequest); a real
+	// apiUnseal only accepts a host-local connection (see isHostLocalUnsealRequest); a real
 	// on-host caller reaches the handler over 127.0.0.1 with no forwarding header. httptest sets a
 	// non-loopback RemoteAddr by default, so set it explicitly here for the happy path.
 	r.RemoteAddr = "127.0.0.1:34567"
@@ -4114,10 +4216,10 @@ func TestApiUnsealCorrectAndIncorrectPassword(t *testing.T) {
 // it is under test. Real rate limiting is disabled for this whole test binary (see TestMain), so
 // it is switched on only for the duration of this test, against an IP address no other test in
 // this file uses, so as not to disturb - or be disturbed by - shared limiter state. That address
-// must itself still be loopback (127.0.0.0/8): isDirectLoopbackRequest (checked before the rate
-// limiter, see apiUnseal) rejects any non-loopback RemoteAddr with a plain 404 regardless of the
-// limiter's state, so a distinguishing key can only come from a different loopback address (here
-// 127.0.0.2, vs. postUnseal's default 127.0.0.1) - not a public one.
+// must itself still be loopback or private and carry no forwarding header: isHostLocalUnsealRequest
+// (checked before the rate limiter, see apiUnseal) rejects any other RemoteAddr with a plain 404
+// regardless of the limiter's state, so a distinguishing key can only come from a different
+// loopback address (here 127.0.0.2, vs. postUnseal's default 127.0.0.1) - not a public one.
 func TestApiUnsealRateLimitReturns429(t *testing.T) {
 	ratelimiter.SetUnitTestMode(false)
 	t.Cleanup(func() { ratelimiter.SetUnitTestMode(true) })
