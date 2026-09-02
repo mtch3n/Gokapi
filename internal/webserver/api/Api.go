@@ -181,9 +181,8 @@ func apiEditFile(w http.ResponseWriter, r requestParser, user models.User, _ mod
 		file.PasswordHash = newPasswordHash
 		// Always reassigned, never left as it was. The stored copy belongs to the OLD
 		// password, so keeping it here would make GET /files/{id}/sharekey hand out a key
-		// that no longer opens the file. Assigning the result unconditionally also clears
-		// it when the new password was typed rather than generated, since a typed password
-		// must never be persisted in recoverable form.
+		// that no longer opens the file. The replacement is stored on the same terms
+		// whether it was typed or generated - see storage.EncryptSharePassword.
 		file.EncryptedSharePassword = storage.EncryptSharePassword(newSharePassword)
 		downloadPasswordToken.DeleteAllForFile(file.Id)
 	} else if removePassword {
@@ -1150,15 +1149,17 @@ func apiListSingle(w http.ResponseWriter, r requestParser, user models.User, _ m
 	_, _ = w.Write(result)
 }
 
-// apiGetShareKey returns the decrypted, auto-generated share password stored for a file, if
+// apiGetShareKey returns the decrypted share password stored for a file, if
 // the caller is authorised to view that file and one was actually stored. Authorisation mirrors
 // apiListSingle above exactly (owner, or the list-other-uploads permission) - the same "may see
 // this file at all" check the rest of the file-list/view surface uses, not a bit invented for
 // this endpoint.
 //
 // Every refusal reason - caller not authorised, unknown file id, feature toggle off, nothing
-// stored, master key unavailable - answers with the same not-found response. Distinguishing any
-// of them would let a caller probe, e.g., whether a file exists or has a stored key at all.
+// stored - answers with the same not-found response. Distinguishing any of them would let a
+// caller probe, e.g., whether a file exists or has a stored key at all. A sealed instance is the
+// one deliberate exception, answering 503 further down, so an administrator can tell "retry after
+// unsealing" apart from "there was never a key here".
 func apiGetShareKey(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramFilesShareKey)
 	if !ok {

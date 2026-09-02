@@ -393,11 +393,12 @@ func encryptSharePasswordIfEnabled(params models.UploadParameters) []byte {
 //
 // A password the uploader TYPED is stored on the same terms as a generated one, so that the
 // owner can look up any key they set rather than only the ones this app minted. The tradeoff is
-// deliberate and visible to the person choosing the key: a typed password is more likely to be
-// one they use elsewhere, and this keeps it recoverable to anyone who can both reach
-// /api/files/{id}/sharekey and unseal the instance. The upload form says so at the point the key
-// is chosen. To restore the previous "generated keys only" rule, gate this on the caller's
-// GeneratedPassword signal again, which is still carried end to end.
+// deliberate and was accepted knowingly: a typed password is more likely to be one the uploader
+// uses elsewhere, and this keeps it recoverable to anyone who can both reach
+// /api/files/{id}/sharekey and unseal the instance. The upload form does NOT say so - it used to,
+// until the notice was dropped, and the decision was to keep storing regardless rather than
+// restore it. To go back to the previous "generated keys only" rule, gate this on the caller's
+// GeneratedPassword signal, which is still parsed and carried end to end but read by nothing.
 //
 // Exported for the edit path (apiEditFile), which changes a password without going through
 // UploadParameters at all. That path MUST call this on every password change and store the
@@ -415,10 +416,10 @@ func EncryptSharePassword(password string) []byte {
 	return encrypted
 }
 
-// GetSharePassword returns the decrypted, auto-generated share password stored for file, if
-// any. The bool return is false whenever the plaintext cannot or must not be returned - the
-// feature toggle is off, no key was ever stored for this file (e.g. it had a manual password,
-// or was uploaded before the feature was enabled), or the server master key is unavailable -
+// GetSharePassword returns the decrypted share password stored for file, if any. The bool
+// return is false whenever the plaintext cannot or must not be returned - the feature toggle is
+// off, no key was ever stored for this file (e.g. it has no password at all, or was uploaded
+// before the feature was enabled), or the server master key is unavailable -
 // all collapsed into the same signal so a caller cannot distinguish "off" from "no master key"
 // from "nothing stored" (see the /api/files/{id}/sharekey endpoint, which must not become an
 // oracle for any of those).

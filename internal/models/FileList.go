@@ -70,12 +70,13 @@ type File struct {
 	UnlimitedTime           bool           `json:"UnlimitedTime" redis:"UnlimitedTime"`           // True if the uploader did not limit the time
 	InternalRedisEncryption []byte         `redis:"EncryptionRedis"`                              // This field is an internal field, used to store the EncryptionInfo in a Redis Hashmap
 	InternalRedisName       []byte         `json:"-" redis:"NameEncrypted"`                       // This field is an internal field, used to store the encrypted Name in a Redis Hashmap
-	// EncryptedSharePassword holds the auto-generated share password, encrypted with the
-	// server master key (see encryption.EncryptString), so it can be retrieved later through
-	// /api/files/{id}/sharekey. Only ever populated when configuration.StoreShareKeys is
-	// enabled and the upload signalled the password was auto-generated, never for a
-	// user-typed password. Excluded from JSON output like other sensitive fields (see
-	// User.AuthProvider) - callers read the plaintext through the dedicated endpoint instead.
+	// EncryptedSharePassword holds the file's share password, encrypted with the server master
+	// key (see encryption.EncryptString), so it can be retrieved later through
+	// /api/files/{id}/sharekey. Populated whenever configuration.StoreShareKeys is enabled and
+	// a password was set, for a typed password as much as a generated one - the owner can look
+	// up any key they set, not only the ones this app minted. Excluded from JSON output like
+	// other sensitive fields (see User.AuthProvider) - callers read the plaintext through the
+	// dedicated endpoint instead.
 	EncryptedSharePassword []byte `json:"-" redis:"EncryptedSharePassword"`
 }
 
