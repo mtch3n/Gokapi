@@ -4721,3 +4721,19 @@ func TestApiURequestCollaborators(t *testing.T) {
 	fr.SetCollaboratorIds([]int{idUser})
 	database.SaveFileRequest(fr)
 }
+
+func TestApiGetUserDirectory(t *testing.T) {
+	key := testAuthorisation(t, "/api/user/directory", models.ApiPermManageFileRequests)
+	w, r := getRecorder("/api/user/directory", key.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	body := w.Body.String()
+	// Other accounts, id and name only. Names are lowercased on save (database.SaveUser).
+	test.IsEqualBool(t, strings.Contains(body, `{"id":`+strconv.Itoa(idAdmin)+`,"name":"testadmin"}`), true)
+	// Never the caller: you cannot collaborate with yourself. testAuthorisation's key belongs to
+	// idUser.
+	test.IsEqualBool(t, strings.Contains(body, `"name":"testuser"`), false)
+	// Nothing /user/list would expose to a manage-users admin.
+	test.IsEqualBool(t, strings.Contains(body, "permissions"), false)
+	test.IsEqualBool(t, strings.Contains(body, "lastOnline"), false)
+}

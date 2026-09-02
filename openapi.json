@@ -2385,6 +2385,49 @@
         }
       }
     },
+    "/user/directory": {
+      "get": {
+        "tags": [
+          "user"
+        ],
+        "summary": "Lists the id and name of every other user",
+        "description": "Returns every account except the caller's own, with id and name only, so a collaborator can be picked for an upload request. Requires API permission MANAGE_FILE_REQUESTS",
+        "operationId": "getuserdirectory",
+        "security": [
+          {
+            "apikey": [
+              "MANAGE_FILE_REQUESTS"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          }
+        }
+      }
+    },
     "/user/create": {
       "post": {
         "tags": [

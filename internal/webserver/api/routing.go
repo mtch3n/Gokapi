@@ -232,6 +232,15 @@ var routes = []apiRoute{
 		RequestParser: nil,
 	},
 	{
+		// Id and name of every other account, so a user who may manage file requests can pick
+		// collaborators without holding ManageUsers, which /user/list needs and which would also
+		// expose permissions and last-login.
+		Url:           "/user/directory",
+		ApiPerm:       models.ApiPermManageFileRequests,
+		execution:     apiGetUserDirectory,
+		RequestParser: nil,
+	},
+	{
 		Url:           "/user/create",
 		ApiPerm:       models.ApiPermManageUsers,
 		execution:     apiCreateUser,

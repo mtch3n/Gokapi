@@ -397,6 +397,25 @@ func apiGetUserList(w http.ResponseWriter, _ requestParser, _ models.User, _ mod
 	_, _ = w.Write(resultJson)
 }
 
+// apiGetUserDirectory lists every other account's id and name and nothing else, for the
+// collaborator picker (models.FileRequest.Collaborators).
+func apiGetUserDirectory(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
+	type directoryEntry struct {
+		Id   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	result := make([]directoryEntry, 0)
+	for _, entry := range database.GetAllUsers() {
+		if entry.Id == user.Id {
+			continue
+		}
+		result = append(result, directoryEntry{Id: entry.Id, Name: entry.Name})
+	}
+	resultJson, err := json.Marshal(result)
+	helper.Check(err)
+	_, _ = w.Write(resultJson)
+}
+
 func apiGetAuthList(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
 	type apiKeyListItem struct {
 		Id              string `json:"id,omitempty"`
