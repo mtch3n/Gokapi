@@ -47,6 +47,7 @@ func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 	result := models.File{
 		Id:                     rowData.Id,
 		Name:                   encryption.DecryptFileName(rowData.NameEncrypted),
+		NameEncryptedRaw:       rowData.NameEncrypted,
 		Size:                   rowData.Size,
 		SHA1:                   rowData.SHA1,
 		ExpireAt:               rowData.ExpireAt,
@@ -173,11 +174,21 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 // instance was still sealed, when encryption.DecryptFileName had no key and reported the name as
 // empty. Re-encrypting that would overwrite the stored name with nothing, which matters because
 // bookkeeping writes that are allowed while sealed (marking a file pending deletion, clearing a
-// hotlink) go through this same path. Keeping whatever is already stored is the only correct
-// answer, and on a fresh insert there is nothing to keep.
+// hotlink) go through this same path.
+//
+// NameEncryptedRaw, if the caller's File model was itself the result of a read, carries the exact
+// bytes that were stored for this row (see models.File.NameEncryptedRaw) and is used verbatim -
+// this is what makes database.Migrate safe: it runs before the master key is loaded, so it can
+// never decrypt an encrypted name into file.Name, but it must still copy the original ciphertext
+// rather than lose it. Looking it up in this database is only a fallback for a File model that was
+// never read (so carries no raw bytes), kept for the in-place bookkeeping writes this always
+// handled correctly before NameEncryptedRaw existed.
 func (p DatabaseProvider) encryptNameForSave(file models.File) ([]byte, error) {
 	if file.Name != "" {
 		return encryption.EncryptFileName(file.Name)
+	}
+	if file.NameEncryptedRaw != nil {
+		return file.NameEncryptedRaw, nil
 	}
 	var storedName []byte
 	row := p.sqliteDb.QueryRow("SELECT NameEncrypted FROM FileMetaData WHERE Id = ?", file.Id)

@@ -43,8 +43,12 @@ func dbToMetadata(id string, input []any) (models.File, error) {
 	if len(result.EncryptedSharePassword) == 0 {
 		result.EncryptedSharePassword = nil
 	}
-	result.Name = encryption.DecryptFileName(result.InternalRedisName)
-	result.InternalRedisName = nil
+	// NameEncryptedRaw is deliberately left populated here (not nilled out after decrypting into
+	// Name) so a caller that re-saves this File unchanged - see encryptNameForSave and
+	// models.File.NameEncryptedRaw - can write the original bytes back verbatim rather than
+	// re-deriving them, which matters most for database.Migrate: it runs before the master key is
+	// loaded, so it can never decrypt an encrypted name into Name in the first place.
+	result.Name = encryption.DecryptFileName(result.NameEncryptedRaw)
 	return unmarshalEncryptionInfo(result)
 }
 
@@ -91,7 +95,7 @@ func (p DatabaseProvider) GetMetaDataById(id string) (models.File, bool) {
 func (p DatabaseProvider) SaveMetaData(file models.File) {
 	encryptedName, err := p.encryptNameForSave(file)
 	helper.Check(err)
-	file.InternalRedisName = encryptedName
+	file.NameEncryptedRaw = encryptedName
 	marshalledFile, err := marshalEncryptionInfo(file)
 	helper.Check(err)
 	p.setHashMap(p.buildArgs(prefixMetaData + file.Id).AddFlat(marshalledFile))
@@ -102,11 +106,21 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 // back while the instance was still sealed, when encryption.DecryptFileName had no key and
 // reported the name as empty. Re-encrypting that would overwrite the stored name with nothing,
 // which matters because bookkeeping writes that are allowed while sealed (marking a file pending
-// deletion, clearing a hotlink) go through this same path. Keeping whatever is already stored is
-// the only correct answer, and on a fresh insert there is nothing to keep.
+// deletion, clearing a hotlink) go through this same path.
+//
+// NameEncryptedRaw, if the caller's File model was itself the result of a read, carries the exact
+// bytes that were stored for this row (see models.File.NameEncryptedRaw) and is used verbatim -
+// this is what makes database.Migrate safe: it runs before the master key is loaded, so it can
+// never decrypt an encrypted name into file.Name, but it must still copy the original ciphertext
+// rather than lose it. Looking it up in this database is only a fallback for a File model that was
+// never read (so carries no raw bytes), kept for the in-place bookkeeping writes this always
+// handled correctly before NameEncryptedRaw existed.
 func (p DatabaseProvider) encryptNameForSave(file models.File) ([]byte, error) {
 	if file.Name != "" {
 		return encryption.EncryptFileName(file.Name)
+	}
+	if file.NameEncryptedRaw != nil {
+		return file.NameEncryptedRaw, nil
 	}
 	hash, ok := p.getHashMap(prefixMetaData + file.Id)
 	if !ok {

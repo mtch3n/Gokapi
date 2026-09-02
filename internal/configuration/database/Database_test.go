@@ -10,6 +10,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/forceu/gokapi/internal/configuration/database/dbabstraction"
 	"github.com/forceu/gokapi/internal/configuration/database/dbcache"
+	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
 )
@@ -271,8 +272,14 @@ func TestMetaData(t *testing.T) {
 	}
 	runAllTypesNoOutput(t, func() { SaveMetaData(file) })
 	runAllTypesCompareOutput(t, func() any { return GetDownloadsRemaining(file.Id) }, 2)
-	runAllTypesCompareTwoOutputs(t, func() (any, any) { return GetMetaDataById("testid") }, file, true)
-	runAllTypesCompareOutput(t, func() any { return GetAllMetadata() }, map[string]models.File{"testid": file})
+	// NameEncryptedRaw is populated only on a read (see models.File.NameEncryptedRaw), so the
+	// hand-built expected File never carries it; stripped from the read results below so these
+	// comparisons stay about the fields the test actually cares about.
+	runAllTypesCompareTwoOutputs(t, func() (any, any) {
+		result, ok := GetMetaDataById("testid")
+		return withoutNameEncryptedRaw(result), ok
+	}, file, true)
+	runAllTypesCompareOutput(t, func() any { return mapWithoutNameEncryptedRaw(GetAllMetadata()) }, map[string]models.File{"testid": file})
 	runAllTypesNoOutput(t, func() { DeleteMetaData("testid") })
 	runAllTypesCompareOutput(t, func() any { return GetAllMetadata() }, map[string]models.File{})
 	runAllTypesCompareTwoOutputs(t, func() (any, any) { return GetMetaDataById("testid") }, models.File{}, false)
@@ -283,7 +290,8 @@ func TestMetaData(t *testing.T) {
 	runAllTypesCompareTwoOutputs(t, func() (any, any) {
 		SaveMetaData(file)
 		IncreaseDownloadCount(file.Id, false)
-		return GetMetaDataById(file.Id)
+		result, ok := GetMetaDataById(file.Id)
+		return withoutNameEncryptedRaw(result), ok
 	}, increasedDownload, true)
 
 	increasedDownload.DownloadCount = increasedDownload.DownloadCount + 1
@@ -291,9 +299,27 @@ func TestMetaData(t *testing.T) {
 
 	runAllTypesCompareTwoOutputs(t, func() (any, any) {
 		IncreaseDownloadCount(file.Id, true)
-		return GetMetaDataById(file.Id)
+		result, ok := GetMetaDataById(file.Id)
+		return withoutNameEncryptedRaw(result), ok
 	}, increasedDownload, true)
 	runAllTypesNoOutput(t, func() { DeleteMetaData(file.Id) })
+}
+
+// withoutNameEncryptedRaw clears models.File.NameEncryptedRaw, which is populated only on a read
+// and therefore never present on a hand-built expected File, so tests that compare a read result
+// against a literal can ignore it.
+func withoutNameEncryptedRaw(file models.File) models.File {
+	file.NameEncryptedRaw = nil
+	return file
+}
+
+// mapWithoutNameEncryptedRaw applies withoutNameEncryptedRaw to every value in the map.
+func mapWithoutNameEncryptedRaw(files map[string]models.File) map[string]models.File {
+	result := make(map[string]models.File, len(files))
+	for id, file := range files {
+		result[id] = withoutNameEncryptedRaw(file)
+	}
+	return result
 }
 
 func TestUsers(t *testing.T) {
@@ -946,6 +972,58 @@ func TestMigrationNormalizesEmptyAuthProvider(t *testing.T) {
 	migratedUser, ok := dbNew.GetUserByName("legacyuser")
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, migratedUser.AuthProvider, models.AuthProviderInternal)
+}
+
+// TestMigratePreservesEncryptedFileName guards against a data-loss bug: cmd/gokapi/Main.go runs
+// --migrate-db (handleDbMigration) before encryption.Init loads the master key, so on a source
+// database where file names are encrypted, DecryptFileName finds no key during the whole copy and
+// reports every name as "". SaveMetaData's fallback for an empty Name - which exists so a
+// bookkeeping write made while sealed does not blank out a name - then looked the name up in the
+// DESTINATION database, found nothing (it is freshly created), and wrote NULL. The migration
+// reported success while silently destroying every filename. This reproduces exactly that
+// ordering without needing a second process: simulate "no key available" the same way an
+// unsealed Input-level instance does (see encryption.IsSealed), migrate, then restore the
+// original key to verify the destination actually kept the name rather than losing it.
+func TestMigratePreservesEncryptedFileName(t *testing.T) {
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+
+	const secretName = "confidential-merger-plan.docx"
+	configOld := models.DbConnection{
+		HostUrl: "./test/gokapi_encryptedname_src.sqlite",
+		Type:    0, // dbabstraction.TypeSqlite
+	}
+	configNew := models.DbConnection{
+		RedisPrefix: "testmigrateencname_",
+		HostUrl:     "127.0.0.1:26379",
+		Type:        1, // dbabstraction.TypeRedis
+	}
+
+	dbOld, err := dbabstraction.GetNew(configOld)
+	test.IsNil(t, err)
+	dbOld.SaveMetaData(models.File{Id: "encnamefile", Name: secretName, SHA1: "abc"})
+	dbOld.Close()
+
+	// Reproduce the master key not being loaded yet, exactly as it is not during --migrate-db.
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionInput, Salt: "somesalt", Checksum: "somechecksum", ChecksumSalt: "somechecksumsalt"}})
+	test.IsEqualBool(t, encryption.IsDecryptionAvailable(), false)
+
+	Migrate(configOld, configNew)
+
+	// Restore the original key so the migrated row can be verified.
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+
+	dbNew, err := dbabstraction.GetNew(configNew)
+	test.IsNil(t, err)
+	migrated, ok := dbNew.GetMetaDataById("encnamefile")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, migrated.Name, secretName)
 }
 
 func TestRedactUrl(t *testing.T) {

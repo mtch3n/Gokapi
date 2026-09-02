@@ -286,6 +286,10 @@ func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
 	test.IsEqualInt(t, retrievedFile.DownloadCount, 3)
 	test.IsEqualInt(t, retrievedFile.DownloadsRemaining, 11)
 	newFile.DownloadCount = 3
+	// NameEncryptedRaw is populated only on a read (see models.File.NameEncryptedRaw), so the
+	// freshly constructed newFile never carries it; cleared here so the comparison below is
+	// about the fields this test actually cares about.
+	retrievedFile.NameEncryptedRaw = nil
 	test.IsEqual(t, retrievedFile, newFile)
 
 	dbInstance.IncreaseDownloadCount(newFile.Id, true)
@@ -295,6 +299,7 @@ func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
 	test.IsEqualInt(t, retrievedFile.DownloadsRemaining, 10)
 	newFile.DownloadCount = 4
 	newFile.DownloadsRemaining = 10
+	retrievedFile.NameEncryptedRaw = nil
 	test.IsEqual(t, retrievedFile, newFile)
 	dbInstance.DeleteMetaData(newFile.Id)
 }

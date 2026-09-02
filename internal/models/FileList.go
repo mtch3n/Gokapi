@@ -69,7 +69,16 @@ type File struct {
 	UnlimitedDownloads      bool           `json:"UnlimitedDownloads" redis:"UnlimitedDownloads"` // True if the uploader did not limit the downloads
 	UnlimitedTime           bool           `json:"UnlimitedTime" redis:"UnlimitedTime"`           // True if the uploader did not limit the time
 	InternalRedisEncryption []byte         `redis:"EncryptionRedis"`                              // This field is an internal field, used to store the EncryptionInfo in a Redis Hashmap
-	InternalRedisName       []byte         `json:"-" redis:"NameEncrypted"`                       // This field is an internal field, used to store the encrypted Name in a Redis Hashmap
+	// NameEncryptedRaw carries the exact bytes stored for the name (format-prefixed ciphertext or
+	// plaintext, see encryption.EncryptFileName/DecryptFileName), alongside the decrypted Name
+	// above. Every provider's read path (GetAllMetadata/GetMetaDataById) populates this regardless
+	// of whether Name could be decrypted, so a caller that saves this File back unchanged - most
+	// importantly database.Migrate, which runs before the master key is loaded (see
+	// cmd/gokapi/Main.go) and therefore can never decrypt an encrypted name - can write the
+	// original bytes back verbatim instead of re-encrypting a Name it does not have. For Redis
+	// this also doubles as the wire field: the "NameEncrypted" tag is what SaveMetaData writes
+	// into the hash.
+	NameEncryptedRaw []byte `json:"-" redis:"NameEncrypted"`
 	// EncryptedSharePassword holds the file's share password, encrypted with the server master
 	// key (see encryption.EncryptString), so it can be retrieved later through
 	// /api/files/{id}/sharekey. Populated whenever configuration.StoreShareKeys is enabled and
