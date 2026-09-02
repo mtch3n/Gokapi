@@ -82,3 +82,44 @@ func TestFileRequest_IsExpired(t *testing.T) {
 
 	test.IsEqualBool(t, fr.IsExpired(), true)
 }
+
+func TestFileRequest_CollaboratorsEncodeDecode(t *testing.T) {
+	// Empty string is what a Redis hash written before the field existed reads as, and what a
+	// sqlite/postgres row can never hold (default '[]') - both must mean "nobody".
+	ids, err := DecodeCollaborators("")
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(ids), 0)
+
+	ids, err = DecodeCollaborators("[]")
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(ids), 0)
+
+	// Sorted and de-duplicated on the way in, and ids that cannot be a user are dropped.
+	ids, err = DecodeCollaborators("[7,3,7,0,-1]")
+	test.IsNil(t, err)
+	test.IsEqual(t, ids, []int{3, 7})
+
+	_, err = DecodeCollaborators("not json")
+	test.IsEqualBool(t, err != nil, true)
+
+	test.IsEqualString(t, EncodeCollaborators(nil), "[]")
+	test.IsEqualString(t, EncodeCollaborators([]int{9, 2, 9}), "[2,9]")
+}
+
+func TestFileRequest_CollaboratorMembership(t *testing.T) {
+	fr := FileRequest{Id: "req1", UserId: 1}
+	test.IsEqualBool(t, fr.IsCollaborator(2), false)
+	test.IsEqualInt(t, len(fr.CollaboratorIds()), 0)
+
+	fr.SetCollaboratorIds([]int{5, 2})
+	test.IsEqual(t, fr.CollaboratorIds(), []int{2, 5})
+	test.IsEqualString(t, fr.CollaboratorsRaw, "[2,5]")
+	test.IsEqualBool(t, fr.IsCollaborator(5), true)
+	test.IsEqualBool(t, fr.IsCollaborator(1), false)
+	// Names are display-only and never come from SetCollaboratorIds.
+	test.IsEqualString(t, fr.Collaborators[0].Name, "")
+
+	fr.SetCollaboratorIds(nil)
+	test.IsEqualInt(t, len(fr.Collaborators), 0)
+	test.IsEqualString(t, fr.CollaboratorsRaw, "[]")
+}
