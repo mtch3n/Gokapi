@@ -21,6 +21,7 @@ import (
 
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/helper"
+	"github.com/forceu/gokapi/internal/logging"
 	gokapimail "github.com/forceu/gokapi/internal/mail"
 	"github.com/forceu/gokapi/internal/models"
 )
@@ -103,7 +104,7 @@ type GrantResult struct {
 // It refuses outright when no mail connector is configured. That check is here,
 // at the single entry point for creating grants, rather than in the HTTP
 // handler, so a future second caller cannot forget it.
-func GrantAccess(resource Resource, emails []string, grantedBy int, downloadsAllowed int, baseUrl string) ([]GrantResult, error) {
+func GrantAccess(resource Resource, emails []string, actor models.User, downloadsAllowed int, baseUrl string) ([]GrantResult, error) {
 	if !gokapimail.IsEnabled() {
 		return nil, ErrMailNotConfigured
 	}
@@ -138,10 +139,10 @@ func GrantAccess(resource Resource, emails []string, grantedBy int, downloadsAll
 	// Grants are written before any mail goes out. A link that arrives before
 	// its grant exists would be refused, which is the one ordering that
 	// produces a support call; the reverse merely means a resend is needed.
-	database.SetShareGrants(resource.Type, resource.Id, recipientIds, grantedBy, downloadsAllowed)
+	database.SetShareGrants(resource.Type, resource.Id, recipientIds, actor.Id, downloadsAllowed)
 
 	for i, recipient := range recipients {
-		if err := issueAndSend(resource, recipient, baseUrl, "", now); err != nil {
+		if err := issueAndSend(resource, recipient, baseUrl, "", now, actor, "grant"); err != nil {
 			results[i].MailErr = err
 		}
 	}
@@ -175,7 +176,9 @@ func ResendLink(resource Resource, email string, baseUrl string, requestedIp str
 	if lastIssued > 0 && now.Unix()-lastIssued < models.ShareLinkCooldownSeconds {
 		return ErrCooldown
 	}
-	return issueAndSend(resource, recipient, baseUrl, requestedIp, now)
+	// The zero value marks this as a public resend to LogShareLinkMailed,
+	// which records the requester's IP instead of a staff actor.
+	return issueAndSend(resource, recipient, baseUrl, requestedIp, now, models.User{}, "resend")
 }
 
 // issueAndSend mails a new link and only then retires the previous one.
@@ -184,10 +187,20 @@ func ResendLink(resource Resource, email string, baseUrl string, requestedIp str
 // whatever link the recipient already had - if any - untouched. Revoking
 // first, as this used to do, would strand the recipient with no working link
 // at all the moment the mail step failed.
-func issueAndSend(resource Resource, recipient models.ShareRecipient, baseUrl, requestedIp string, now time.Time) error {
+//
+// actor and purpose exist purely for the audit trail: actor is the staff
+// user for a grant and the zero value for a public resend, purpose is
+// "grant" or "resend". Both outcomes are logged - a caller must not swallow
+// the error before this point, or a misconfigured connector, a bounced
+// address or a timeout goes on leaving no server-side trace at all.
+func issueAndSend(resource Resource, recipient models.ShareRecipient, baseUrl, requestedIp string,
+	now time.Time, actor models.User, purpose string) error {
 	rawToken := helper.GenerateRandomString(tokenLength)
 
-	if err := gokapimail.Send(context.Background(), buildMessage(resource, recipient, rawToken, baseUrl)); err != nil {
+	receipt, err := gokapimail.Send(context.Background(), buildMessage(resource, recipient, rawToken, baseUrl))
+	logging.LogShareLinkMailed(resource.Type, resource.Id, recipient.Email, purpose, gokapimail.Get().Name(),
+		receipt.MessageId, resource.linkExpiry(now), actor, requestedIp, err)
+	if err != nil {
 		return err
 	}
 

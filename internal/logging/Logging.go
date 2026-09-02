@@ -30,6 +30,7 @@ const categoryDenied = "denied"
 const categoryExpiry = "expiry"
 const categoryApiKey = "apikey"
 const categoryConfig = "config"
+const categoryMail = "mail"
 
 var outputToStdout = false
 var useCloudflare = false
@@ -924,4 +925,59 @@ func LogShareRecipientsCleared(resourceType int, resourceId string, actor models
 		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
 		Detail:   fmt.Sprintf("%s %s", shareResourceLabel(resourceType), resourceId),
 	})
+}
+
+// LogShareLinkMailed records one attempt to mail a share access link, success
+// or failure, so that a misconfigured connector, a bounced address, or a
+// timeout leaves a server-side trace instead of vanishing silently. It is the
+// only place a recipient's address is recorded for a mail send: the grant
+// rows are replaced on every list edit and so are not a durable answer to
+// "was a link mailed to X".
+//
+// actor is the staff user for a granted share; the zero value marks a public
+// resend, which is recorded as an anonymous actor carrying requestedIp
+// instead. Detail deliberately carries only the recipient address, the
+// purpose, the connector name, the delivery id and the expiry - never the
+// access token itself, which this function is never even given. Non-blocking.
+func LogShareLinkMailed(resourceType int, resourceId string, recipientEmail string, purpose string,
+	connector string, messageId string, expiresAt int64, actor models.User, requestedIp string, sendErr error) {
+	label := shareResourceLabel(resourceType)
+	if sendErr == nil {
+		who := fmt.Sprintf("%s via %s", purpose, connector)
+		if actor.Id != 0 {
+			who = fmt.Sprintf("%s by %s (user #%d) via %s", purpose, actor.Name, actor.Id, connector)
+		}
+		createLogEntry(categoryInfo, fmt.Sprintf("mail share link to %s for %s %s (%s, msgid %s)",
+			recipientEmail, label, resourceId, who, messageId), false)
+	} else {
+		createLogEntry(categoryWarning, fmt.Sprintf("mail share link to %s for %s %s FAILED: %s",
+			recipientEmail, label, resourceId, sendErr.Error()), false)
+	}
+
+	auditActor := AuditActor{Anonymous: true}
+	if actor.Id != 0 {
+		auditActor = AuditActor{UserId: actor.Id, Email: actor.Name}
+	}
+	entry := AuditEntry{
+		Category: categoryMail,
+		Action:   "mail.share_link",
+		Outcome:  OutcomeSuccess,
+		Ip:       requestedIp,
+		Actor:    auditActor,
+		Detail: fmt.Sprintf("to=%s purpose=%s connector=%s msgid=%s expires=%d",
+			recipientEmail, purpose, connector, messageId, expiresAt),
+	}
+	switch resourceType {
+	case models.ShareResourceBundle:
+		entry.BundleId = resourceId
+	case models.ShareResourceFileRequest:
+		entry.RequestId = resourceId
+	default:
+		entry.FileId = resourceId
+	}
+	if sendErr != nil {
+		entry.Outcome = OutcomeFailure
+		entry.Error = sendErr.Error()
+	}
+	appendAuditEntryAsync(entry)
 }

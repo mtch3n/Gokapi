@@ -1,6 +1,8 @@
 package logging
 
 import (
+	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -138,6 +140,93 @@ func TestLogFileRequestFull(t *testing.T) {
 		test.IsEqualInt(t, entry.Actor.UserId, 7)
 	}
 	test.IsEqualBool(t, found, true)
+}
+
+// TestLogShareLinkMailed covers both outcomes of a mail send attempt: each
+// must land a log.txt line and an audit entry with the right category,
+// outcome and detail. It also proves the anti-leak invariant the design
+// insists on - the recipient address belongs in the audit trail, the raw
+// access token never does, even though a resend or grant flow always has one
+// in scope right where this function is called.
+func TestLogShareLinkMailed(t *testing.T) {
+	dir := t.TempDir()
+	Init(dir)
+
+	// A value shaped like a real access token (see shareaccess.tokenLength),
+	// standing in for the one issueAndSend has in scope at the call site.
+	// LogShareLinkMailed takes no token parameter, so this can never reach
+	// the entry - the assertion below exists to catch a future signature
+	// change that tries to smuggle one in anyway.
+	fakeToken := "T0ken-ThatMustNeverAppearInAnyAuditRecord-48charslong-xxxxxx"
+
+	staff := models.User{Id: 9, Name: "uploader@example.com"}
+	expiresAt := time.Now().Add(24 * time.Hour).Unix()
+
+	t.Run("success", func(t *testing.T) {
+		LogShareLinkMailed(models.ShareResourceFile, "file-mailed-ok", "recipient@example.com",
+			"grant", "azure", "op-12345", expiresAt, staff, "", nil)
+		time.Sleep(500 * time.Millisecond)
+
+		content, _ := os.ReadFile(dir + "/log.txt")
+		logLine := string(content)
+		test.IsEqualBool(t, strings.Contains(logLine, "[info]"), true)
+		test.IsEqualBool(t, strings.Contains(logLine, "mail share link to recipient@example.com"), true)
+		test.IsEqualBool(t, strings.Contains(logLine, "op-12345"), true)
+		test.IsEqualBool(t, strings.Contains(logLine, fakeToken), false)
+
+		entries, _ := GetAuditEntriesSince(0, 100)
+		found := false
+		for _, entry := range entries {
+			if entry.Action != "mail.share_link" || entry.FileId != "file-mailed-ok" {
+				continue
+			}
+			found = true
+			test.IsEqualString(t, entry.Category, categoryMail)
+			test.IsEqual(t, entry.Outcome, OutcomeSuccess)
+			test.IsEqualInt(t, entry.Actor.UserId, 9)
+			test.IsEqualBool(t, entry.Actor.Anonymous, false)
+			test.IsEqualString(t, entry.Error, "")
+			for _, expected := range []string{"to=recipient@example.com", "purpose=grant",
+				"connector=azure", "msgid=op-12345", fmt.Sprintf("expires=%d", expiresAt)} {
+				test.IsEqualBool(t, strings.Contains(entry.Detail, expected), true)
+			}
+			test.IsEqualBool(t, strings.Contains(entry.Detail, fakeToken), false)
+		}
+		test.IsEqualBool(t, found, true)
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		sendErr := errors.New("mail: the Azure request failed: dial tcp: timeout")
+		// A public resend failure: actor is the zero value, requestedIp is
+		// what identifies the caller instead.
+		LogShareLinkMailed(models.ShareResourceFileRequest, "req-mailed-fail", "guest@example.com",
+			"resend", "azure", "", 0, models.User{}, "203.0.113.5", sendErr)
+		time.Sleep(500 * time.Millisecond)
+
+		content, _ := os.ReadFile(dir + "/log.txt")
+		logLine := string(content)
+		test.IsEqualBool(t, strings.Contains(logLine, "[warning]"), true)
+		test.IsEqualBool(t, strings.Contains(logLine, "mail share link to guest@example.com"), true)
+		test.IsEqualBool(t, strings.Contains(logLine, "FAILED"), true)
+		test.IsEqualBool(t, strings.Contains(logLine, fakeToken), false)
+
+		entries, _ := GetAuditEntriesSince(0, 100)
+		found := false
+		for _, entry := range entries {
+			if entry.Action != "mail.share_link" || entry.RequestId != "req-mailed-fail" {
+				continue
+			}
+			found = true
+			test.IsEqual(t, entry.Outcome, OutcomeFailure)
+			test.IsEqualBool(t, entry.Actor.Anonymous, true)
+			test.IsEqualString(t, entry.Ip, "203.0.113.5")
+			test.IsEqualBool(t, strings.Contains(entry.Error, "timeout"), true)
+			test.IsEqualBool(t, strings.Contains(entry.Detail, "purpose=resend"), true)
+			test.IsEqualBool(t, strings.Contains(entry.Detail, fakeToken), false)
+			test.IsEqualBool(t, strings.Contains(entry.Error, fakeToken), false)
+		}
+		test.IsEqualBool(t, found, true)
+	})
 }
 
 func TestLogDownloadDenied(t *testing.T) {

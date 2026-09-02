@@ -1599,7 +1599,7 @@ func apiSetShareRecipients(w http.ResponseWriter, r requestParser, user models.U
 		return
 	}
 
-	results, err := shareaccess.GrantAccess(resource, request.Emails, user.Id,
+	results, err := shareaccess.GrantAccess(resource, request.Emails, user,
 		request.DownloadsAllowed, configuration.Get().ServerUrl)
 	if err != nil {
 		if errors.Is(err, shareaccess.ErrMailNotConfigured) {

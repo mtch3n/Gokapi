@@ -4,14 +4,17 @@ package shareaccess
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/logging"
 	gokapimail "github.com/forceu/gokapi/internal/mail"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
@@ -38,6 +41,12 @@ func disableMail(t *testing.T) {
 	gokapimail.ResetForTesting()
 }
 
+// testActor stands in for the staff user granting access, so a test can
+// still assert on the id GrantAccess records without spelling out a name.
+func testActor(id int) models.User {
+	return models.User{Id: id, Name: fmt.Sprintf("user%d@example.com", id)}
+}
+
 func testResource(id string) Resource {
 	return Resource{
 		Type:      models.ShareResourceFile,
@@ -55,7 +64,7 @@ func TestGrantAccessRefusedWithoutMail(t *testing.T) {
 	disableMail(t)
 	resource := testResource("res-nomail")
 
-	results, err := GrantAccess(resource, []string{"a@example.com"}, 1, 0, "https://x.test/")
+	results, err := GrantAccess(resource, []string{"a@example.com"}, testActor(1), 0, "https://x.test/")
 	test.IsEqual(t, err, ErrMailNotConfigured)
 	test.IsEqualInt(t, len(results), 0)
 
@@ -74,7 +83,7 @@ func TestGrantAccessCreatesRecipientsAndGrants(t *testing.T) {
 	resource := testResource("res-grant")
 
 	results, err := GrantAccess(resource,
-		[]string{"  Alice@Example.com ", "bob@example.com"}, 42, 3, "https://x.test/")
+		[]string{"  Alice@Example.com ", "bob@example.com"}, testActor(42), 3, "https://x.test/")
 	test.IsNil(t, err)
 	test.IsEqualInt(t, len(results), 2)
 
@@ -89,8 +98,26 @@ func TestGrantAccessCreatesRecipientsAndGrants(t *testing.T) {
 	test.IsEqualInt(t, grants[0].GrantedBy, 42)
 	test.IsEqualInt(t, grants[0].DownloadsAllowed, 3)
 
+	// The mail send is audited too, once per recipient, actor is the
+	// granting staff user.
+	t.Run("mails a success audit entry per recipient", func(t *testing.T) {
+		time.Sleep(500 * time.Millisecond)
+		entries, _ := logging.GetAuditEntriesSince(0, 1000)
+		found := 0
+		for _, entry := range entries {
+			if entry.Action != "mail.share_link" || entry.FileId != resource.Id {
+				continue
+			}
+			found++
+			test.IsEqual(t, entry.Outcome, logging.OutcomeSuccess)
+			test.IsEqualInt(t, entry.Actor.UserId, 42)
+			test.IsEqualBool(t, strings.Contains(entry.Detail, "purpose=grant"), true)
+		}
+		test.IsEqualInt(t, found, 2)
+	})
+
 	// Re-granting to a known address does not create a second recipient.
-	results, err = GrantAccess(resource, []string{"alice@example.com"}, 42, 3, "https://x.test/")
+	results, err = GrantAccess(resource, []string{"alice@example.com"}, testActor(42), 3, "https://x.test/")
 	test.IsNil(t, err)
 	test.IsEqualBool(t, results[0].IsNewRecipient, false)
 
@@ -106,13 +133,13 @@ func TestGrantAccessRejectsBadInput(t *testing.T) {
 
 	// A mistyped address is reported rather than silently dropped, so an
 	// uploader is never left believing a share reached someone it did not.
-	_, err := GrantAccess(testResource("res-bad"), []string{"not-an-address"}, 1, 0, "https://x.test/")
+	_, err := GrantAccess(testResource("res-bad"), []string{"not-an-address"}, testActor(1), 0, "https://x.test/")
 	test.IsNotNil(t, err)
 
-	_, err = GrantAccess(testResource("res-bad"), []string{"  ", ""}, 1, 0, "https://x.test/")
+	_, err = GrantAccess(testResource("res-bad"), []string{"  ", ""}, testActor(1), 0, "https://x.test/")
 	test.IsEqual(t, err, ErrNoRecipients)
 
-	_, err = GrantAccess(Resource{Type: 99, Id: "x"}, []string{"a@b.com"}, 1, 0, "https://x.test/")
+	_, err = GrantAccess(Resource{Type: 99, Id: "x"}, []string{"a@b.com"}, testActor(1), 0, "https://x.test/")
 	test.IsNotNil(t, err)
 }
 
@@ -123,7 +150,7 @@ func TestValidateToken(t *testing.T) {
 	defer disableMail(t)
 	resource := testResource("res-validate")
 
-	_, err := GrantAccess(resource, []string{"carol@example.com"}, 1, 0, "https://x.test/")
+	_, err := GrantAccess(resource, []string{"carol@example.com"}, testActor(1), 0, "https://x.test/")
 	test.IsNil(t, err)
 	carol, _ := database.GetShareRecipientByEmail("carol@example.com")
 
@@ -174,7 +201,7 @@ func TestValidateTokenRejectsExpired(t *testing.T) {
 	enableMail(t)
 	defer disableMail(t)
 	resource := testResource("res-expired")
-	_, err := GrantAccess(resource, []string{"dan@example.com"}, 1, 0, "https://x.test/")
+	_, err := GrantAccess(resource, []string{"dan@example.com"}, testActor(1), 0, "https://x.test/")
 	test.IsNil(t, err)
 	dan, _ := database.GetShareRecipientByEmail("dan@example.com")
 
@@ -236,7 +263,7 @@ func TestResendDoesNotRevealWhoIsARecipient(t *testing.T) {
 	enableMail(t)
 	defer disableMail(t)
 	resource := testResource("res-oracle")
-	_, err := GrantAccess(resource, []string{"frank@example.com"}, 1, 0, "https://x.test/")
+	_, err := GrantAccess(resource, []string{"frank@example.com"}, testActor(1), 0, "https://x.test/")
 	test.IsNil(t, err)
 
 	unknown := ResendLink(resource, "stranger@example.com", "https://x.test/", "")
@@ -284,13 +311,33 @@ func TestResendFailedSendDoesNotStrandRecipient(t *testing.T) {
 	// The old link must still work: nothing was revoked.
 	_, err = ValidateToken(oldToken, resource.Type, resource.Id)
 	test.IsNil(t, err)
+
+	// The failure must not vanish silently: a genuine send failure on the
+	// public resend path is still audited, with the anonymous actor a resend
+	// always carries.
+	t.Run("mails a failure audit entry", func(t *testing.T) {
+		time.Sleep(500 * time.Millisecond)
+		entries, _ := logging.GetAuditEntriesSince(0, 1000)
+		found := false
+		for _, entry := range entries {
+			if entry.Action != "mail.share_link" || entry.FileId != resource.Id {
+				continue
+			}
+			found = true
+			test.IsEqual(t, entry.Outcome, logging.OutcomeFailure)
+			test.IsEqualBool(t, entry.Actor.Anonymous, true)
+			test.IsEqualBool(t, entry.Error != "", true)
+			test.IsEqualBool(t, strings.Contains(entry.Detail, "purpose=resend"), true)
+		}
+		test.IsEqualBool(t, found, true)
+	})
 }
 
 func TestConsumeDownloadHonoursPerRecipientAllowance(t *testing.T) {
 	enableMail(t)
 	defer disableMail(t)
 	resource := testResource("res-consume")
-	_, err := GrantAccess(resource, []string{"gail@example.com", "hank@example.com"}, 1, 2, "https://x.test/")
+	_, err := GrantAccess(resource, []string{"gail@example.com", "hank@example.com"}, testActor(1), 2, "https://x.test/")
 	test.IsNil(t, err)
 	gail, _ := database.GetShareRecipientByEmail("gail@example.com")
 	hank, _ := database.GetShareRecipientByEmail("hank@example.com")
@@ -492,7 +539,7 @@ func TestAccessGateEndToEnd(t *testing.T) {
 	resetCookieStoreForTesting()
 	resource := testResource("res-gate")
 
-	_, err := GrantAccess(resource, []string{"ivy@example.com", "jack@example.com"}, 1, 2, "https://x.test/")
+	_, err := GrantAccess(resource, []string{"ivy@example.com", "jack@example.com"}, testActor(1), 2, "https://x.test/")
 	test.IsNil(t, err)
 	ivy, _ := database.GetShareRecipientByEmail("ivy@example.com")
 	jack, _ := database.GetShareRecipientByEmail("jack@example.com")
@@ -531,7 +578,7 @@ func TestAccessGateEndToEnd(t *testing.T) {
 
 	// Revoking Ivy takes effect at once, without waiting for her link or her
 	// cookie to expire.
-	GrantAccess(resource, []string{"jack@example.com"}, 1, 2, "https://x.test/")
+	GrantAccess(resource, []string{"jack@example.com"}, testActor(1), 2, "https://x.test/")
 	_, err = ValidateToken(ivyToken, resource.Type, resource.Id)
 	test.IsEqual(t, err, ErrInvalidToken)
 	test.IsEqualBool(t, database.HasShareGrant(resource.Type, resource.Id, ivy.Id), false)
