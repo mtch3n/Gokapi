@@ -26,6 +26,11 @@ func dbToFileRequest(input []any) (models.FileRequest, error) {
 	// encryptRequestNameForSave/encryptNoteForSave and models.FileRequest.NameEncryptedRaw.
 	result.Name = encryption.DecryptFileName(result.NameEncryptedRaw)
 	result.Notes = encryption.DecryptFileName(result.NoteEncryptedRaw)
+	ids, err := models.DecodeCollaborators(result.CollaboratorsRaw)
+	if err != nil {
+		return models.FileRequest{}, err
+	}
+	result.SetCollaboratorIds(ids)
 	return result, nil
 }
 
@@ -75,6 +80,10 @@ func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
 	helper.Check(err)
 	request.NameEncryptedRaw = encryptedName
 	request.NoteEncryptedRaw = encryptedNote
+	// The struct flattener cannot write a slice, so the JSON text is what goes into the hash
+	// (see models.FileRequest.CollaboratorsRaw). Re-encoded from the ids rather than trusted, so
+	// a caller that edited Collaborators without SetCollaboratorIds still stores the right list.
+	request.CollaboratorsRaw = models.EncodeCollaborators(request.CollaboratorIds())
 	p.setHashMap(p.buildArgs(prefixFileRequests + request.Id).AddFlat(request))
 }
 
