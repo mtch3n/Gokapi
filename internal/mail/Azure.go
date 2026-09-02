@@ -108,9 +108,9 @@ type azureAddress struct {
 	DisplayName string `json:"displayName,omitempty"`
 }
 
-func (a *azureSender) Send(ctx context.Context, msg Message) error {
+func (a *azureSender) Send(ctx context.Context, msg Message) (Receipt, error) {
 	if err := msg.Validate(); err != nil {
-		return err
+		return Receipt{}, err
 	}
 
 	recipients := make([]azureAddress, 0, len(msg.To))
@@ -120,7 +120,7 @@ func (a *azureSender) Send(ctx context.Context, msg Message) error {
 		// otherwise be sent verbatim and rejected at delivery time.
 		parsed, err := netMailParse(recipient)
 		if err != nil {
-			return fmt.Errorf("mail: recipient %q is not a valid address: %w", recipient, err)
+			return Receipt{}, fmt.Errorf("mail: recipient %q is not a valid address: %w", recipient, err)
 		}
 		recipients = append(recipients, azureAddress{Address: parsed.Address, DisplayName: parsed.Name})
 	}
@@ -137,22 +137,22 @@ func (a *azureSender) Send(ctx context.Context, msg Message) error {
 		Headers:    map[string]string{"Auto-Submitted": "auto-generated"},
 	})
 	if err != nil {
-		return fmt.Errorf("mail: cannot encode the Azure request: %w", err)
+		return Receipt{}, fmt.Errorf("mail: cannot encode the Azure request: %w", err)
 	}
 
 	requestUrl := fmt.Sprintf("%s/emails:send?api-version=%s", a.endpoint, azureApiVersion)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestUrl, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("mail: cannot build the Azure request: %w", err)
+		return Receipt{}, fmt.Errorf("mail: cannot build the Azure request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	if err := a.sign(request, body, time.Now().UTC()); err != nil {
-		return err
+		return Receipt{}, err
 	}
 
 	response, err := a.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("mail: the Azure request failed: %w", err)
+		return Receipt{}, fmt.Errorf("mail: the Azure request failed: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 
@@ -161,11 +161,32 @@ func (a *azureSender) Send(ctx context.Context, msg Message) error {
 	// confirmed at this point, only acceptance. See the gap noted in the
 	// package documentation.
 	if response.StatusCode == http.StatusAccepted || response.StatusCode == http.StatusOK {
-		return nil
+		return Receipt{MessageId: operationIdFromLocation(response.Header.Get("Operation-Location"))}, nil
 	}
 	detail, _ := io.ReadAll(io.LimitReader(response.Body, azureMaxErrorBody))
-	return fmt.Errorf("mail: Azure rejected the message with status %s: %s",
+	return Receipt{}, fmt.Errorf("mail: Azure rejected the message with status %s: %s",
 		response.Status, strings.TrimSpace(string(detail)))
+}
+
+// operationIdFromLocation extracts the operation id from an Operation-Location
+// header, which names a status resource an operator can poll in the Azure
+// portal or API to check delivery. It is the last path segment of the URL;
+// an absent or malformed header yields an empty id rather than an error, since
+// this is a correlation aid, not something the send itself depends on.
+func operationIdFromLocation(location string) string {
+	if location == "" {
+		return ""
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return ""
+	}
+	trimmed := strings.TrimRight(parsed.Path, "/")
+	if trimmed == "" {
+		return ""
+	}
+	segments := strings.Split(trimmed, "/")
+	return segments[len(segments)-1]
 }
 
 // sign applies the HMAC-SHA256 scheme the Azure Communication Services data

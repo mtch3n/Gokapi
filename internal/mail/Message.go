@@ -19,9 +19,14 @@ import (
 // richest representation has to come last.
 //
 // now is injected so that tests can assert on a fixed Date header.
-func buildMime(from mail.Address, msg Message, now time.Time) ([]byte, error) {
+//
+// The Message-ID it generates is returned alongside the rendered document, so
+// a caller that hands the bytes to an SMTP server can still correlate the
+// send afterwards - the header could otherwise only be recovered by parsing
+// the document back out.
+func buildMime(from mail.Address, msg Message, now time.Time) ([]byte, string, error) {
 	if err := msg.Validate(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	var buf bytes.Buffer
@@ -31,7 +36,7 @@ func buildMime(from mail.Address, msg Message, now time.Time) ([]byte, error) {
 	writeHeader(&buf, "Date", now.Format(time.RFC1123Z))
 	messageId, err := generateMessageId(from.Address)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	writeHeader(&buf, "Message-ID", messageId)
 	writeHeader(&buf, "MIME-Version", "1.0")
@@ -45,14 +50,14 @@ func buildMime(from mail.Address, msg Message, now time.Time) ([]byte, error) {
 		writeHeader(&buf, "Content-Transfer-Encoding", "quoted-printable")
 		buf.WriteString("\r\n")
 		if err := writeQuotedPrintable(&buf, msg.Text); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return buf.Bytes(), nil
+		return buf.Bytes(), messageId, nil
 	}
 
 	boundary, err := generateBoundary()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	writeHeader(&buf, "Content-Type", fmt.Sprintf(`multipart/alternative; boundary="%s"`, boundary))
 	buf.WriteString("\r\n")
@@ -66,12 +71,12 @@ func buildMime(from mail.Address, msg Message, now time.Time) ([]byte, error) {
 		writeHeader(&buf, "Content-Transfer-Encoding", "quoted-printable")
 		buf.WriteString("\r\n")
 		if err := writeQuotedPrintable(&buf, part.body); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		buf.WriteString("\r\n")
 	}
 	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
-	return buf.Bytes(), nil
+	return buf.Bytes(), messageId, nil
 }
 
 func writeHeader(buf *bytes.Buffer, name, value string) {

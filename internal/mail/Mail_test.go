@@ -90,7 +90,7 @@ func TestMessageValidate(t *testing.T) {
 
 func TestBuildMimePlainText(t *testing.T) {
 	from := mail.Address{Name: "ExchangePoint", Address: "no-reply@example.com"}
-	rendered, err := buildMime(from, validMessage(), time.Now())
+	rendered, messageId, err := buildMime(from, validMessage(), time.Now())
 	test.IsNil(t, err)
 
 	body := string(rendered)
@@ -111,6 +111,11 @@ func TestBuildMimePlainText(t *testing.T) {
 	if !strings.Contains(body, "@example.com>") {
 		t.Errorf("Message-ID does not use the sender domain\ngot:\n%s", body)
 	}
+	// The returned id must be the one actually written into the header, or a
+	// caller correlating a Receipt against the sent document would be lied to.
+	if messageId == "" || !strings.Contains(body, "Message-ID: "+messageId) {
+		t.Errorf("returned Message-ID %q does not match the rendered header\ngot:\n%s", messageId, body)
+	}
 }
 
 func TestBuildMimeMultipart(t *testing.T) {
@@ -118,7 +123,7 @@ func TestBuildMimeMultipart(t *testing.T) {
 	msg := validMessage()
 	msg.Html = "<p>Sign in to collect it.</p>"
 
-	rendered, err := buildMime(from, msg, time.Now())
+	rendered, _, err := buildMime(from, msg, time.Now())
 	test.IsNil(t, err)
 	body := string(rendered)
 
@@ -139,7 +144,7 @@ func TestBuildMimeEncodesNonAsciiSubject(t *testing.T) {
 	msg := validMessage()
 	msg.Subject = "檔案已備妥"
 
-	rendered, err := buildMime(from, msg, time.Now())
+	rendered, _, err := buildMime(from, msg, time.Now())
 	test.IsNil(t, err)
 	body := string(rendered)
 
@@ -154,7 +159,7 @@ func TestBuildMimeEncodesNonAsciiSubject(t *testing.T) {
 
 func TestBuildMimeRejectsInvalidMessage(t *testing.T) {
 	from := mail.Address{Address: "no-reply@example.com"}
-	_, err := buildMime(from, Message{}, time.Now())
+	_, _, err := buildMime(from, Message{}, time.Now())
 	test.IsNotNil(t, err)
 }
 
@@ -339,15 +344,18 @@ func TestNewSelectsConnector(t *testing.T) {
 func TestDisabledSenderReportsNotConfigured(t *testing.T) {
 	sender, err := New(Config{})
 	test.IsNil(t, err)
-	test.IsEqual(t, sender.Send(context.Background(), validMessage()), ErrNotConfigured)
+	_, sendErr := sender.Send(context.Background(), validMessage())
+	test.IsEqual(t, sendErr, ErrNotConfigured)
 }
 
 func TestGetIsSafeBeforeInit(t *testing.T) {
 	ResetForTesting()
 	test.IsEqualString(t, Get().Name(), ProviderDisabled)
 	test.IsEqualBool(t, IsEnabled(), false)
-	test.IsEqual(t, Send(context.Background(), validMessage()), ErrNotConfigured)
-	test.IsEqual(t, SendTest(context.Background(), "a@b.com"), ErrNotConfigured)
+	_, sendErr := Send(context.Background(), validMessage())
+	test.IsEqual(t, sendErr, ErrNotConfigured)
+	_, testErr := SendTest(context.Background(), "a@b.com")
+	test.IsEqual(t, testErr, ErrNotConfigured)
 }
 
 func TestInitWithConfig(t *testing.T) {
@@ -357,7 +365,11 @@ func TestInitWithConfig(t *testing.T) {
 	test.IsNil(t, InitWithConfig(Config{Provider: ProviderLog, TimeoutSeconds: 20}))
 	test.IsEqualString(t, Get().Name(), ProviderLog)
 	test.IsEqualBool(t, IsEnabled(), true)
-	test.IsNil(t, Send(context.Background(), validMessage()))
+	receipt, err := Send(context.Background(), validMessage())
+	test.IsNil(t, err)
+	if receipt.MessageId == "" {
+		t.Error("the log connector should have returned a message id")
+	}
 
 	t.Run("a bad configuration leaves the previous sender in place", func(t *testing.T) {
 		test.IsNotNil(t, InitWithConfig(Config{Provider: "nonsense", TimeoutSeconds: 20}))
@@ -393,6 +405,11 @@ func TestAzureSendSignsAndPostsCorrectly(t *testing.T) {
 			contentHash:   r.Header.Get("x-ms-content-sha256"),
 			body:          body, host: r.Host,
 		}
+		// Azure names the status resource of an accepted send here; the
+		// operation id is the last path segment, and is what a Receipt
+		// carries so an operator can look the send up afterwards.
+		w.Header().Set("Operation-Location",
+			"https://demo.communication.azure.com/emails/operations/8ac1b7bc-1234-4567-89ab-0123456789ab?api-version="+azureApiVersion)
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
@@ -406,7 +423,12 @@ func TestAzureSendSignsAndPostsCorrectly(t *testing.T) {
 
 	msg := validMessage()
 	msg.Html = "<p>Sign in.</p>"
-	test.IsNil(t, sender.Send(context.Background(), msg))
+	receipt, err := sender.Send(context.Background(), msg)
+	test.IsNil(t, err)
+
+	t.Run("the receipt carries the Azure operation id", func(t *testing.T) {
+		test.IsEqualString(t, receipt.MessageId, "8ac1b7bc-1234-4567-89ab-0123456789ab")
+	})
 
 	test.IsEqualString(t, got.method, http.MethodPost)
 	test.IsEqualString(t, got.path, "/emails:send")
@@ -473,7 +495,7 @@ func TestAzureSendReportsServerError(t *testing.T) {
 	test.IsNil(t, err)
 	sender.(*azureSender).httpClient = server.Client()
 
-	err = sender.Send(context.Background(), validMessage())
+	_, err = sender.Send(context.Background(), validMessage())
 	test.IsNotNil(t, err)
 	if !strings.Contains(err.Error(), "bad signature") {
 		t.Errorf("the server's explanation must survive into the error, got: %v", err)
@@ -523,11 +545,18 @@ func TestAzureNormalisesRecipientAddress(t *testing.T) {
 
 	msg := validMessage()
 	msg.To = []string{"Alice Example <alice@example.com>"}
-	test.IsNil(t, azure.Send(context.Background(), msg))
+	receipt, err := azure.Send(context.Background(), msg)
+	test.IsNil(t, err)
 
 	test.IsEqualInt(t, len(captured.Recipients.To), 1)
 	test.IsEqualString(t, captured.Recipients.To[0].Address, "alice@example.com")
 	test.IsEqualString(t, captured.Recipients.To[0].DisplayName, "Alice Example")
+
+	// The test server above sends no Operation-Location header, so the
+	// receipt must not fabricate an id from nothing.
+	t.Run("an absent Operation-Location leaves the receipt empty", func(t *testing.T) {
+		test.IsEqualString(t, receipt.MessageId, "")
+	})
 }
 
 // The body now carries a bearer credential, so the development connector must
@@ -552,7 +581,8 @@ func TestLogConnectorDoesNotLogTheBody(t *testing.T) {
 	// so both forms must be proven not to leak.
 	msg.Text = "Open it here:\r\nhttps://x.test/s/abc#token=SUPER-SECRET-TOKEN\r\n" +
 		"Legacy link: https://x.test/s/abc?token=LEGACY-SECRET-TOKEN\r\n"
-	test.IsNil(t, sender.Send(context.Background(), msg))
+	_, err = sender.Send(context.Background(), msg)
+	test.IsNil(t, err)
 
 	logged := captured.String()
 	if strings.Contains(logged, "SUPER-SECRET-TOKEN") {
@@ -593,6 +623,7 @@ func TestAzureValidatesMessageBeforeSending(t *testing.T) {
 
 	bad := validMessage()
 	bad.Subject = "Injected\r\nBcc: attacker@example.com"
-	test.IsNotNil(t, sender.Send(context.Background(), bad))
+	_, err = sender.Send(context.Background(), bad)
+	test.IsNotNil(t, err)
 	test.IsEqualBool(t, called, false)
 }

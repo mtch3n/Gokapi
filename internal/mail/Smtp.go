@@ -35,10 +35,10 @@ func newSmtpSender(config Config) (Sender, error) {
 
 func (s *smtpSender) Name() string { return ProviderSmtp }
 
-func (s *smtpSender) Send(ctx context.Context, msg Message) error {
-	body, err := buildMime(s.from, msg, time.Now())
+func (s *smtpSender) Send(ctx context.Context, msg Message) (Receipt, error) {
+	body, messageId, err := buildMime(s.from, msg, time.Now())
 	if err != nil {
-		return err
+		return Receipt{}, err
 	}
 
 	// net/smtp predates context and offers no cancellation of its own. The
@@ -46,7 +46,7 @@ func (s *smtpSender) Send(ctx context.Context, msg Message) error {
 	// blocks, and the context is checked at the start so an already-cancelled
 	// caller does not open a socket at all.
 	if err := ctx.Err(); err != nil {
-		return err
+		return Receipt{}, err
 	}
 	deadline := time.Now().Add(s.timeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
@@ -55,37 +55,37 @@ func (s *smtpSender) Send(ctx context.Context, msg Message) error {
 
 	conn, err := s.dial(deadline)
 	if err != nil {
-		return err
+		return Receipt{}, err
 	}
 	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(deadline); err != nil {
-		return fmt.Errorf("mail: cannot set the connection deadline: %w", err)
+		return Receipt{}, fmt.Errorf("mail: cannot set the connection deadline: %w", err)
 	}
 
 	client, err := smtp.NewClient(conn, s.config.SmtpHost)
 	if err != nil {
-		return fmt.Errorf("mail: SMTP handshake with %s failed: %w", s.address, err)
+		return Receipt{}, fmt.Errorf("mail: SMTP handshake with %s failed: %w", s.address, err)
 	}
 	defer func() { _ = client.Close() }()
 
 	if s.config.NormalisedEncryption() == EncryptionStartTls {
 		ok, _ := client.Extension("STARTTLS")
 		if !ok {
-			return fmt.Errorf("mail: %s does not offer STARTTLS. Set GOKAPI_MAIL_SMTP_ENCRYPTION=tls for an implicit-TLS port such as 465, or =none with GOKAPI_MAIL_SMTP_ALLOW_INSECURE=true for a local test relay", s.address)
+			return Receipt{}, fmt.Errorf("mail: %s does not offer STARTTLS. Set GOKAPI_MAIL_SMTP_ENCRYPTION=tls for an implicit-TLS port such as 465, or =none with GOKAPI_MAIL_SMTP_ALLOW_INSECURE=true for a local test relay", s.address)
 		}
 		if err := client.StartTLS(s.tlsConfig()); err != nil {
-			return fmt.Errorf("mail: STARTTLS with %s failed: %w", s.address, err)
+			return Receipt{}, fmt.Errorf("mail: STARTTLS with %s failed: %w", s.address, err)
 		}
 	}
 
 	if s.config.SmtpUsername != "" {
 		if err := client.Auth(s.authMechanism(client)); err != nil {
-			return fmt.Errorf("mail: SMTP authentication as %s failed: %w", s.config.SmtpUsername, err)
+			return Receipt{}, fmt.Errorf("mail: SMTP authentication as %s failed: %w", s.config.SmtpUsername, err)
 		}
 	}
 
 	if err := client.Mail(s.from.Address); err != nil {
-		return fmt.Errorf("mail: MAIL FROM %s rejected: %w", s.from.Address, err)
+		return Receipt{}, fmt.Errorf("mail: MAIL FROM %s rejected: %w", s.from.Address, err)
 	}
 	for _, recipient := range msg.To {
 		// The envelope takes the bare address. Message.Validate accepts the
@@ -93,27 +93,27 @@ func (s *smtpSender) Send(ctx context.Context, msg Message) error {
 		// be handed to RCPT TO verbatim and rejected by the server.
 		parsed, err := mail.ParseAddress(recipient)
 		if err != nil {
-			return fmt.Errorf("mail: recipient %q is not a valid address: %w", recipient, err)
+			return Receipt{}, fmt.Errorf("mail: recipient %q is not a valid address: %w", recipient, err)
 		}
 		if err := client.Rcpt(parsed.Address); err != nil {
-			return fmt.Errorf("mail: RCPT TO %s rejected: %w", parsed.Address, err)
+			return Receipt{}, fmt.Errorf("mail: RCPT TO %s rejected: %w", parsed.Address, err)
 		}
 	}
 	writer, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("mail: DATA rejected: %w", err)
+		return Receipt{}, fmt.Errorf("mail: DATA rejected: %w", err)
 	}
 	if _, err := writer.Write(body); err != nil {
-		return fmt.Errorf("mail: writing the message body failed: %w", err)
+		return Receipt{}, fmt.Errorf("mail: writing the message body failed: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("mail: the server rejected the message: %w", err)
+		return Receipt{}, fmt.Errorf("mail: the server rejected the message: %w", err)
 	}
 	// The server accepted the message at this point. A failure to close the
 	// conversation cleanly is not a delivery failure, and reporting one would
 	// make a retrying caller send the message twice.
 	_ = client.Quit()
-	return nil
+	return Receipt{MessageId: messageId}, nil
 }
 
 func (s *smtpSender) dial(deadline time.Time) (net.Conn, error) {

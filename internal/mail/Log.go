@@ -2,6 +2,8 @@ package mail
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"time"
@@ -26,13 +28,28 @@ func newLogSender(config Config) Sender {
 
 func (l *logSender) Name() string { return ProviderLog }
 
-func (l *logSender) Send(_ context.Context, msg Message) error {
+func (l *logSender) Send(_ context.Context, msg Message) (Receipt, error) {
 	if err := msg.Validate(); err != nil {
-		return err
+		return Receipt{}, err
 	}
-	log.Printf("mail(log connector): at=%s to=%v subject=%q bodyBytes=%d (body withheld, it may contain an access link)",
-		time.Now().Format(time.RFC3339), msg.To, msg.Subject, len(msg.Text))
-	return nil
+	messageId, err := generateLogMessageId()
+	if err != nil {
+		return Receipt{}, err
+	}
+	log.Printf("mail(log connector): id=%s at=%s to=%v subject=%q bodyBytes=%d (body withheld, it may contain an access link)",
+		messageId, time.Now().Format(time.RFC3339), msg.To, msg.Subject, len(msg.Text))
+	return Receipt{MessageId: messageId}, nil
+}
+
+// generateLogMessageId gives the log connector something to put in a
+// Receipt, so a development flow exercises the same correlation-id path a
+// real connector would use.
+func generateLogMessageId() (string, error) {
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("mail: cannot generate a log message id: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
 }
 
 // Describe renders a one-line summary of a connector for the status view.

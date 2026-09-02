@@ -162,7 +162,8 @@ func TestSmtpSendDelivers(t *testing.T) {
 
 	msg := validMessage()
 	msg.To = []string{"one@example.com", "two@example.com"}
-	test.IsNil(t, sender.Send(context.Background(), msg))
+	receipt, err := sender.Send(context.Background(), msg)
+	test.IsNil(t, err)
 
 	from, to, data := server.captured()
 	test.IsEqualString(t, from, "no-reply@example.com")
@@ -179,6 +180,12 @@ func TestSmtpSendDelivers(t *testing.T) {
 			t.Errorf("delivered message is missing %q\ngot:\n%s", expected, data)
 		}
 	}
+
+	// The receipt must carry the Message-ID actually written into the
+	// delivered document, not merely be non-empty.
+	if receipt.MessageId == "" || !strings.Contains(data, "Message-ID: "+receipt.MessageId) {
+		t.Errorf("receipt message id %q does not match the delivered document\ngot:\n%s", receipt.MessageId, data)
+	}
 }
 
 // STARTTLS is the default, so a server that does not offer it must produce an
@@ -194,7 +201,7 @@ func TestSmtpRefusesToDowngradeFromStartTls(t *testing.T) {
 	})
 	test.IsNil(t, err)
 
-	err = sender.Send(context.Background(), validMessage())
+	_, err = sender.Send(context.Background(), validMessage())
 	test.IsNotNil(t, err)
 	if !strings.Contains(err.Error(), "STARTTLS") {
 		t.Errorf("the error must name STARTTLS as the problem, got: %v", err)
@@ -212,7 +219,7 @@ func TestSmtpValidatesMessageBeforeConnecting(t *testing.T) {
 
 	bad := validMessage()
 	bad.To = []string{"not-an-address"}
-	err = sender.Send(context.Background(), bad)
+	_, err = sender.Send(context.Background(), bad)
 	test.IsNotNil(t, err)
 	if !strings.Contains(err.Error(), "not a valid address") {
 		t.Errorf("expected validation to fail before dialling, got: %v", err)
@@ -229,7 +236,8 @@ func TestSmtpHonoursCancelledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	test.IsEqual(t, sender.Send(ctx, validMessage()), context.Canceled)
+	_, err = sender.Send(ctx, validMessage())
+	test.IsEqual(t, err, context.Canceled)
 }
 
 // AUTH LOGIN must be refused without TLS: the credential is base64, which is

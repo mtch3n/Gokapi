@@ -37,9 +37,17 @@ type Message struct {
 // by multiple goroutines.
 type Sender interface {
 	// Send delivers the message, honouring cancellation through ctx.
-	Send(ctx context.Context, msg Message) error
+	Send(ctx context.Context, msg Message) (Receipt, error)
 	// Name identifies the connector for logs and the status view.
 	Name() string
+}
+
+// Receipt carries whatever delivery correlation id the connector produced, so
+// a caller that audits the send can later take it to the connector's own
+// portal or log and ask "was this delivered". MessageId is empty when the
+// connector offers nothing to correlate with.
+type Receipt struct {
+	MessageId string
 }
 
 // Validate reports whether the message can be sent. It rejects header
@@ -108,4 +116,6 @@ type disabledSender struct{}
 
 func (disabledSender) Name() string { return ProviderDisabled }
 
-func (disabledSender) Send(_ context.Context, _ Message) error { return ErrNotConfigured }
+func (disabledSender) Send(_ context.Context, _ Message) (Receipt, error) {
+	return Receipt{}, ErrNotConfigured
+}

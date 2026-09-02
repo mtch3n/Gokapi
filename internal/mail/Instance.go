@@ -66,7 +66,7 @@ func IsEnabled() bool {
 
 // Send delivers a message through the configured sender, applying the
 // configured timeout when the caller supplies no deadline of its own.
-func Send(ctx context.Context, msg Message) error {
+func Send(ctx context.Context, msg Message) (Receipt, error) {
 	sender := Get()
 	config := GetConfig()
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline && config.TimeoutSeconds > 0 {
@@ -81,10 +81,10 @@ func Send(ctx context.Context, msg Message) error {
 // configuration works without waiting for a real event to fire. This is the
 // only way to distinguish "configured correctly" from "configured, untested"
 // before the first real notification goes out.
-func SendTest(ctx context.Context, recipient string) error {
+func SendTest(ctx context.Context, recipient string) (Receipt, error) {
 	sender := Get()
 	if sender.Name() == ProviderDisabled {
-		return ErrNotConfigured
+		return Receipt{}, ErrNotConfigured
 	}
 	return Send(ctx, Message{
 		To:      []string{recipient},
