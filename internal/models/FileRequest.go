@@ -16,9 +16,9 @@ type FileRequest struct {
 	MaxSize         int      `json:"maxsize" redis:"maxsize"`           // The maximum file size allowed in MB
 	Expiry          int64    `json:"expiry" redis:"expiry"`             // The expiry time of the file request
 	CreationDate    int64    `json:"creationdate" redis:"creationdate"` // The timestamp of the file request creation
-	Name            string   `json:"name" redis:"name"`                 // The given name for the file request
+	Name            string   `json:"name" redis:"-"`                    // The given name for the file request, held in plaintext only in memory. Will be NameUnavailable while the instance is sealed
 	ApiKey          string   `json:"apikey" redis:"apikey"`             // The API key related to the file request
-	Notes           string   `json:"notes" redis:"notes"`               // The custom note that was set for this file request
+	Notes           string   `json:"notes" redis:"-"`                   // The custom note that was set for this file request, held in plaintext only in memory. Empty while the instance is sealed
 	Closed          bool     `json:"closed" redis:"closed"`             // True if the request was marked complete and no longer accepts uploads
 	UploadedFiles   int      `json:"uploadedfiles" redis:"-"`           // Contains the number of uploaded files for this request. Needs to be calculated with Populate()
 	CombinedMaxSize int      `json:"combinedmaxsize" redis:"-"`         // The lesser of MaxSize and the server's max upload size. Needs to be calculated with Populate()
@@ -27,6 +27,15 @@ type FileRequest struct {
 	TotalFileSize   int64    `json:"totalfilesize" redis:"-"`           // Contains the file size of all uploaded files. Needs to be calculated with Populate()
 	FileIdList      []string `json:"fileidlist" redis:"-"`              // Contains an array of the IDs of all uploaded files. Needs to be calculated with Populate()
 	Files           []File   `json:"-" redis:"-"`                       // Contains an array of the IDs of all uploaded files. Needs to be calculated with Populate()
+	// NameEncryptedRaw carries the exact bytes stored for the name, mirroring
+	// models.File.NameEncryptedRaw - see that field's comment for why this exists. For Redis this
+	// also doubles as the wire field: the "NameEncrypted" tag is what SaveFileRequest writes into
+	// the hash.
+	NameEncryptedRaw []byte `json:"-" redis:"NameEncrypted"`
+	// NoteEncryptedRaw is the same carry-through for Notes. Unlike Name, an empty note is a normal
+	// value (see encryptNoteForSave), so this exists purely for the save-back-unchanged path, not
+	// for distinguishing "empty" from "sealed".
+	NoteEncryptedRaw []byte `json:"-" redis:"NoteEncrypted"`
 }
 
 // Populate inserts the number of uploaded files and the last upload date
@@ -87,6 +96,18 @@ func (f *FileRequest) IsUnlimitedTime() bool {
 // IsExpired returns true if the file request has expired
 func (f *FileRequest) IsExpired() bool {
 	return !f.IsUnlimitedTime() && time.Now().Unix() > f.Expiry
+}
+
+// DisplayName returns Name, or NameUnavailable if the name could not be decrypted (see
+// models.NameUnavailable). Mirrors models.FileBundle.DisplayName - see that comment for why Name
+// itself is left untouched. Notes has no equivalent: an empty note is a normal value, not a sign
+// of a sealed instance (see the Note handling in the sqlite/postgres/redis providers), so it is
+// rendered as-is everywhere.
+func (f *FileRequest) DisplayName() string {
+	if f.Name == "" {
+		return NameUnavailable
+	}
+	return f.Name
 }
 
 // HasRestrictions returns true if the file request has any restrictions e.g. size or time limit

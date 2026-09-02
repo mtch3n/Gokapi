@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 22
+const DatabaseSchemeVersion = 23
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -262,6 +262,25 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			helper.Check(err)
 		}
 	}
+	// Encrypted folder and file request names, and file request notes - the same class of leak
+	// FileMetaData.Name was fixed for at v22, missed for these three columns at the time. Same
+	// reasoning as the v22 step: the columns are only added here, the plaintext columns are read,
+	// re-encrypted into them and dropped by MigratePlaintextFileNames, which cannot run from this
+	// ladder because Upgrade executes at boot, before an Input-level instance has been unsealed.
+	if currentDbVersion < 23 {
+		if !p.columnExists("FileBundles", "NameEncrypted") {
+			err := p.rawSqlite(`ALTER TABLE FileBundles ADD COLUMN "NameEncrypted" BLOB;`)
+			helper.Check(err)
+		}
+		if !p.columnExists("UploadRequests", "NameEncrypted") {
+			err := p.rawSqlite(`ALTER TABLE UploadRequests ADD COLUMN "NameEncrypted" BLOB;`)
+			helper.Check(err)
+		}
+		if !p.columnExists("UploadRequests", "NoteEncrypted") {
+			err := p.rawSqlite(`ALTER TABLE UploadRequests ADD COLUMN "NoteEncrypted" BLOB;`)
+			helper.Check(err)
+		}
+	}
 }
 
 // tableExists returns true if the given table is present. Used to make a
@@ -437,14 +456,14 @@ func (p DatabaseProvider) createNewDatabase() error {
 		);
 		CREATE TABLE "UploadRequests" (
 			"id"	TEXT NOT NULL UNIQUE,
-			"name"	TEXT,
+			"NameEncrypted"	BLOB,
 			"userid"	INTEGER NOT NULL,
 			"expiry"	INTEGER NOT NULL,
 			"maxFiles"	INTEGER NOT NULL,
 			"maxSize"	INTEGER NOT NULL,
 			"creation"	INTEGER NOT NULL,
 			"apiKey"	TEXT NOT NULL UNIQUE,
-			"note"	TEXT NOT NULL,
+			"NoteEncrypted"	BLOB,
 			"closed"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("id")
 		);
@@ -489,7 +508,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 		CREATE INDEX "idx_sharelogintokens_recipient" ON "ShareLoginTokens" ("recipientid");
 				CREATE TABLE "FileBundles" (
 			"id"	TEXT NOT NULL UNIQUE,
-			"name"	TEXT NOT NULL,
+			"NameEncrypted"	BLOB,
 			"userid"	INTEGER NOT NULL,
 			"creationdate"	INTEGER NOT NULL,
 			"EncryptedSharePassword"	BLOB,

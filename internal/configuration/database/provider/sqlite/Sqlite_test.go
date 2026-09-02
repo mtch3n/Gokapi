@@ -836,3 +836,193 @@ func TestMigratePlaintextFileNames(t *testing.T) {
 
 	test.IsEqualInt(t, instance.MigratePlaintextFileNames(), 0)
 }
+
+// TestFolderNameNotStoredInPlaintext mirrors TestFileNameNotStoredInPlaintext for FileBundles
+// (folders): a folder name is auto-derived from a member filename ("server.pem +2 more"), so it
+// leaks a filename directly if it is ever readable in the raw database file.
+func TestFolderNameNotStoredInPlaintext(t *testing.T) {
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+
+	const secretName = "server.pem +2 more"
+	dbPath := "./test/newfolder/gokapi_bundle_plaintext.sqlite"
+	instance, err := New(models.DbConnection{HostUrl: dbPath})
+	test.IsNil(t, err)
+	instance.SaveFileBundle(models.FileBundle{Id: "plaintextBundleTest", Name: secretName, UserId: 1, CreationDate: time.Now().Unix()})
+
+	retrieved, ok := instance.GetFileBundle("plaintextBundleTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, retrieved.Name, secretName)
+	instance.Close()
+
+	rawDatabase, err := os.ReadFile(dbPath)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, bytes.Contains(rawDatabase, []byte(secretName)), false)
+}
+
+// TestRequestNameAndNoteNotStoredInPlaintext mirrors TestFileNameNotStoredInPlaintext for
+// UploadRequests: both the request name and the free-text note the owner typed must not be
+// readable in the raw database file.
+func TestRequestNameAndNoteNotStoredInPlaintext(t *testing.T) {
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+
+	const secretName = "Board minutes upload"
+	const secretNote = "Please redact page 4 before uploading, contains SSNs"
+	dbPath := "./test/newfolder/gokapi_request_plaintext.sqlite"
+	instance, err := New(models.DbConnection{HostUrl: dbPath})
+	test.IsNil(t, err)
+	instance.SaveFileRequest(models.FileRequest{Id: "plaintextRequestTest", Name: secretName, Notes: secretNote,
+		UserId: 1, ApiKey: "plaintextRequestTestKey", CreationDate: time.Now().Unix()})
+
+	retrieved, ok := instance.GetFileRequest("plaintextRequestTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, retrieved.Name, secretName)
+	test.IsEqualString(t, retrieved.Notes, secretNote)
+	instance.Close()
+
+	rawDatabase, err := os.ReadFile(dbPath)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, bytes.Contains(rawDatabase, []byte(secretName)), false)
+	test.IsEqualBool(t, bytes.Contains(rawDatabase, []byte(secretNote)), false)
+}
+
+// TestMigratePlaintextBundleAndRequestNames covers the upgrade path for FileBundles and
+// UploadRequests rows written before these columns were encrypted, mirroring
+// TestMigratePlaintextFileNames. Name and note are migrated together in one
+// MigratePlaintextFileNames call, which reports their combined count (see LogFileNameMigration).
+// Re-running it must be a no-op, because it is called on every unseal rather than once.
+func TestMigratePlaintextBundleAndRequestNames(t *testing.T) {
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+
+	const legacyBundleName = "pre-migration-folder"
+	const legacyRequestName = "pre-migration-request"
+	const legacyRequestNote = "pre-migration-note"
+
+	instance, err := New(models.DbConnection{HostUrl: "./test/newfolder/gokapi_migrate_bundle_request.sqlite"})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	// Recreate the pre-v23 shape: plaintext name/note columns, populated, with the *Encrypted
+	// columns unset - the same shape TestMigratePlaintextFileNames recreates for FileMetaData.
+	test.IsNil(t, instance.rawSqlite(`ALTER TABLE FileBundles ADD COLUMN "name" TEXT NOT NULL DEFAULT ''`))
+	test.IsNil(t, instance.rawSqlite(`ALTER TABLE UploadRequests ADD COLUMN "name" TEXT NOT NULL DEFAULT ''`))
+	test.IsNil(t, instance.rawSqlite(`ALTER TABLE UploadRequests ADD COLUMN "note" TEXT NOT NULL DEFAULT ''`))
+
+	instance.SaveFileBundle(models.FileBundle{Id: "legacyBundle", UserId: 1, CreationDate: time.Now().Unix()})
+	_, err = instance.sqliteDb.Exec(`UPDATE FileBundles SET name = ?, NameEncrypted = NULL WHERE id = ?`,
+		legacyBundleName, "legacyBundle")
+	test.IsNil(t, err)
+
+	instance.SaveFileRequest(models.FileRequest{Id: "legacyRequest", UserId: 1, ApiKey: "legacyRequestKey", CreationDate: time.Now().Unix()})
+	_, err = instance.sqliteDb.Exec(`UPDATE UploadRequests SET name = ?, note = ?, NameEncrypted = NULL, NoteEncrypted = NULL WHERE id = ?`,
+		legacyRequestName, legacyRequestNote, "legacyRequest")
+	test.IsNil(t, err)
+
+	// One bundle name, one request name and one request note - three plaintext values in total.
+	test.IsEqualInt(t, instance.MigratePlaintextFileNames(), 3)
+	test.IsEqualBool(t, instance.columnExists("FileBundles", "name"), false)
+	test.IsEqualBool(t, instance.columnExists("UploadRequests", "name"), false)
+	test.IsEqualBool(t, instance.columnExists("UploadRequests", "note"), false)
+
+	migratedBundle, ok := instance.GetFileBundle("legacyBundle")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, migratedBundle.Name, legacyBundleName)
+
+	migratedRequest, ok := instance.GetFileRequest("legacyRequest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, migratedRequest.Name, legacyRequestName)
+	test.IsEqualString(t, migratedRequest.Notes, legacyRequestNote)
+
+	test.IsEqualInt(t, instance.MigratePlaintextFileNames(), 0)
+}
+
+// TestClearingNoteActuallyClears guards the Note write path against the bug the "empty means
+// sealed" heuristic (correct for Name, see encryptRequestNameForSave) would reintroduce if reused
+// for Note: an empty note is a normal value an owner can set by clearing a note they previously
+// typed, and must actually overwrite the stored ciphertext rather than being mistaken for "this
+// FileRequest was read back while sealed, keep what's stored".
+func TestClearingNoteActuallyClears(t *testing.T) {
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+
+	instance, err := New(models.DbConnection{HostUrl: "./test/newfolder/gokapi_clear_note.sqlite"})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	request := models.FileRequest{Id: "noteClearTest", UserId: 1, ApiKey: "noteClearTestKey",
+		CreationDate: time.Now().Unix(), Notes: "Please double-check the invoice total"}
+	instance.SaveFileRequest(request)
+
+	saved, ok := instance.GetFileRequest("noteClearTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, saved.Notes, "Please double-check the invoice total")
+
+	// The owner clears the note. saved.NoteEncryptedRaw still carries the old encrypted bytes (see
+	// models.FileRequest.NoteEncryptedRaw) - if encryptNoteForSave used the same heuristic as
+	// encryptRequestNameForSave, it would write those old bytes back verbatim instead of an
+	// encrypted empty string, and the note would silently fail to clear.
+	saved.Notes = ""
+	instance.SaveFileRequest(saved)
+
+	cleared, ok := instance.GetFileRequest("noteClearTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, cleared.Notes, "")
+}
+
+// TestSealedReadRendersPlaceholder covers the read side of the same class of bug
+// TestFileNameNotStoredInPlaintext's write side guards: a bundle or request name that cannot be
+// decrypted (the instance is sealed) must render models.NameUnavailable rather than an empty
+// string, and reading it must not panic. Notes has no placeholder convention - an empty note
+// while sealed is indistinguishable from, and rendered the same as, a legitimately empty one.
+func TestSealedReadRendersPlaceholder(t *testing.T) {
+	key, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: key}})
+
+	dbPath := "./test/newfolder/gokapi_sealed_read.sqlite"
+	instance, err := New(models.DbConnection{HostUrl: dbPath})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	instance.SaveFileBundle(models.FileBundle{Id: "sealedBundleTest", Name: "Quarterly reports",
+		UserId: 1, CreationDate: time.Now().Unix()})
+	instance.SaveFileRequest(models.FileRequest{Id: "sealedRequestTest", Name: "Vendor invoices", Notes: "please zip",
+		UserId: 1, ApiKey: "sealedRequestTestKey", CreationDate: time.Now().Unix()})
+
+	// Seal the instance: FullEncryptionInput, recorded but never unsealed.
+	const checksumSalt = "sealed-read-test-checksum-salt"
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:        encryption.FullEncryptionInput,
+		Salt:         "sealed-read-test-salt",
+		ChecksumSalt: checksumSalt,
+		Checksum:     encryption.PasswordChecksum("irrelevant-password", checksumSalt),
+	}})
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+	test.IsEqualBool(t, encryption.IsSealed(), true)
+
+	bundle, ok := instance.GetFileBundle("sealedBundleTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, bundle.Name, "")
+	test.IsEqualString(t, bundle.DisplayName(), models.NameUnavailable)
+
+	request, ok := instance.GetFileRequest("sealedRequestTest")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, request.Name, "")
+	test.IsEqualString(t, request.DisplayName(), models.NameUnavailable)
+	test.IsEqualString(t, request.Notes, "")
+}

@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 22
+const DatabaseSchemeVersion = 23
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -222,6 +222,17 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	// and therefore before a master key exists to encrypt with.
 	if currentDbVersion < 22 {
 		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS NameEncrypted BYTEA;`)
+		helper.Check(err)
+	}
+	// Encrypted folder and file request names, and file request notes - the same class of leak
+	// FileMetaData.Name was fixed for at v22, missed for these three columns at the time. The
+	// columns are only added here; the plaintext columns are read, re-encrypted into them and
+	// dropped by MigratePlaintextFileNames, which cannot run from this ladder for the same reason
+	// as the v22 step above.
+	if currentDbVersion < 23 {
+		_, err := p.exec(`ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS NameEncrypted BYTEA;
+		ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS NameEncrypted BYTEA;
+		ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS NoteEncrypted BYTEA;`)
 		helper.Check(err)
 	}
 }
@@ -373,14 +384,14 @@ func (p DatabaseProvider) createNewDatabase() error {
 		);
 		CREATE TABLE IF NOT EXISTS UploadRequests (
 			Id	TEXT NOT NULL UNIQUE,
-			Name	TEXT,
+			NameEncrypted	BYTEA,
 			UserId	INTEGER NOT NULL,
 			Expiry	BIGINT NOT NULL,
 			MaxFiles	INTEGER NOT NULL,
 			MaxSize	INTEGER NOT NULL,
 			Creation	BIGINT NOT NULL,
 			ApiKey	TEXT NOT NULL UNIQUE,
-			Note	TEXT NOT NULL,
+			NoteEncrypted	BYTEA,
 			Closed	BOOLEAN NOT NULL DEFAULT FALSE,
 			PRIMARY KEY(Id)
 		);
@@ -428,7 +439,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 		CREATE INDEX IF NOT EXISTS idx_sharelogintokens_recipient ON ShareLoginTokens (recipientid);
 				CREATE TABLE IF NOT EXISTS FileBundles (
 			id	TEXT NOT NULL UNIQUE,
-			name	TEXT NOT NULL,
+			NameEncrypted	BYTEA,
 			userid	INTEGER NOT NULL,
 			creationdate	BIGINT NOT NULL,
 			EncryptedSharePassword	BYTEA,

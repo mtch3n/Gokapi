@@ -739,6 +739,15 @@ func apiFolderCreate(w http.ResponseWriter, r requestParser, user models.User, _
 		return
 	}
 
+	// filebundle.Create saves the bundle straight through to SaveFileBundle, which needs the
+	// master key to encrypt the name (see encryptBundleNameForSave). Checked here rather than
+	// left to fail inside it: an ErrSealed there would reach helper.Check and panic the request
+	// instead of answering with a clean refusal, the same way ServeFile refuses a sealed instance.
+	if encryption.IsSealed() {
+		sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, "Instance is sealed")
+		return
+	}
+
 	bundle := filebundle.Create(request.Name, user.Id)
 	logging.LogFolderCreate(bundle, user)
 
@@ -769,6 +778,11 @@ func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ m
 	for _, bundle := range allBundles {
 		if bundle.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
 			_, totalSize, memberCount := bundle.Populate(allFiles)
+			// bundle.Name is empty when it could not be decrypted (see models.FileBundle.Name),
+			// which happens while the instance is sealed. Rendered as the placeholder rather than
+			// left blank; the underlying bundle is left untouched, only this local copy going to
+			// JSON is changed.
+			bundle.Name = bundle.DisplayName()
 			result = append(result, BundleWithMetadata{
 				FileBundle:     bundle,
 				MemberCount:    memberCount,
@@ -1769,7 +1783,7 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
 			return shareaccess.Resource{}, false
 		}
-		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.Name}, true
+		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.DisplayName()}, true
 	case models.ShareResourceFileRequest:
 		fileRequest, found := database.GetFileRequest(resourceId)
 		if !found || (fileRequest.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
@@ -1781,7 +1795,7 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 			return shareaccess.Resource{}, false
 		}
 		return shareaccess.Resource{
-			Type: resourceType, Id: resourceId, Name: fileRequest.Name,
+			Type: resourceType, Id: resourceId, Name: fileRequest.DisplayName(),
 			ExpiresAt: fileRequest.Expiry,
 		}, true
 	default:
@@ -2095,6 +2109,14 @@ func apiURequestSave(w http.ResponseWriter, r requestParser, user models.User, _
 	if !ok {
 		panic("invalid parameter passed")
 	}
+	// database.SaveFileRequest needs the master key to encrypt the name and note (see
+	// encryptRequestNameForSave/encryptNoteForSave). Checked here rather than left to fail inside
+	// it: an ErrSealed there would reach helper.Check and panic the request instead of answering
+	// with a clean refusal, the same way ServeFile refuses a sealed instance.
+	if encryption.IsSealed() {
+		sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, "Instance is sealed")
+		return
+	}
 	uploadRequest := models.FileRequest{}
 	isNewRequest := request.Id == ""
 
@@ -2196,6 +2218,10 @@ func apiUploadRequestList(w http.ResponseWriter, _ requestParser, user models.Us
 	userRequests := make([]models.FileRequest, 0)
 	for _, request := range filerequest.GetAll() {
 		if request.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
+			// request.Name is empty when it could not be decrypted (see models.FileRequest.Name),
+			// which happens while the instance is sealed. Rendered as the placeholder rather than
+			// left blank; Notes is left as-is, since an empty note is a normal value there.
+			request.Name = request.DisplayName()
 			userRequests = append(userRequests, request)
 		}
 	}
@@ -2219,6 +2245,7 @@ func apiUploadRequestListSingle(w http.ResponseWriter, r requestParser, user mod
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to show this upload request")
 		return
 	}
+	uploadRequest.Name = uploadRequest.DisplayName()
 	result, err := json.Marshal(uploadRequest)
 	helper.Check(err)
 	_, _ = w.Write(result)

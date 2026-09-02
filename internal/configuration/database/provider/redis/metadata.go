@@ -160,17 +160,28 @@ func (p DatabaseProvider) GetDownloadsRemaining(id string) int {
 	return file.DownloadsRemaining
 }
 
-// MigratePlaintextFileNames re-encrypts every file name still stored in the plaintext Name hash
-// field and then removes that field, reporting how many files it converted. It is a separate step
-// rather than part of Upgrade because encrypting needs the master key, which an Input-level
-// instance does not have until an administrator unseals it - long after Upgrade has run at boot.
+// MigratePlaintextFileNames re-encrypts every file name, folder name, request name and request
+// note still stored in a plaintext hash field, across the fmeta:, fbn: and frq: prefixes, and
+// removes each field once converted. Returns the total number of values migrated across all
+// three - see LogFileNameMigration, which reports this as one count. It is a separate step rather
+// than part of Upgrade because encrypting needs the master key, which an Input-level instance does
+// not have until an administrator unseals it - long after Upgrade has run at boot.
 //
 // Unlike the SQL providers this is not driven by the scheme version, because Redis has no schema
-// to version: a hash written before file names were encrypted is distinguishable from a current
-// one by carrying a Name field at all, which is the condition used here. Doing nothing and
+// to version: a hash written before a value was encrypted is distinguishable from a current one by
+// carrying its plaintext field at all, which is the condition used here. Doing nothing and
 // reporting 0 once no hash has one is the normal steady state, so this is safe to call on every
 // unseal, and an interrupted run resumes on the next call.
 func (p DatabaseProvider) MigratePlaintextFileNames() int {
+	migrated := p.migrateFileMetaDataNames()
+	migrated += p.migrateFileBundleNames()
+	migrated += p.migrateFileRequestNamesAndNotes()
+	return migrated
+}
+
+// migrateFileMetaDataNames is MigratePlaintextFileNames' original, file-specific body - see that
+// function's comment for the full reasoning.
+func (p DatabaseProvider) migrateFileMetaDataNames() int {
 	migrated := 0
 	for key, hash := range p.getAllHashesWithPrefix(prefixMetaData) {
 		plaintextName, ok := hashFieldString(hash, "Name")

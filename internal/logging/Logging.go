@@ -238,11 +238,12 @@ func LogStartup() {
 	createLogEntry(categoryInfo, "Gokapi started", false)
 }
 
-// LogFileNameMigration adds a log entry recording how many file names were converted from the
-// plaintext storage used before file names were encrypted. Blocking call, as it runs once during
-// startup or unsealing and the count is worth having on disk before anything else happens.
+// LogFileNameMigration adds a log entry recording how many file names, folder names, request
+// names and request notes were converted from the plaintext storage used before they were
+// encrypted. Blocking call, as it runs once during startup or unsealing and the count is worth
+// having on disk before anything else happens.
 func LogFileNameMigration(count int) {
-	createLogEntry(categoryConfig, fmt.Sprintf("Encrypted %d file name(s) that were stored in plaintext", count), true)
+	createLogEntry(categoryConfig, fmt.Sprintf("Encrypted %d name(s)/note(s) that were stored in plaintext", count), true)
 }
 
 // LogShutdown adds a log entry to indicate that Gokapi is shutting down. Blocking call
@@ -476,7 +477,7 @@ func LogUpload(file models.File, user models.User, fr models.FileRequest, r *htt
 	}
 	action := "upload"
 	if fr.Id != "" {
-		createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded to file request %s (%s), owned by %s (user #%d) ", file.Id, ip, fr.Id, fr.Name, user.Name, user.Id), false)
+		createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded to file request %s, owned by %s (user #%d) ", file.Id, ip, fr.Id, user.Name, user.Id), false)
 		action = "upload.filerequest"
 	} else {
 		createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded by %s (user #%d)", file.Id, ip, user.Name, user.Id), false)
@@ -508,7 +509,7 @@ func LogEdit(file models.File, user models.User) {
 
 // LogCreateFileRequest adds a log entry when a file request was added. Non-Blocking
 func LogCreateFileRequest(fr models.FileRequest, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) created by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("File request %s created by %s (user #%d)", fr.Id, user.Name, user.Id), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category:  categoryEdit,
 		Action:    "filerequest.created",
@@ -520,7 +521,7 @@ func LogCreateFileRequest(fr models.FileRequest, user models.User) {
 
 // LogEditFileRequest adds a log entry when a file request was edited. Non-Blocking
 func LogEditFileRequest(fr models.FileRequest, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) created by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("File request %s created by %s (user #%d)", fr.Id, user.Name, user.Id), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category:  categoryEdit,
 		Action:    "filerequest.edited",
@@ -538,10 +539,10 @@ func LogEditFileRequest(fr models.FileRequest, user models.User) {
 func LogCloseFileRequest(fr models.FileRequest, user models.User, byRecipient bool) {
 	action := "filerequest.closed"
 	if byRecipient {
-		createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) marked complete by a link holder, owned by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+		createLogEntry(categoryEdit, fmt.Sprintf("File request %s marked complete by a link holder, owned by %s (user #%d)", fr.Id, user.Name, user.Id), false)
 		action = "filerequest.closed.recipient"
 	} else {
-		createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) marked complete by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+		createLogEntry(categoryEdit, fmt.Sprintf("File request %s marked complete by %s (user #%d)", fr.Id, user.Name, user.Id), false)
 	}
 	appendAuditEntryAsync(AuditEntry{
 		Category:  categoryEdit,
@@ -554,7 +555,7 @@ func LogCloseFileRequest(fr models.FileRequest, user models.User, byRecipient bo
 
 // LogDeleteFileRequest adds a log entry when a file request was deleted. Non-Blocking
 func LogDeleteFileRequest(fr models.FileRequest, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("File request %s (%s) and associated files deleted by %s (user #%d)", fr.Id, fr.Name, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("File request %s and associated files deleted by %s (user #%d)", fr.Id, user.Name, user.Id), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category:  categoryEdit,
 		Action:    "filerequest.deleted",
@@ -566,8 +567,8 @@ func LogDeleteFileRequest(fr models.FileRequest, user models.User) {
 
 // LogReplace adds a log entry when an upload was replaced. Non-Blocking
 func LogReplace(originalFile, newContent models.File, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("%s, ID %s had content replaced with %s (ID %s) by %s (user #%d)",
-		originalFile.Name, originalFile.Id, newContent.Name, newContent.Id, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("ID %s had content replaced with ID %s by %s (user #%d)",
+		originalFile.Id, newContent.Id, user.Name, user.Id), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category: categoryEdit,
 		Action:   "file.replaced",
@@ -597,7 +598,7 @@ func LogDelete(file models.File, user models.User) error {
 
 // LogFolderCreate adds a log entry when a folder was created. Non-Blocking
 func LogFolderCreate(bundle models.FileBundle, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s (%s) created by %s (user #%d)", bundle.Id, bundle.Name, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s created by %s (user #%d)", bundle.Id, user.Name, user.Id), false)
 	appendAuditEntryAsync(AuditEntry{
 		Category: categoryEdit,
 		Action:   "folder.created",
@@ -627,7 +628,7 @@ func LogFolderDeleteBatch(bundle models.FileBundle, memberFiles []models.File, u
 			Actor:    AuditActor{UserId: user.Id, Email: user.Name},
 		})
 	}
-	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s (%s) and associated files deleted by %s (user #%d)", bundle.Id, bundle.Name, user.Name, user.Id), false)
+	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s and associated files deleted by %s (user #%d)", bundle.Id, user.Name, user.Id), false)
 	entries = append(entries, AuditEntry{
 		Category: categoryEdit,
 		Action:   "folder.deleted",

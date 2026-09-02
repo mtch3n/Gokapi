@@ -1617,7 +1617,7 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]interface{}{
 		"valid":          true,
-		"name":           request.Name,
+		"name":           request.DisplayName(),
 		"notes":          request.Notes,
 		"maxFiles":       request.MaxFiles,
 		"remainingFiles": remainingFiles,
@@ -1731,7 +1731,7 @@ func pubApiFolder(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]interface{}{
 		"id":               folderId,
-		"name":             bundle.Name,
+		"name":             bundle.DisplayName(),
 		"requiresPassword": isProtected,
 		"files":            files,
 	}
@@ -2491,7 +2491,7 @@ func describeShareResource(resourceType int, resourceId string) (shareaccess.Res
 		if !bundleAvailability(bundleMembers(bundle.Id, database.GetAllMetadata())) {
 			return shareaccess.Resource{}, false
 		}
-		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.Name}, true
+		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.DisplayName()}, true
 	case models.ShareResourceFileRequest:
 		fileRequest, found := database.GetFileRequest(resourceId)
 		if !found {
@@ -2501,7 +2501,7 @@ func describeShareResource(resourceType int, resourceId string) (shareaccess.Res
 			return shareaccess.Resource{}, false
 		}
 		return shareaccess.Resource{Type: resourceType, Id: resourceId,
-			Name: fileRequest.Name, ExpiresAt: fileRequest.Expiry}, true
+			Name: fileRequest.DisplayName(), ExpiresAt: fileRequest.Expiry}, true
 	default:
 		return shareaccess.Resource{}, false
 	}

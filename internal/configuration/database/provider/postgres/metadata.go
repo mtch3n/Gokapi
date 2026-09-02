@@ -246,16 +246,28 @@ func (p DatabaseProvider) DeleteMetaData(id string) {
 	helper.Check(err)
 }
 
-// MigratePlaintextFileNames re-encrypts every file name still stored in the pre-v22 plaintext
-// Name column and then drops that column, reporting how many rows it converted. It is a separate
-// step rather than part of Upgrade because encrypting needs the master key, which an Input-level
-// instance does not have until an administrator unseals it - long after the schema ladder has run.
+// MigratePlaintextFileNames re-encrypts every file name, folder name, request name and request
+// note still stored in a pre-v22/v23 plaintext column, across FileMetaData, FileBundles and
+// UploadRequests, dropping each plaintext column once converted. Returns the total number of
+// values migrated across all three tables - see LogFileNameMigration, which reports this as one
+// count. It is a separate step rather than part of Upgrade because encrypting needs the master
+// key, which an Input-level instance does not have until an administrator unseals it - long after
+// the schema ladder has run.
 //
-// Doing nothing and reporting 0 once the column is gone is the normal steady state, so this is
-// safe to call on every unseal. A run that is interrupted part way resumes on the next call: rows
-// already converted are skipped by the NameEncrypted IS NULL filter, and the column is only
-// dropped once none are left.
+// Doing nothing and reporting 0 once every plaintext column is gone is the normal steady state, so
+// this is safe to call on every unseal. A run that is interrupted part way resumes on the next
+// call: rows already converted are skipped by the respective *Encrypted IS NULL filter, and each
+// column is only dropped once none are left.
 func (p DatabaseProvider) MigratePlaintextFileNames() int {
+	migrated := p.migrateFileMetaDataNames()
+	migrated += p.migrateFileBundleNames()
+	migrated += p.migrateFileRequestNamesAndNotes()
+	return migrated
+}
+
+// migrateFileMetaDataNames is MigratePlaintextFileNames' original, file-specific body - see that
+// function's comment for the full reasoning.
+func (p DatabaseProvider) migrateFileMetaDataNames() int {
 	var columnExists bool
 	row := p.queryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
 		WHERE table_name = 'filemetadata' AND column_name = 'name')`)
