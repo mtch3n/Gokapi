@@ -544,6 +544,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "recipients",
+            "in": "header",
+            "description": "A comma-separated list of email addresses. When non-empty, creating the file (or adding it to the bundle named by bundleid) and restricting it to exactly these recipients happen as one atomic operation: if the grants cannot be created, the whole upload is refused and nothing is left reachable. A bundle is restricted once, at whichever member file's completion call first finds it unrestricted; later member files sent with the same list are a no-op once the bundle already carries the restriction, so recipients are not re-mailed once per member. See POST /share/recipients for the underlying grant mechanics.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -558,10 +567,13 @@
             }
           },
           "400": {
-            "description": "Invalid input"
+            "description": "Invalid input, or the recipients header contains an address that could not be validated"
           },
           "401": {
             "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "412": {
+            "description": "recipients was non-empty but no mail connector is configured, so the access links could not be delivered and the upload was refused"
           }
         }
       }

@@ -1250,6 +1250,16 @@ func (p *paramChunkComplete) ParseRequest(r *http.Request) error {
 		}
 	}
 
+	// RequestParser header value "recipients", required: false
+	exists, err = checkHeaderExists(r, "recipients", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["recipients"] = exists
+	if exists {
+		p.Recipients = r.Header.Get("recipients")
+	}
+
 	return p.ProcessParameter(r)
 }
 
