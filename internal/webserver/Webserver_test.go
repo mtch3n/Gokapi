@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1130,13 +1131,15 @@ func TestPublicApiFilePasswordTrimMatchesSetTrim(t *testing.T) {
 
 // TestPublicApiFolderPasswordTrimMatchesSetTrim is the folder-bundle counterpart of
 // TestPublicApiFilePasswordTrimMatchesSetTrim - pubApiFolderPassword must trim the submitted
-// password the same way before verifying against every protected member's hash.
+// password the same way before verifying against the bundle's own hash.
 func TestPublicApiFolderPasswordTrimMatchesSetTrim(t *testing.T) {
 	t.Parallel()
 	const rawPassword = "  FolderTrim12!  "
 	trimmedHash := configuration.HashPassword(strings.TrimSpace(rawPassword), false, "")
 
 	bundle := filebundle.Create("TestFolderTrimPw_"+helper.GenerateRandomString(8), 999)
+	bundle.PasswordHash = trimmedHash
+	database.SaveFileBundle(bundle)
 	database.SaveMetaData(models.File{
 		Id:                 helper.GenerateRandomString(16),
 		Name:               "trimfolder.txt",
@@ -1149,7 +1152,6 @@ func TestPublicApiFolderPasswordTrimMatchesSetTrim(t *testing.T) {
 		ContentType:        "text/plain",
 		UserId:             999,
 		BundleId:           bundle.Id,
-		PasswordHash:       trimmedHash,
 	})
 
 	client := &http.Client{}
@@ -2338,9 +2340,11 @@ func TestFolderMemberCountAgreesWithRecipientMembership(t *testing.T) {
 // out of a restricted bundle by anyone holding the member's individual file id, bypassing the
 // bundle's recipient ACL entirely.
 //
-// This asserts an anonymous caller is denied on both doors, routed to the same "not found"
-// convention the file-level restriction already uses, and that the member's name is never
-// leaked through the metadata endpoint.
+// Since the folder-as-unit-of-sharing design, a member's own link is a fallback that redirects
+// to the folder (see the early check at the top of serveFile/pubApiFileMetadata) rather than
+// being resolved on its own, so both doors now defer authorisation entirely to the folder
+// endpoints - this asserts an anonymous caller following that redirect is still denied, and that
+// the member's name never appears anywhere in either response.
 func TestSingleFileCascadesRestrictedBundleDeniesAnonymous(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestCascade_Denied_" + helper.GenerateRandomString(8)
@@ -2375,32 +2379,35 @@ func TestSingleFileCascadesRestrictedBundleDeniesAnonymous(t *testing.T) {
 		filebundle.Delete(bundle)
 	})
 
-	// /downloadFile must deny the same way an unknown id would.
-	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://127.0.0.1:53843/downloadFile?id=" + fileId,
-		RedirectUrl: "error",
-	})
-
-	// /pubapi/file must not leak the member's name or content type.
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + fileId)
+
+	// /downloadFile redirects to /pubapi/folderzip, which the default client follows
+	// automatically; the anonymous caller must still be denied there.
+	resp, err := client.Get("http://127.0.0.1:53843/downloadFile?id=" + fileId)
+	if err != nil {
+		t.Fatalf("Failed to request download: %v", err)
+	}
+	downloadBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected the redirected request to be denied as not found, got status %d", resp.StatusCode)
+	}
+	if strings.Contains(string(downloadBody), secretFileName) {
+		t.Errorf("Restricted member's name leaked through /downloadFile: %s", downloadBody)
+	}
+
+	// /pubapi/file redirects to /pubapi/folder, same reasoning.
+	resp2, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + fileId)
 	if err != nil {
 		t.Fatalf("Failed to request file metadata: %v", err)
 	}
-	defer resp.Body.Close()
-
-	var response map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		t.Fatalf("Failed to decode response: %v", err)
+	defer resp2.Body.Close()
+	metadataBody, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected the redirected metadata request to be denied as not found, got status %d", resp2.StatusCode)
 	}
-	if name, ok := response["name"]; !ok || name != "" {
-		t.Errorf("Expected withheld name, got %v", name)
-	}
-	if contentType, ok := response["contentType"]; !ok || contentType != "" {
-		t.Errorf("Expected withheld contentType, got %v", contentType)
-	}
-	if isAuthorised, ok := response["isAuthorised"]; !ok || isAuthorised != false {
-		t.Errorf("Expected isAuthorised false, got %v", isAuthorised)
+	if strings.Contains(string(metadataBody), secretFileName) {
+		t.Errorf("Restricted member's name leaked through /pubapi/file: %s", metadataBody)
 	}
 }
 
@@ -2737,10 +2744,11 @@ func TestSingleFileCascadesRestrictedBundleAllowsRecipient(t *testing.T) {
 }
 
 // TestSingleFileNoCascadeWhenBundleUnrestrictedOrAbsent is a regression test: a member of an
-// unrestricted bundle, and a file that belongs to no bundle at all, must behave exactly as
-// before the cascade fix - openly downloadable and with metadata fully visible, since
-// IsShareRestricted(ShareResourceBundle, ...) is false in both cases and the new check must
-// no-op.
+// unrestricted bundle, and a file that belongs to no bundle at all, must both still be
+// reachable. The member's own link now redirects to its folder on every request, restricted or
+// not (see the folder-as-unit-of-sharing design), so this follows that redirect (the default
+// http.Client does so automatically) rather than expecting the member to be served directly; the
+// no-bundle file is unaffected and served exactly as before.
 func TestSingleFileNoCascadeWhenBundleUnrestrictedOrAbsent(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestCascade_Unrestricted_" + helper.GenerateRandomString(8)
@@ -2807,20 +2815,14 @@ func TestSingleFileNoCascadeWhenBundleUnrestrictedOrAbsent(t *testing.T) {
 	}
 }
 
-// TestFolderZipExhaustedBundleAllowanceStillRefusesWhole is a regression test for the opposite
-// ordering bug from TestFolderZipRaceWindowLeavesBundleAllowanceUntouched: pubApiFolderZip now
-// consumes the bundle's own allowance last, immediately before serving, specifically so that a
-// failure in the member-metering loop never burns the bundle allowance for a zip never
-// delivered. The accepted cost of that reordering, symmetric to the member-counter cost the
-// metering loop's own comment already documents for its race window, is that when the bundle
-// allowance was already exhausted before the request even arrived, the metering loop still
-// spends every member's own counters before the bundle check - now last - catches the
-// exhaustion and refuses the whole request. There is no way to check the bundle's remaining
-// allowance for free before doing that member work without either a non-atomic peek (its own
-// TOCTOU race) or a refund primitive, neither of which this fix introduces.
-//
-// This asserts that the whole request is still correctly refused as not-found, and documents
-// that member counters are, unlike the bundle allowance, no longer protected in this scenario.
+// TestFolderZipExhaustedBundleAllowanceStillRefusesWhole asserts a zip request is refused once
+// the recipient's own per-recipient bundle allowance (ShareGrants) is already exhausted, and -
+// since member files no longer carry their own counter at all while bundled (see
+// models.File.IsBundleMember and consumeBundleDownload) - that refusing the request touches
+// nothing on the member rows themselves. A previous version of this test asserted the opposite:
+// that the member-metering loop still spent each member's own DownloadCount before the (then
+// last-checked) bundle allowance caught the exhaustion. That metering loop no longer exists; a
+// refused zip request now leaves every member completely untouched.
 func TestFolderZipExhaustedBundleAllowanceStillRefusesWhole(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestZipOrdering_" + helper.GenerateRandomString(8)
@@ -2899,16 +2901,15 @@ func TestFolderZipExhaustedBundleAllowanceStillRefusesWhole(t *testing.T) {
 		t.Errorf("Expected /pubapi/folderzip to deny an exhausted bundle allowance as not found, got status %d", resp.StatusCode)
 	}
 
-	// The metering loop runs before the (now-last) bundle check, so both members are spent on
-	// a zip that is never delivered. See the doc comment above: this is the accepted cost of
-	// no longer burning the bundle allowance on a later failure.
+	// No per-member metering loop exists any more: a refused request leaves every member's own
+	// DownloadCount exactly as it was.
 	for _, id := range []string{file1Id, file2Id} {
 		file, ok := database.GetMetaDataById(id)
 		if !ok {
 			t.Fatalf("Fixture file %s vanished after the request", id)
 		}
-		if file.DownloadCount != countsBefore[id]+1 {
-			t.Errorf("Expected DownloadCount for %s to be spent by the metering loop before the bundle check refuses the request, got %d, want %d", id, file.DownloadCount, countsBefore[id]+1)
+		if file.DownloadCount != countsBefore[id] {
+			t.Errorf("Expected DownloadCount for %s to stay untouched by a refused request, got %d, want %d", id, file.DownloadCount, countsBefore[id])
 		}
 	}
 }
@@ -3380,22 +3381,29 @@ func TestPublicApiConfigUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestFolderPasswordCrossMemberRejected tests that a password-protected folder requires
-// the password to match ALL members, not just one. A bundle with two members having
-// different passwords should reject a password that only matches one member.
-func TestFolderPasswordCrossMemberRejected(t *testing.T) {
+// TestFolderPasswordGatesEveryMember is the replacement for the old
+// TestFolderPasswordCrossMemberRejected, which asserted the pre-redesign "all protected members
+// must match" bricking behaviour (see design doc section 3.1a) - that is exactly the bug this
+// design fixes, so the old assertion is gone rather than adapted.
+//
+// The bundle now owns its own password (models.FileBundle.PasswordHash); members carry none of
+// their own. This proves that gate is uniform: a wrong password is rejected and sets no cookie,
+// the right one is accepted and sets a cookie, and - the part that matters - the SAME gate covers
+// a request for a single named member through /pubapi/folderzip?ids=, not only the whole-folder
+// endpoints. Two members are used, deliberately with no PasswordHash of their own, to prove the
+// bundle's password is what gates them, not anything on the member rows.
+func TestFolderPasswordGatesEveryMember(t *testing.T) {
 	t.Parallel()
-	uniqueName := "TestFolderCrossPw_" + helper.GenerateRandomString(8)
-	password1 := "password1"
-	password2 := "different_password"
+	uniqueName := "TestFolderPwGates_" + helper.GenerateRandomString(8)
+	const rawPassword = "correct_folder_password"
 
 	bundle := filebundle.Create(uniqueName, 999)
+	bundle.PasswordHash = configuration.HashPassword(rawPassword, false, "")
+	database.SaveFileBundle(bundle)
 
-	hash1 := configuration.HashPassword(password1, false, "")
-	hash2 := configuration.HashPassword(password2, false, "")
-
+	member1Id := helper.GenerateRandomString(16)
 	database.SaveMetaData(models.File{
-		Id:                 "zzzzzzzzzzzzzzzz",
+		Id:                 member1Id,
 		Name:               "file1.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
@@ -3406,11 +3414,10 @@ func TestFolderPasswordCrossMemberRejected(t *testing.T) {
 		ContentType:        "text/plain",
 		UserId:             999,
 		BundleId:           bundle.Id,
-		PasswordHash:       hash1,
 	})
-
+	member2Id := helper.GenerateRandomString(16)
 	database.SaveMetaData(models.File{
-		Id:                 "aaaaaaaaaaaaaaaa",
+		Id:                 member2Id,
 		Name:               "file2.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
@@ -3421,119 +3428,111 @@ func TestFolderPasswordCrossMemberRejected(t *testing.T) {
 		ContentType:        "text/plain",
 		UserId:             999,
 		BundleId:           bundle.Id,
-		PasswordHash:       hash2,
+	})
+	t.Cleanup(func() {
+		database.DeleteMetaData(member1Id)
+		database.DeleteMetaData(member2Id)
+		filebundle.Delete(bundle)
 	})
 
 	client := &http.Client{}
 
-	payloadWrongPw := []byte(`{"password":"password1"}`)
+	// A single member requested directly through the zip door, with no cookie, is gated the
+	// same as the whole folder: no bytes, just the requiresPassword prompt.
+	zipResp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id + "&ids=" + member1Id)
+	if err != nil {
+		t.Fatalf("Failed to request folderzip: %v", err)
+	}
+	zipBody, _ := io.ReadAll(zipResp.Body)
+	zipResp.Body.Close()
+	if zipResp.StatusCode != http.StatusOK {
+		t.Errorf("Expected the password prompt (200), got status %d: %s", zipResp.StatusCode, zipBody)
+	}
+	if !strings.Contains(string(zipBody), `"requiresPassword":true`) {
+		t.Errorf("Expected requiresPassword:true for a member request with no cookie, got %s", zipBody)
+	}
+
+	// A wrong password is rejected and sets no cookie.
+	payloadWrongPw := []byte(`{"password":"not_the_password"}`)
 	req, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payloadWrongPw))
 	if err != nil {
-		t.Errorf("Failed to create request: %v", err)
-		return
+		t.Fatalf("Failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Errorf("Failed to make POST request: %v", err)
-		return
+		t.Fatalf("Failed to make POST request: %v", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
 	}
-
 	var response map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		t.Errorf("Failed to decode response: %v", err)
-		return
+		t.Fatalf("Failed to decode response: %v", err)
 	}
-
 	if ok, exists := response["ok"].(bool); !exists || ok {
 		t.Errorf("Expected ok=false, got %v", response["ok"])
 	}
-
-	if len(resp.Cookies()) > 0 {
-		for _, cookie := range resp.Cookies() {
-			if strings.HasPrefix(cookie.Name, "b") {
-				t.Errorf("Expected no bundle cookie to be set, but got %s", cookie.Name)
-			}
+	for _, cookie := range resp.Cookies() {
+		if strings.HasPrefix(cookie.Name, "b") {
+			t.Errorf("Expected no bundle cookie to be set for a wrong password, but got %s", cookie.Name)
 		}
 	}
 
-	bundleMatch := filebundle.Create("TestFolderMatchPw_"+helper.GenerateRandomString(8), 999)
-	sharedHash := configuration.HashPassword("shared_password", false, "")
-
-	database.SaveMetaData(models.File{
-		Id:                 helper.GenerateRandomString(16),
-		Name:               "file3.txt",
-		Size:               "10 B",
-		SizeBytes:          10,
-		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           2147483646,
-		UnlimitedDownloads: true,
-		UnlimitedTime:      true,
-		ContentType:        "text/plain",
-		UserId:             999,
-		BundleId:           bundleMatch.Id,
-		PasswordHash:       sharedHash,
-	})
-
-	database.SaveMetaData(models.File{
-		Id:                 helper.GenerateRandomString(16),
-		Name:               "file4.txt",
-		Size:               "10 B",
-		SizeBytes:          10,
-		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           2147483646,
-		UnlimitedDownloads: true,
-		UnlimitedTime:      true,
-		ContentType:        "text/plain",
-		UserId:             999,
-		BundleId:           bundleMatch.Id,
-		PasswordHash:       sharedHash,
-	})
-
-	payloadCorrectPw := []byte(`{"password":"shared_password"}`)
-	req2, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundleMatch.Id, bytes.NewReader(payloadCorrectPw))
+	// The right password is accepted and sets the bundle session cookie.
+	payloadCorrectPw, err := json.Marshal(map[string]string{"password": rawPassword})
 	if err != nil {
-		t.Errorf("Failed to create request: %v", err)
-		return
+		t.Fatalf("Failed to marshal payload: %v", err)
+	}
+	req2, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payloadCorrectPw))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
 	}
 	req2.Header.Set("Content-Type", "application/json")
-
 	resp2, err := client.Do(req2)
 	if err != nil {
-		t.Errorf("Failed to make POST request: %v", err)
-		return
+		t.Fatalf("Failed to make POST request: %v", err)
 	}
 	defer resp2.Body.Close()
-
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp2.StatusCode)
 	}
-
 	var response2 map[string]interface{}
 	if err := json.NewDecoder(resp2.Body).Decode(&response2); err != nil {
-		t.Errorf("Failed to decode response: %v", err)
-		return
+		t.Fatalf("Failed to decode response: %v", err)
 	}
-
 	if ok, exists := response2["ok"].(bool); !exists || !ok {
 		t.Errorf("Expected ok=true, got %v", response2["ok"])
 	}
-
-	cookieFound := false
+	var sessionCookie *http.Cookie
 	for _, cookie := range resp2.Cookies() {
 		if strings.HasPrefix(cookie.Name, "b") {
-			cookieFound = true
+			sessionCookie = cookie
 			break
 		}
 	}
-	if !cookieFound {
-		t.Errorf("Expected bundle cookie to be set")
+	if sessionCookie == nil {
+		t.Fatalf("Expected bundle cookie to be set")
+	}
+
+	// The same cookie now unlocks the OTHER member too - one password gates every member, not
+	// just the one that happened to be requested when it was verified.
+	req3, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+member2Id, nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req3.AddCookie(sessionCookie)
+	resp3, err := client.Do(req3)
+	if err != nil {
+		t.Fatalf("Failed to request folderzip: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200 for the second member once the folder is unlocked, got %d", resp3.StatusCode)
+	}
+	if contentType := resp3.Header.Get("Content-Type"); contentType != "text/plain" {
+		t.Errorf("Expected the second member to be served raw, got Content-Type %s", contentType)
 	}
 }
 
@@ -3545,8 +3544,8 @@ func TestFolderLockedLeaksNothing(t *testing.T) {
 	password := "secret_password"
 
 	bundle := filebundle.Create(uniqueName, 999)
-
-	pwHash := configuration.HashPassword(password, false, "")
+	bundle.PasswordHash = configuration.HashPassword(password, false, "")
+	database.SaveFileBundle(bundle)
 
 	database.SaveMetaData(models.File{
 		Id:                 helper.GenerateRandomString(16),
@@ -3560,7 +3559,6 @@ func TestFolderLockedLeaksNothing(t *testing.T) {
 		ContentType:        "text/plain",
 		UserId:             999,
 		BundleId:           bundle.Id,
-		PasswordHash:       pwHash,
 	})
 
 	client := &http.Client{}
@@ -3599,28 +3597,30 @@ func TestFolderLockedLeaksNothing(t *testing.T) {
 }
 
 // TestPublicApiFolderDeadMembersLeaksNothing guards against pubApiFolder returning 200 with
-// `"name": bundle.Name` even when its only member had expired, because
-// isProtected was computed by scanning the (now empty) servable-member list rather than the
-// bundle's true membership - a password-protected folder whose members had all expired
-// therefore reported requiresPassword: false and handed back its name with no password
-// prompt at all, in the exact situation the sibling pubApiFolderZip already refused as 404.
-// This asserts a dead folder's name never appears anywhere in the response, and that a
+// `"name": bundle.Name` even when the folder has expired. Since the folder-as-unit-of-sharing
+// design, expiry lives on the bundle itself (models.FileBundle.ExpireAt) rather than being
+// inferred from members - a member's own ExpireAt is inert while it belongs to a bundle - so
+// this now expires the BUNDLE, with a live, otherwise-unremarkable member underneath it. This
+// asserts a dead folder's name never appears anywhere in the response, and that a
 // protected-but-dead folder does not report requiresPassword: false.
 func TestPublicApiFolderDeadMembersLeaksNothing(t *testing.T) {
 	t.Parallel()
 
-	// Case 1: an unprotected folder whose only member has already expired.
+	// Case 1: an unprotected folder that has itself already expired.
 	uniqueName := "TestFolderDead_" + helper.GenerateRandomString(8)
 	bundle := filebundle.Create(uniqueName, 999)
+	bundle.ExpireAt = time.Now().Add(-1 * time.Hour).Unix()
+	bundle.UnlimitedTime = false
+	database.SaveFileBundle(bundle)
 	database.SaveMetaData(models.File{
 		Id:                 helper.GenerateRandomString(16),
 		Name:               "dead_unprotected.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
 		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           time.Now().Add(-1 * time.Hour).Unix(), // already expired
+		ExpireAt:           2147483646,
 		UnlimitedDownloads: true,
-		UnlimitedTime:      false,
+		UnlimitedTime:      true,
 		ContentType:        "text/plain",
 		UserId:             999,
 		BundleId:           bundle.Id,
@@ -3644,25 +3644,26 @@ func TestPublicApiFolderDeadMembersLeaksNothing(t *testing.T) {
 		}
 	}
 
-	// Case 2: a folder whose only member is BOTH password protected AND already expired -
-	// the case that used to skip the password gate entirely (isProtected computed as false
-	// from an empty servable-member scan) and hand back the name unlocked.
+	// Case 2: a folder that is BOTH password protected AND already expired - the case that used
+	// to skip the password gate entirely and hand back the name unlocked.
 	protectedName := "TestFolderDeadProtected_" + helper.GenerateRandomString(8)
 	protectedBundle := filebundle.Create(protectedName, 999)
-	pwHash := configuration.HashPassword("dead_secret_password", false, "")
+	protectedBundle.PasswordHash = configuration.HashPassword("dead_secret_password", false, "")
+	protectedBundle.ExpireAt = time.Now().Add(-1 * time.Hour).Unix()
+	protectedBundle.UnlimitedTime = false
+	database.SaveFileBundle(protectedBundle)
 	database.SaveMetaData(models.File{
 		Id:                 helper.GenerateRandomString(16),
 		Name:               "dead_protected.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
 		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           time.Now().Add(-1 * time.Hour).Unix(), // already expired
+		ExpireAt:           2147483646,
 		UnlimitedDownloads: true,
-		UnlimitedTime:      false,
+		UnlimitedTime:      true,
 		ContentType:        "text/plain",
 		UserId:             999,
 		BundleId:           protectedBundle.Id,
-		PasswordHash:       pwHash,
 	})
 
 	resp2, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + protectedBundle.Id)
@@ -3686,41 +3687,24 @@ func TestPublicApiFolderDeadMembersLeaksNothing(t *testing.T) {
 	}
 }
 
-// TestFolderZipCounterEnforced tests that the download counter is enforced by pubApiFolderZip,
-// and - since the no-partial-archive fix - that a member becoming exhausted between two
-// requests now refuses the whole second request rather than silently serving a zip with that
-// member dropped. The bundle deliberately has TWO members and the request omits ids=, so
-// control cannot take the single-file serveBundleFile shortcut (len(requestedMembers) == 1).
-// A previous version of this test asserted the second request still succeeded with the
-// exhausted member silently excluded from the archive; that was exactly the failure this test
-// now inverts, asserting the whole request is refused instead of serving a zip with a member
-// silently dropped.
+// TestFolderZipCounterEnforced proves the folder's own DownloadsRemaining
+// (models.FileBundle.DownloadsRemaining) is the single counter that gates both a zip download
+// and a single-member download, replacing the old per-member counters entirely: a two-member
+// bundle with an allowance of 1 serves the zip once, then refuses both a second zip request AND
+// a single-member request - the same allowance, exhausted by whichever came first.
 func TestFolderZipCounterEnforced(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestFolderCounter_" + helper.GenerateRandomString(8)
 
 	bundle := filebundle.Create(uniqueName, 999)
+	bundle.UnlimitedDownloads = false
+	bundle.DownloadsRemaining = 1
+	database.SaveFileBundle(bundle)
 
-	limitedId := helper.GenerateRandomString(16)
+	member1Id := helper.GenerateRandomString(16)
 	database.SaveMetaData(models.File{
-		Id:                 limitedId,
-		Name:               "limited.txt",
-		Size:               "10 B",
-		SizeBytes:          10,
-		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           2147483646,
-		UnlimitedDownloads: false,
-		DownloadsRemaining: 1,
-		UnlimitedTime:      true,
-		ContentType:        "text/plain",
-		UserId:             999,
-		BundleId:           bundle.Id,
-	})
-
-	unlimitedId := helper.GenerateRandomString(16)
-	database.SaveMetaData(models.File{
-		Id:                 unlimitedId,
-		Name:               "unlimited.txt",
+		Id:                 member1Id,
+		Name:               "one.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
 		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
@@ -3731,64 +3715,93 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 		UserId:             999,
 		BundleId:           bundle.Id,
 	})
+	member2Id := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 member2Id,
+		Name:               "two.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+	t.Cleanup(func() {
+		database.DeleteMetaData(member1Id)
+		database.DeleteMetaData(member2Id)
+		filebundle.Delete(bundle)
+	})
 
 	client := &http.Client{}
 
-	// No ids= parameter: both members are requested, so len(requestedMembers) == 2 and control
-	// must go through the multi-member zip path and its metering loop.
+	// First request: the whole zip (no ids=, so len(requestedMembers) == 2), spends the folder's
+	// one and only download.
 	firstReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
-		t.Errorf("Failed to create first request: %v", err)
-		return
+		t.Fatalf("Failed to create first request: %v", err)
 	}
-
 	resp1, err := client.Do(firstReq)
 	if err != nil {
-		t.Errorf("Failed to make first request: %v", err)
-		return
+		t.Fatalf("Failed to make first request: %v", err)
 	}
 	resp1.Body.Close()
-
 	if resp1.StatusCode != http.StatusOK {
-		t.Errorf("Expected status 200 for first download, got %d", resp1.StatusCode)
+		t.Errorf("Expected status 200 for the first (zip) download, got %d", resp1.StatusCode)
 	}
 	if contentType := resp1.Header.Get("Content-Type"); contentType != "application/zip" {
 		t.Errorf("Expected a zip response for a two-member bundle, got Content-Type %s", contentType)
 	}
-	if remaining := database.GetDownloadsRemaining(limitedId); remaining != 0 {
-		t.Errorf("Expected the metering loop to consume the limited member's allowance, got %d remaining", remaining)
+	stored, ok := database.GetFileBundle(bundle.Id)
+	if !ok {
+		t.Fatalf("Bundle vanished after the first request")
+	}
+	if stored.DownloadsRemaining != 0 {
+		t.Errorf("Expected the zip download to consume the folder's one allowance, got %d remaining", stored.DownloadsRemaining)
 	}
 
-	// Second request: the limited member's allowance is now exhausted. The bundle can no
-	// longer be served as a complete unit - with per-file counters still in place, a bundle
-	// is only servable if every member is - so the whole request must be refused rather than
-	// silently handing back a zip with the exhausted member dropped, and no zip body must be
-	// sent.
+	// Second request: the folder's allowance is exhausted. A second whole-zip request must be
+	// refused as a whole - no partial archive.
 	secondReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
-		t.Errorf("Failed to create second request: %v", err)
-		return
+		t.Fatalf("Failed to create second request: %v", err)
 	}
-
 	resp2, err := client.Do(secondReq)
 	if err != nil {
-		t.Errorf("Failed to make second request: %v", err)
-		return
+		t.Fatalf("Failed to make second request: %v", err)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
-
 	if resp2.StatusCode != http.StatusNotFound {
-		t.Errorf("Expected status 404 refusing the whole request once a member is exhausted, got %d", resp2.StatusCode)
+		t.Errorf("Expected status 404 refusing the whole request once the folder's allowance is exhausted, got %d", resp2.StatusCode)
 	}
 	if contentType := resp2.Header.Get("Content-Type"); contentType == "application/zip" {
-		t.Errorf("Expected no archive body once a member is exhausted, got a zip response: %s", body2)
+		t.Errorf("Expected no archive body once the allowance is exhausted, got a zip response: %s", body2)
 	}
-	if remaining := database.GetDownloadsRemaining(limitedId); remaining != 0 {
-		t.Errorf("Exhausted member's allowance must not go negative or be re-consumed, got %d remaining", remaining)
+
+	// Third request: a SINGLE member, drawing from the same now-exhausted allowance, must also
+	// be refused - proving the zip and single-member doors share one counter, not two.
+	thirdReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+member1Id, nil)
+	if err != nil {
+		t.Fatalf("Failed to create third request: %v", err)
 	}
-	if unlimitedCount := mustGetMetaData(t, unlimitedId).DownloadCount; unlimitedCount != 1 {
-		t.Errorf("Expected the unlimited member's DownloadCount to stay at 1 from the first request (refusal must not touch it), got %d", unlimitedCount)
+	resp3, err := client.Do(thirdReq)
+	if err != nil {
+		t.Fatalf("Failed to make third request: %v", err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected status 404 for a single-member request against the same exhausted allowance, got %d", resp3.StatusCode)
+	}
+
+	stored, ok = database.GetFileBundle(bundle.Id)
+	if !ok {
+		t.Fatalf("Bundle vanished after the refused requests")
+	}
+	if stored.DownloadsRemaining != 0 {
+		t.Errorf("Exhausted allowance must not go negative or be re-consumed by refused requests, got %d remaining", stored.DownloadsRemaining)
 	}
 }
 
@@ -3802,16 +3815,14 @@ func mustGetMetaData(t *testing.T, id string) models.File {
 	return file
 }
 
-// TestFolderZipThreeMembersTwoExhaustedRefusesWhole guards against the other half of the same
-// failure mode: servableBundleMembers used storage.IsExpiredFile, which counts
-// DownloadsRemaining < 1 as expired, to build the member list itself - so a 3-member bundle
-// with 2 exhausted members silently narrowed down to a set of one before pubApiFolderZip ever
-// decided how to serve it, and len(requestedMembers) == 1 then took the raw-single-file shortcut
-// instead of a zip, serving the wrong member as if it were the only thing ever in the bundle.
-// This asserts the request omits ids= (so the shortcut cannot be legitimised by an explicit
-// single id) and is refused as a whole - no archive, and specifically not served as a bare
-// single file.
-func TestFolderZipThreeMembersTwoExhaustedRefusesWhole(t *testing.T) {
+// TestFolderZipMemberOwnDownloadFieldsAreInert proves the core data-model change of the
+// folder-as-unit-of-sharing design: a member's own DownloadsRemaining/UnlimitedDownloads no
+// longer decide anything once it belongs to a bundle. Two of three members carry
+// DownloadsRemaining: 0 - which, under the old per-member-counter design, would have made
+// pubApiFolderZip's old servable-member scan silently narrow the archive down to the one
+// surviving member (or refuse the whole request, depending on which fix was live at the time).
+// With the bundle itself left unlimited, the whole zip must now succeed and contain all three.
+func TestFolderZipMemberOwnDownloadFieldsAreInert(t *testing.T) {
 	t.Parallel()
 	uniqueName := "TestFolderThreeTwoExhausted_" + helper.GenerateRandomString(8)
 	bundle := filebundle.Create(uniqueName, 999)
@@ -3878,214 +3889,95 @@ func TestFolderZipThreeMembersTwoExhaustedRefusesWhole(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	if resp.StatusCode == http.StatusOK {
-		t.Errorf("Expected the whole request to be refused when 2 of 3 members are exhausted, got 200: %s", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected the whole request to succeed - the bundle itself is unlimited, so its members' own DownloadsRemaining must not matter - got status %d: %s", resp.StatusCode, body)
 	}
-	if contentType := resp.Header.Get("Content-Type"); contentType == "text/plain" {
-		t.Errorf("Expected no raw single-file response - that would mean exhaustion-based filtering silently picked a lone survivor - got Content-Type text/plain, body: %s", body)
-	}
-	if contentType := resp.Header.Get("Content-Type"); contentType == "application/zip" {
-		t.Errorf("Expected no archive body when not every requested member is servable, got a zip response")
+	if contentType := resp.Header.Get("Content-Type"); contentType != "application/zip" {
+		t.Errorf("Expected all three members to be served as one archive, got Content-Type %s", contentType)
 	}
 }
 
-// TestFolderZipRaceWindowRefusesWhole forces the exact interleaving pubApiFolderZip's own
-// comments describe but TestFolderZipCounterEnforced and
-// TestFolderZipThreeMembersTwoExhaustedRefusesWhole above can only hit by chance under
-// contention: a member that becomes exhausted in the window between the upfront availability
-// check and the metering loop that re-checks and consumes each member, both inside a single
-// request. It uses ids= to fix processing order (member order is otherwise map-derived and not
-// deterministic) and the folderZipRaceHooks test seam to run the exhausting write at the exact
-// instant the metering loop reaches the second member, simulating a second, concurrent download
-// of that member landing in that window. This hits the race window on every run instead of only
-// under load, and asserts the fix: the whole request is refused rather than the archive silently
-// narrowing to just the first member.
-func TestFolderZipRaceWindowRefusesWhole(t *testing.T) {
+// TestFolderZipConcurrentVisitsExactlyOneSucceeds replaces the old hook-driven
+// TestFolderZipRaceWindowRefusesWhole/TestFolderZipRaceWindowLeavesBundleAllowanceUntouched pair.
+// Those simulated a race between per-member counter decrements in pubApiFolderZip's old metering
+// loop - a loop that no longer exists, since a member's own DownloadsRemaining is inert while it
+// belongs to a bundle (see models.File.IsBundleMember). The only shared mutable state left to
+// race is the bundle's own DownloadsRemaining, spent exactly once per request by
+// consumeBundleDownload - and that decrement is a single atomic, conditional database statement
+// (see DecreaseBundleDownloadsRemaining in each provider), so this drives real concurrent
+// requests at it rather than simulating an interleaving by hand: with the allowance set to 1,
+// exactly one of several simultaneous zip requests must succeed and the rest must be refused.
+func TestFolderZipConcurrentVisitsExactlyOneSucceeds(t *testing.T) {
 	t.Parallel()
-	uniqueName := "TestFolderRaceWindow_" + helper.GenerateRandomString(8)
+	uniqueName := "TestFolderConcurrentVisits_" + helper.GenerateRandomString(8)
 	bundle := filebundle.Create(uniqueName, 999)
+	bundle.UnlimitedDownloads = false
+	bundle.DownloadsRemaining = 1
+	database.SaveFileBundle(bundle)
 
-	firstId := helper.GenerateRandomString(16)
+	memberId := helper.GenerateRandomString(16)
 	database.SaveMetaData(models.File{
-		Id:                 firstId,
-		Name:               "first.txt",
+		Id:                 memberId,
+		Name:               "concurrent.txt",
 		Size:               "10 B",
 		SizeBytes:          10,
 		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
 		ExpireAt:           2147483646,
-		UnlimitedDownloads: false,
-		DownloadsRemaining: 5,
+		UnlimitedDownloads: true,
 		UnlimitedTime:      true,
 		ContentType:        "text/plain",
 		UserId:             999,
 		BundleId:           bundle.Id,
 	})
-
-	racedId := helper.GenerateRandomString(16)
-	database.SaveMetaData(models.File{
-		Id:                 racedId,
-		Name:               "raced.txt",
-		Size:               "10 B",
-		SizeBytes:          10,
-		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           2147483646,
-		UnlimitedDownloads: false,
-		DownloadsRemaining: 1,
-		UnlimitedTime:      true,
-		ContentType:        "text/plain",
-		UserId:             999,
-		BundleId:           bundle.Id,
-	})
-
 	t.Cleanup(func() {
-		database.DeleteMetaData(firstId)
-		database.DeleteMetaData(racedId)
+		database.DeleteMetaData(memberId)
 		filebundle.Delete(bundle)
 	})
 
-	// Registers the race: fires the instant the metering loop reaches racedId, consuming its
-	// only remaining download out from under it - exactly what a second, concurrent request for
-	// the same file would do if it won that race in production. LoadAndDelete makes this
-	// one-shot, and it is keyed by racedId's own random id, so it cannot affect any other test's
-	// bundle running in parallel.
-	folderZipRaceHooks.Store(racedId, func() {
-		if !database.IncreaseDownloadCount(racedId, true) {
-			t.Errorf("Race setup failed: expected to be able to consume racedId's only download")
+	const attempts = 10
+	statusCodes := make([]int, attempts)
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func(i int) {
+			defer wg.Done()
+			client := &http.Client{}
+			resp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id)
+			if err != nil {
+				t.Errorf("Failed to request folderzip: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			statusCodes[i] = resp.StatusCode
+		}(i)
+	}
+	wg.Wait()
+
+	succeeded := 0
+	for _, code := range statusCodes {
+		switch code {
+		case http.StatusOK:
+			succeeded++
+		case http.StatusNotFound:
+			// expected for every attempt but the one that wins the allowance
+		default:
+			t.Errorf("Unexpected status code %d among concurrent requests", code)
 		}
-	})
-	t.Cleanup(func() { folderZipRaceHooks.Delete(racedId) })
+	}
+	if succeeded != 1 {
+		t.Errorf("Expected exactly 1 of %d concurrent requests to succeed against a folder with one download remaining, got %d", attempts, succeeded)
+	}
 
-	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id + "&ids=" + firstId + "," + racedId)
-	if err != nil {
-		t.Fatalf("Failed to request folderzip: %v", err)
+	stored, ok := database.GetFileBundle(bundle.Id)
+	if !ok {
+		t.Fatalf("Bundle vanished after the concurrent requests")
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Expected the whole request refused once the race window exhausts a member mid-loop, got %d: %s", resp.StatusCode, body)
-	}
-	if contentType := resp.Header.Get("Content-Type"); contentType == "application/zip" {
-		t.Errorf("Expected no archive body once a member is exhausted mid-loop, got a zip response")
-	}
-	// firstId is processed before racedId (ids= fixes the order) and is therefore already
-	// atomically decremented by the time racedId's failure refuses the request. This is the
-	// accepted, documented cost in pubApiFolderZip: there is no re-increment primitive to undo
-	// it with.
-	if remaining := database.GetDownloadsRemaining(firstId); remaining != 4 {
-		t.Errorf("Expected firstId's allowance to be spent by the metering loop before the refusal, got %d remaining, want 4", remaining)
-	}
-	if remaining := database.GetDownloadsRemaining(racedId); remaining != 0 {
-		t.Errorf("Expected racedId's allowance to stay at 0 (not go negative), got %d remaining", remaining)
+	if stored.DownloadsRemaining != 0 {
+		t.Errorf("Expected the folder's allowance to end at 0, got %d", stored.DownloadsRemaining)
 	}
 }
 
-// TestFolderZipRaceWindowLeavesBundleAllowanceUntouched is a regression test for the ordering
-// bug fixed alongside TestFolderZipRaceWindowRefusesWhole: pubApiFolderZip used to consume the
-// recipient's bundle-level allowance up front, before the zip metering loop that can still fail
-// - including via the exact race window that test exercises, where a member is exhausted by a
-// concurrent download between the availability check and the metering loop. A recipient whose
-// folder download fails that way lost one of their bundle downloads for an archive they never
-// received, with no way to get it back: there is no refund primitive anywhere in this codebase.
-//
-// This reuses TestFolderZipRaceWindowRefusesWhole's exact race setup (the folderZipRaceHooks test
-// seam exhausting the second member's own DownloadsRemaining the instant the metering loop reaches
-// it) but against a bundle restricted to one recipient, and asserts that the recipient's bundle
-// grant is completely unused after the refused request - not just that the request was refused.
-func TestFolderZipRaceWindowLeavesBundleAllowanceUntouched(t *testing.T) {
-	t.Parallel()
-	uniqueName := "TestFolderRaceAllowance_" + helper.GenerateRandomString(8)
-	bundle := filebundle.Create(uniqueName, 999)
-
-	firstId := helper.GenerateRandomString(16)
-	database.SaveMetaData(models.File{
-		Id:                 firstId,
-		Name:               "first.txt",
-		Size:               "10 B",
-		SizeBytes:          10,
-		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           2147483646,
-		UnlimitedDownloads: false,
-		DownloadsRemaining: 5,
-		UnlimitedTime:      true,
-		ContentType:        "text/plain",
-		UserId:             999,
-		BundleId:           bundle.Id,
-	})
-
-	racedId := helper.GenerateRandomString(16)
-	database.SaveMetaData(models.File{
-		Id:                 racedId,
-		Name:               "raced.txt",
-		Size:               "10 B",
-		SizeBytes:          10,
-		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           2147483646,
-		UnlimitedDownloads: false,
-		DownloadsRemaining: 1,
-		UnlimitedTime:      true,
-		ContentType:        "text/plain",
-		UserId:             999,
-		BundleId:           bundle.Id,
-	})
-
-	recipientId := database.SaveShareRecipient(models.ShareRecipient{
-		Email:     "zip-race-allowance-recipient@example.com",
-		CreatedAt: time.Now().Unix(),
-	})
-	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 3)
-
-	t.Cleanup(func() {
-		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
-		database.DeleteShareRecipient(recipientId)
-		database.DeleteMetaData(firstId)
-		database.DeleteMetaData(racedId)
-		filebundle.Delete(bundle)
-	})
-
-	// Registers the race: fires the instant the metering loop reaches racedId, consuming its
-	// only remaining download out from under it - exactly what a second, concurrent request for
-	// the same file would do if it won that race in production. LoadAndDelete makes this
-	// one-shot, and it is keyed by racedId's own random id, so it cannot affect any other test's
-	// bundle running in parallel.
-	folderZipRaceHooks.Store(racedId, func() {
-		if !database.IncreaseDownloadCount(racedId, true) {
-			t.Errorf("Race setup failed: expected to be able to consume racedId's only download")
-		}
-	})
-	t.Cleanup(func() { folderZipRaceHooks.Delete(racedId) })
-
-	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+firstId+","+racedId, nil)
-	if err != nil {
-		t.Fatalf("Failed to build request: %v", err)
-	}
-	req.Header.Set("Cookie", cookie.Name+"="+cookie.Value)
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("Failed to request folderzip: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("Expected the whole request refused once the race window exhausts a member mid-loop, got %d: %s", resp.StatusCode, body)
-	}
-
-	grants := database.GetShareGrants(models.ShareResourceBundle, bundle.Id)
-	if len(grants) != 1 {
-		t.Fatalf("Expected exactly one grant on the bundle, got %d", len(grants))
-	}
-	if grants[0].DownloadsUsed != 0 {
-		t.Errorf("Expected the recipient's bundle allowance to be untouched by a request that failed in the metering loop, got DownloadsUsed=%d, want 0", grants[0].DownloadsUsed)
-	}
-}
-
-// TestFolderZipMembershipAndFileRequestExclusion tests membership validation and file request exclusion.
-// (a) ids containing a file from a different bundle returns 400
-// (b) Files with UploadRequestId set are excluded from /pubapi/folder and /pubapi/folderzip
 func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
 	t.Parallel()
 	bundle1 := filebundle.Create("TestFolderZipMembership_"+helper.GenerateRandomString(8), 999)

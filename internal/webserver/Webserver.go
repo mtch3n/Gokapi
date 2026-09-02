@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	templatetext "text/template"
 	"time"
 
@@ -1240,6 +1239,18 @@ func downloadPresigned(w http.ResponseWriter, r *http.Request) {
 
 func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request) {
 	addNoCacheHeader(w)
+
+	// A bundle member's own link is a fallback, not a supported path: the folder decides
+	// password, expiry and the download allowance now (see the folder-as-unit-of-sharing design),
+	// so this redirects to the equivalent folder endpoint - which also meters the visit - rather
+	// than resolving the member on its own. Checked against the raw metadata row, not
+	// storage.GetFile below, specifically so the member's own now-inert ExpireAt/DownloadsRemaining
+	// never gets a chance to refuse it here for a reason the bundle itself has already overridden.
+	if rawFile, ok := database.GetMetaDataById(id); ok && rawFile.BundleId != "" && rawFile.IsBundleMember(rawFile.BundleId) {
+		redirect(w, r, "/pubapi/folderzip?id="+rawFile.BundleId+"&ids="+rawFile.Id)
+		return
+	}
+
 	savedFile, ok := storage.GetFile(id)
 
 	if !ok || savedFile.IsFileRequest() {
@@ -1377,6 +1388,13 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A bundle member's own link redirects to its folder - see the identical, more fully
+	// commented check at the top of serveFile.
+	if rawFile, ok := database.GetMetaDataById(keyId); ok && rawFile.BundleId != "" && rawFile.IsBundleMember(rawFile.BundleId) {
+		http.Redirect(w, r, "/pubapi/folder?id="+rawFile.BundleId, http.StatusTemporaryRedirect)
+		return
+	}
+
 	file, ok := storage.GetFile(keyId)
 	if !ok || file.IsFileRequest() {
 		respondPubApiNotFound(w, r)
@@ -1467,6 +1485,13 @@ func pubApiFilePassword(w http.ResponseWriter, r *http.Request) {
 	if keyId == "" {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// A bundle member's own link redirects to its folder - see the identical, more fully
+	// commented check at the top of serveFile.
+	if rawFile, ok := database.GetMetaDataById(keyId); ok && rawFile.BundleId != "" && rawFile.IsBundleMember(rawFile.BundleId) {
+		http.Redirect(w, r, "/pubapi/folderpassword?id="+rawFile.BundleId, http.StatusTemporaryRedirect)
 		return
 	}
 
@@ -1717,12 +1742,11 @@ func pubApiFolder(w http.ResponseWriter, r *http.Request) {
 	allFiles := database.GetAllMetadata()
 	memberFiles := accessibleBundleMembers(w, r, bundleMembers(bundle.Id, allFiles))
 
-	// A bundle that cannot be served in full - no members at all, or any member expired or
-	// exhausted - must be indistinguishable from one that never existed: no name, and no
-	// password-protection status, revealed. This is checked before isProtected is computed
-	// and before the password gate below, precisely because scanning only the servable
-	// subset for a password hash would otherwise report a protected-but-fully-expired
-	// folder as unprotected. See bundleAvailability.
+	// A bundle that cannot be served in full - no members at all, or the bundle itself expired
+	// or exhausted - must be indistinguishable from one that never existed: no name, and no
+	// password-protection status, revealed. This is checked before isProtected is computed and
+	// before the password gate below, so an expired-but-protected folder cannot be reported as
+	// unprotected. See bundleAvailability.
 	//
 	// Answers exactly as an unknown id does, rather than with a distinct "gone" status: a
 	// folder that cannot be served must be indistinguishable from one that never existed,
@@ -1731,19 +1755,14 @@ func pubApiFolder(w http.ResponseWriter, r *http.Request) {
 	// ratelimiter.WaitOnFailedId, so the two cases would differ in timing as well as in code -
 	// and mayAccessShare proves nothing for an unrestricted bundle, where it returns true
 	// without any check at all.
-	if !bundleAvailability(memberFiles) {
+	if !bundleAvailability(bundle, memberFiles) {
 		respondPubApiNotFound(w, r)
 		return
 	}
 
-	// Check if folder is password protected (ANY member has a password)
-	isProtected := false
-	for _, file := range memberFiles {
-		if file.PasswordHash != "" {
-			isProtected = true
-			break
-		}
-	}
+	// The bundle owns its own password now - not any member's (see models.FileBundle.PasswordHash
+	// and the design doc this implements).
+	isProtected := bundle.PasswordHash != ""
 
 	// Handle password protection
 	if isProtected && !isValidPwCookieBundle(r, bundle) {
@@ -1814,17 +1833,8 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all files and find all servable members that have a password
-	allFiles := database.GetAllMetadata()
-	members := accessibleBundleMembers(w, r, servableBundleMembers(bundle.Id, allFiles))
-	var passwordFiles []models.File
-	for _, file := range members {
-		if file.PasswordHash != "" {
-			passwordFiles = append(passwordFiles, file)
-		}
-	}
-
-	if len(passwordFiles) == 0 {
+	// The bundle owns its own password now - not any member's.
+	if bundle.PasswordHash == "" {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "{\"ok\":false}")
 		return
@@ -1851,54 +1861,22 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 	ip := logging.GetIpAddress(r)
 	ratelimiter.WaitOnDownloadPassword(ip)
 
-	// Verify password against EVERY protected member
-	allValid := true
-	var migratedFiles []models.File
-	for i, file := range passwordFiles {
-		isValid, isLegacy := configuration.VerifyPassword(password, file.PasswordHash, configuration.Get().Authentication.SaltFiles)
-		if !isValid {
-			allValid = false
-			break
-		}
-		// Migrate legacy passwords to the new format
-		if isLegacy {
-			file.PasswordHash = configuration.HashPassword(password, false, "")
-			migratedFiles = append(migratedFiles, file)
-			passwordFiles[i] = file
-		}
-	}
-
-	if !allValid {
+	// Verify password against the bundle's own hash.
+	isValid, isLegacy := configuration.VerifyPassword(password, bundle.PasswordHash, configuration.Get().Authentication.SaltFiles)
+	if !isValid {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "{\"ok\":false}")
 		return
 	}
-
-	// Save any migrated passwords
-	for _, file := range migratedFiles {
-		database.SaveMetaData(file)
+	// Migrate a legacy password hash to the new format.
+	if isLegacy {
+		bundle.PasswordHash = configuration.HashPassword(password, false, "")
+		database.SaveFileBundle(bundle)
 	}
 
 	writeFolderPwCookie(w, bundle)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, "{\"ok\":true}")
-}
-
-// folderZipRaceHooks lets tests force the exact interleaving between the upfront
-// availability check in pubApiFolderZip and its metering loop, by registering a callback
-// against a specific file id that runs the moment the metering loop reaches that file - the
-// narrow window a real client can only hit by racing another download against this one.
-// Empty outside of tests, so looking a file id up here is a no-op in production. A sync.Map
-// is safe under concurrent, parallel folderzip requests, so a hook registered by one test for
-// its own file id never fires for - or blocks - another test's unrelated bundle running at the
-// same time.
-var folderZipRaceHooks sync.Map // map[string]func()
-
-// runFolderZipRaceHook runs and clears a hook registered for id, if any.
-func runFolderZipRaceHook(id string) {
-	if hook, ok := folderZipRaceHooks.LoadAndDelete(id); ok {
-		hook.(func())()
-	}
 }
 
 // Handling of /pubapi/folderzip
@@ -1939,7 +1917,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	allFiles := database.GetAllMetadata()
 
 	// Check password gate
-	if !isValidFolderPassword(w, r, bundle, allFiles) {
+	if !isValidFolderPassword(w, r, bundle) {
 		return
 	}
 
@@ -1992,28 +1970,19 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Refuse the whole request rather than silently narrow it: a folder zip that omits an
-	// expired or exhausted member looks like a complete archive and is not. With per-file
-	// download counters still in place, a bundle (or the requested subset of it) is only
-	// servable as a unit if every member requested is. Rechecked fresh here rather than
-	// trusting the allFiles snapshot, since it may already be stale by the time of the
-	// request.
-	timeNow := time.Now().Unix()
-	for _, file := range requestedMembers {
-		if !file.UnlimitedDownloads {
-			file.DownloadsRemaining = database.GetDownloadsRemaining(file.Id)
-		}
-		if storage.IsExpiredFile(file, timeNow) {
-			respondPubApiNotFound(w, r)
-			return
-		}
+	// The folder itself - not any member's own now-inert ExpireAt/DownloadsRemaining - decides
+	// whether it can be served at all. Rechecked fresh here rather than trusting the allFiles
+	// snapshot, since it may already be stale by the time of the request.
+	if !bundle.IsAvailable(time.Now().Unix()) {
+		respondPubApiNotFound(w, r)
+		return
 	}
 
-	// Serve single file raw, or multiple files as zip. Every member of requestedMembers is
-	// guaranteed servable at this point (checked above), so reaching this branch with
-	// exactly one never means filtering silently narrowed a larger set down to one - it
-	// means the caller explicitly asked for one id, or the bundle's true membership is
-	// exactly one member to begin with.
+	// Serve single file raw, or multiple files as zip. Every member of requestedMembers is a
+	// confirmed current member of an available bundle at this point, so reaching this branch
+	// with exactly one never means filtering silently narrowed a larger set down to one - it
+	// means the caller explicitly asked for one id, or the bundle's true membership is exactly
+	// one member to begin with.
 	if len(requestedMembers) == 1 {
 		file := requestedMembers[0]
 		// A member that is itself identity-restricted spends its own recipient
@@ -2022,12 +1991,16 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 			respondPubApiNotFound(w, r)
 			return
 		}
-		// The bundle download as a whole is metered once per request, not once per member,
-		// since the restriction and the allowance are on the bundle. Consumed last, after the
-		// member's own allowance above, and immediately before serveBundleFile can start
-		// writing bytes - so a failure in anything above (the member's own allowance
-		// exhausted) never burns the bundle allowance for a download that is never delivered.
+		// The per-recipient bundle allowance (ShareGrants), when the bundle is restricted to
+		// named recipients, is metered here alongside the file-level one above.
 		if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
+			respondPubApiNotFound(w, r)
+			return
+		}
+		// The folder's own visit allowance (models.FileBundle.DownloadsRemaining) is spent last,
+		// immediately before serveBundleFile can start writing bytes - so a failure in anything
+		// above never burns it for a download that is never delivered.
+		if !consumeBundleDownload(bundle) {
 			respondPubApiNotFound(w, r)
 			return
 		}
@@ -2036,50 +2009,17 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve as zip - folder downloads meter every member by rechecking expiry and
-	// atomically consuming one download before streaming each member. The availability
-	// check above already confirmed every requested member was servable, using a fresh
-	// read, moments earlier - but that was a read, not a lock, so a download landing in
-	// the narrow window between that check and this loop can still expire or exhaust a
-	// member here. Unlike that availability check, a failure in this loop used to just
-	// exclude the affected member from the archive and keep going, which resurrects the
-	// exact silent-partial-archive bug this endpoint exists to prevent - just narrowed
-	// down to this race window instead of removed. A failure here now refuses the whole
-	// request the same way the availability check does, so the archive is either complete
-	// or not sent at all.
-	//
-	// A member earlier in this loop than the one that fails has already been atomically
-	// decremented by the time the request is refused, and that decrement is not undone:
-	// no storage provider in this codebase has a re-increment primitive, and adding one
-	// solely to cover this race window is a larger change than this fix. That member's
-	// download allowance is spent on an archive that is never delivered to this
-	// requester. This is accepted rather than built around - moving the counter onto the
-	// bundle instead of each member would remove it entirely, but that is separate work.
+	// Serve as zip. A member's own DownloadsRemaining/ExpireAt are inert while it belongs to a
+	// bundle (see models.File.IsBundleMember), so unlike before this design, there is nothing
+	// left to meter per member here - only the identity-restriction allowance below, and the
+	// bundle's own visit allowance once, after the loop. That also removes the race window a
+	// previous version of this endpoint had to document and accept the cost of: with a single
+	// atomic decrement covering the whole request instead of N per-member ones, there is no
+	// partial state a concurrent request can catch it in.
 	filesToServeInZip := make([]models.File, 0, len(requestedMembers))
 	for _, file := range requestedMembers {
-		runFolderZipRaceHook(file.Id)
-		// Recheck expiry and atomically consume one download, reusing the same primitives ServeFile uses
-		if !file.UnlimitedDownloads {
-			file.DownloadsRemaining = database.GetDownloadsRemaining(file.Id)
-		}
-		if storage.IsExpiredFile(file, time.Now().Unix()) {
-			respondPubApiNotFound(w, r)
-			return
-		}
-		if !file.UnlimitedDownloads {
-			if !database.IncreaseDownloadCount(file.Id, true) {
-				// Atomic, floored decrement lost the race (or found the allowance
-				// already exhausted): refuse the whole request rather than excluding
-				// this member.
-				respondPubApiNotFound(w, r)
-				return
-			}
-		} else {
-			database.IncreaseDownloadCount(file.Id, false)
-		}
 		// A member that is itself identity-restricted also spends its own recipient
-		// allowance; refuse the whole request the same way if that allowance is spent,
-		// rather than excluding just this member.
+		// allowance; refuse the whole request rather than excluding just this member.
 		if !consumeShareDownload(r, models.ShareResourceFile, file.Id) {
 			respondPubApiNotFound(w, r)
 			return
@@ -2087,17 +2027,21 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		filesToServeInZip = append(filesToServeInZip, file)
 	}
 
-	// The bundle download as a whole is metered once per request, not once per member, since
-	// the restriction and the allowance are on the bundle. Consumed last, after every member
-	// above has been rechecked and metered successfully, and immediately before
-	// ServeFilesAsZip can start writing bytes - so a mid-loop failure (a member's own
-	// allowance exhausted by a parallel download) never burns the bundle allowance for an
-	// archive that is never delivered. This does not cover a failure once the zip stream
-	// itself has started: ServeFilesAsZip writes the response header before its first entry,
-	// so a failure partway through streaming (a storage read error, an aborted connection)
-	// happens after the bundle allowance below is already spent, with no refund primitive to
-	// undo it.
+	// The per-recipient bundle allowance (ShareGrants), when the bundle is restricted to named
+	// recipients, is metered here - after every member's own allowance above, and before the
+	// folder's own visit allowance just below, for the same "never burn an allowance on a
+	// request that is refused after this point" reasoning as the single-member branch.
 	if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
+		respondPubApiNotFound(w, r)
+		return
+	}
+	// The folder's own visit allowance is spent once for the whole zip, not once per member -
+	// consumed last, immediately before ServeFilesAsZip can start writing bytes. This does not
+	// cover a failure once the zip stream itself has started: ServeFilesAsZip writes the
+	// response header before its first entry, so a failure partway through streaming (a storage
+	// read error, an aborted connection) happens after this is already spent, with no refund
+	// primitive to undo it.
+	if !consumeBundleDownload(bundle) {
 		respondPubApiNotFound(w, r)
 		return
 	}
@@ -2106,14 +2050,28 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	storage.ServeFilesAsZip(filesToServeInZip, bundle.Name, w, r)
 }
 
+// consumeBundleDownload atomically spends one visit of the bundle's own download allowance (see
+// models.FileBundle.DownloadsRemaining) - the folder-level counter that replaces each member's
+// now-inert DownloadsRemaining. A zip download and a single-member download both go through this
+// exactly once per request (see pubApiFolderZip), so the same allowance gates both uniformly.
+// Returns false, refusing to serve, once the allowance is exhausted; always true for an unlimited
+// bundle.
+func consumeBundleDownload(bundle models.FileBundle) bool {
+	if bundle.UnlimitedDownloads {
+		return true
+	}
+	return database.DecreaseBundleDownloadsRemaining(bundle.Id)
+}
+
 // Serve a single file from a bundle with proper headers and decryption
 // Returns true if successfully served, false if download was denied (expired or exhausted).
 func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
-	// Use ServeFile with forceDownload=true to set attachment headers and serve the file
-	// increaseCounter=true to decrement download counter (matches the /d door behavior)
-	// forceDecryption=false to handle decryption normally
-	// recheckExpiry=true to verify expiry at serve time
-	validFile := storage.ServeFile(file, w, r, true, true, false, true)
+	// Use ServeFile with forceDownload=true to set attachment headers and serve the file.
+	// increaseCounter=false and recheckExpiry=false: the member's own DownloadsRemaining/ExpireAt
+	// are inert while it belongs to a bundle - pubApiFolderZip has already gated and metered this
+	// download at the bundle level (bundle.IsAvailable, consumeBundleDownload) before calling
+	// here. forceDecryption=false to handle decryption normally.
+	validFile := storage.ServeFile(file, w, r, true, false, false, false)
 	if !validFile {
 		// Called if the file has expired or its download allowance was exhausted, checked
 		// during storage.ServeFile()
@@ -2125,13 +2083,10 @@ func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
 }
 
 // bundleMembers returns every file that belongs to a bundle for listing/serving purposes (see
-// models.File.IsBundleMember for exactly which files that includes), regardless of whether it is
-// currently servable. Servability (expired, or its download allowance exhausted) is deliberately
-// not folded in here: a caller that conflates "is a member" with "is currently servable" ends up
-// treating a bundle with some dead members as if those members never existed at all, which is
-// exactly the silent-partial-archive and password-gate-skipping bugs this split exists to
-// prevent. Use servableBundleMembers for the narrowed set, or bundleAvailability to decide
-// whether the whole bundle can be served at all.
+// models.File.IsBundleMember for exactly which files that includes). Unlike before this design,
+// there is no separate "servable" narrowing: a member's own expiry/download fields are inert
+// while it belongs to a bundle (see models.FileBundle.IsAvailable), so whether a member's
+// content can currently be served is purely a bundle-level question, not a per-member one.
 func bundleMembers(bundleId string, allFiles map[string]models.File) []models.File {
 	var result []models.File
 	for _, file := range allFiles {
@@ -2142,55 +2097,23 @@ func bundleMembers(bundleId string, allFiles map[string]models.File) []models.Fi
 	return result
 }
 
-// servableBundleMembers narrows bundleMembers to the ones that are also currently servable.
-// Only safe to use once a bundle has already been confirmed available in full - see
-// bundleAvailability - since silently dropping the unservable members here is exactly what
-// must not happen when deciding whether to respond at all.
-func servableBundleMembers(bundleId string, allFiles map[string]models.File) []models.File {
-	var result []models.File
-	timeNow := time.Now().Unix()
-	for _, file := range bundleMembers(bundleId, allFiles) {
-		if !storage.IsExpiredFile(file, timeNow) {
-			result = append(result, file)
-		}
-	}
-	return result
-}
-
-// bundleAvailability reports whether every one of the given members - the requester's full,
-// access-filtered bundle membership - is currently servable. A bundle with no members, or
-// with even one member expired or its download allowance exhausted, is not available: with
-// per-file download counters still in place, a partially dead bundle cannot be told apart
-// from a complete one from the outside, so the whole of it is refused rather than silently
-// narrowed to whatever remains. See bundleMembers.
-func bundleAvailability(members []models.File) bool {
+// bundleAvailability reports whether the bundle can currently be served at all: it has at least
+// one member (the requester's full, access-filtered membership), and the bundle itself - not any
+// member - is not expired and has not exhausted its own download allowance. See
+// models.FileBundle.IsAvailable and bundleMembers.
+func bundleAvailability(bundle models.FileBundle, members []models.File) bool {
 	if len(members) == 0 {
 		return false
 	}
-	timeNow := time.Now().Unix()
-	for _, file := range members {
-		if storage.IsExpiredFile(file, timeNow) {
-			return false
-		}
-	}
-	return true
+	return bundle.IsAvailable(time.Now().Unix())
 }
 
-// Check if folder is password protected and if a valid cookie exists
-func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle, allFiles map[string]models.File) bool {
-	// Checked against the full true membership, not just the currently-servable subset: a
-	// bundle whose only protected member has since expired must still be recognised as
-	// having been protected, the same reasoning as pubApiFolder's isProtected check.
-	members := accessibleBundleMembers(w, r, bundleMembers(bundle.Id, allFiles))
-	isProtected := false
-	for _, file := range members {
-		if file.PasswordHash != "" {
-			isProtected = true
-			break
-		}
-	}
-
-	if !isProtected {
+// isValidFolderPassword reports whether the folder's own password gate (see
+// models.FileBundle.PasswordHash) is satisfied: either the bundle carries no password, or the
+// caller holds a valid session cookie for it. Writes the "requiresPassword" response itself and
+// returns false when it is not.
+func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle) bool {
+	if bundle.PasswordHash == "" {
 		return true
 	}
 
@@ -2609,7 +2532,7 @@ func describeShareResource(resourceType int, resourceId string) (shareaccess.Res
 		}
 		// Same rule the public folder endpoints enforce: a bundle is only servable if
 		// every one of its members is. See bundleMembers/bundleAvailability.
-		if !bundleAvailability(bundleMembers(bundle.Id, database.GetAllMetadata())) {
+		if !bundleAvailability(bundle, bundleMembers(bundle.Id, database.GetAllMetadata())) {
 			return shareaccess.Resource{}, false
 		}
 		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.DisplayName()}, true
