@@ -1585,65 +1585,13 @@
         }
       }
     },
-    "/auth/friendlyname": {
-      "put": {
-        "tags": [
-          "auth"
-        ],
-        "summary": "Changes the name of the API key",
-        "description": "This API call changes the name of the API key that is shown in the API overview. Requires API permission API_MOD. To change the name of an API key not owned by the user, the user needs to have the user permission API",
-        "operationId": "friendlyname",
-        "security": [
-          {
-            "apikey": [
-              "API_MANAGE"
-            ]
-          }
-        ],
-        "parameters": [
-          {
-            "name": "targetKey",
-            "in": "header",
-            "description": "The API key to change the name of. Can be either the public ID or the actual API key",
-            "required": true,
-            "style": "simple",
-            "explode": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "friendlyName",
-            "in": "header",
-            "description": "The new name of a API key",
-            "required": true,
-            "style": "simple",
-            "explode": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Operation successful"
-          },
-          "401": {
-            "description": "Invalid API key provided for authentication or API key does not have the required permission"
-          },
-          "404": {
-            "description": "API key not found"
-          }
-        }
-      }
-    },
     "/auth/modify": {
       "put": {
         "tags": [
           "auth"
         ],
-        "summary": "Changes the permissions of the API key",
-        "description": "This API call changes the permission for the given API key. Requires API permission API_MOD. To to edit an API key not owned by the user, the user needs to have the user permission API",
+        "summary": "Changes the permissions and/or the name of the API key",
+        "description": "This API call changes the permission and/or the name of the given API key. At least one of permission (together with permissionModifier) or friendlyName must be supplied; both may be supplied in the same call. Requires API permission API_MOD. To edit an API key not owned by the user, the user needs to have the user permission API. Never permitted against the super admin's own key unless it is the caller's own",
         "operationId": "modifypermission",
         "security": [
           {
@@ -1656,7 +1604,7 @@
           {
             "name": "targetKey",
             "in": "header",
-            "description": "The API key to change the permission of. Can be either the public ID or the actual API key",
+            "description": "The API key to modify. Can be either the public ID or the actual API key",
             "required": true,
             "style": "simple",
             "explode": false,
@@ -1667,8 +1615,8 @@
           {
             "name": "permission",
             "in": "header",
-            "description": "The name of the permission",
-            "required": true,
+            "description": "The name of the permission. Requires permissionModifier to also be supplied",
+            "required": false,
             "style": "simple",
             "explode": false,
             "schema": {
@@ -1689,8 +1637,8 @@
           {
             "name": "permissionModifier",
             "in": "header",
-            "description": "If the permission shall be granted or revoked",
-            "required": true,
+            "description": "If the permission shall be granted or revoked. Requires permission to also be supplied",
+            "required": false,
             "style": "simple",
             "explode": false,
             "schema": {
@@ -1700,6 +1648,17 @@
                 "REVOKE"
               ]
             }
+          },
+          {
+            "name": "friendlyName",
+            "in": "header",
+            "description": "The new name of the API key",
+            "required": false,
+            "style": "simple",
+            "explode": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1707,7 +1666,7 @@
             "description": "Operation successful"
           },
           "400": {
-            "description": "Invalid parameter supplied or API key owner does not have the sufficient user permissions"
+            "description": "Invalid parameter supplied, no mutation requested, or API key owner does not have the sufficient user permissions"
           },
           "401": {
             "description": "Invalid API key provided for authentication or API key does not have the required permission"
@@ -2391,8 +2350,8 @@
         "tags": [
           "user"
         ],
-        "summary": "Changes the permissions of a user",
-        "description": "This API call changes the permission for the given user. Requires API permission MANAGE_USERS",
+        "summary": "Changes the rank, permissions and/or password of a user",
+        "description": "This API call changes the rank and/or the permission of the given user, and/or forces a password change once they next log in. At least one of newRank, (userpermission together with permissionModifier), or resetPassword must be supplied; any combination of them may be supplied in the same call. If resetPassword is \"true\" and generateNewPassword is also \"true\", the current password is replaced with a generated one. The caller may never modify themselves, the super admin, or a user whose rank does not sit strictly below their own. Requires API permission MANAGE_USERS",
         "operationId": "usermodify",
         "security": [
           {
@@ -2405,7 +2364,7 @@
           {
             "name": "userid",
             "in": "header",
-            "description": "The ID of the user to change the permission of",
+            "description": "The ID of the user to modify",
             "required": true,
             "style": "simple",
             "explode": false,
@@ -2414,10 +2373,25 @@
             }
           },
           {
+            "name": "newRank",
+            "in": "header",
+            "description": "The name of the new rank",
+            "required": false,
+            "style": "simple",
+            "explode": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ADMIN",
+                "USER"
+              ]
+            }
+          },
+          {
             "name": "userpermission",
             "in": "header",
-            "description": "The name of the permission",
-            "required": true,
+            "description": "The name of the permission. Requires permissionModifier to also be supplied",
+            "required": false,
             "style": "simple",
             "explode": false,
             "schema": {
@@ -2438,8 +2412,8 @@
           {
             "name": "permissionModifier",
             "in": "header",
-            "description": "If the permission shall be granted or revoked",
-            "required": true,
+            "description": "If the permission shall be granted or revoked. Requires userpermission to also be supplied",
+            "required": false,
             "style": "simple",
             "explode": false,
             "schema": {
@@ -2449,114 +2423,22 @@
                 "REVOKE"
               ]
             }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Operation successful"
           },
-          "400": {
-            "description": "Invalid parameter supplied"
-          },
-          "401": {
-            "description": "Invalid API key provided for authentication or API key does not have the required permission"
-          },
-          "404": {
-            "description": "User not found"
-          }
-        }
-      }
-    },
-    "/user/changeRank": {
-      "put": {
-        "tags": [
-          "user"
-        ],
-        "summary": "Changes the rank of a user",
-        "description": "This API call changes the rank for the given user. Requires API permission MANAGE_USERS",
-        "operationId": "userchangerank",
-        "security": [
           {
-            "apikey": [
-              "MANAGE_USERS"
-            ]
-          }
-        ],
-        "parameters": [
-          {
-            "name": "userid",
+            "name": "resetPassword",
             "in": "header",
-            "description": "The ID of the user to change the rank of",
-            "required": true,
+            "description": "Forces a password change on the user's next login",
+            "required": false,
             "style": "simple",
             "explode": false,
             "schema": {
-              "type": "integer"
-            }
-          },
-          {
-            "name": "newRank",
-            "in": "header",
-            "description": "The name of the new rank",
-            "required": true,
-            "style": "simple",
-            "explode": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "ADMIN",
-                "USER"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Operation successful"
-          },
-          "400": {
-            "description": "Invalid parameter supplied"
-          },
-          "401": {
-            "description": "Invalid API key provided for authentication or API key does not have the required permission"
-          },
-          "404": {
-            "description": "User not found"
-          }
-        }
-      }
-    },
-    "/user/resetPassword": {
-      "put": {
-        "tags": [
-          "user"
-        ],
-        "summary": "Resets the password of the current user",
-        "description": "This API call forces a passwrd change once the given user logs in the next time. If generateNewPassword is \"true\", the current password will be replaced with a generated one.  Requires API permission MANAGE_USERS",
-        "operationId": "userresetpw",
-        "security": [
-          {
-            "apikey": [
-              "MANAGE_USERS"
-            ]
-          }
-        ],
-        "parameters": [
-          {
-            "name": "userid",
-            "in": "header",
-            "description": "The id of the target user",
-            "required": true,
-            "style": "simple",
-            "explode": false,
-            "schema": {
-              "type": "integer"
+              "type": "boolean"
             }
           },
           {
             "name": "generateNewPassword",
             "in": "header",
-            "description": "Generate a new password",
+            "description": "Only relevant if resetPassword is \"true\": generates a new password immediately instead of only requiring a change at next login",
             "required": false,
             "style": "simple",
             "explode": false,
@@ -2567,7 +2449,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Operation successful",
+            "description": "Operation successful. If resetPassword was supplied, the response body follows the PasswordReset schema",
             "content": {
               "application/json": {
                 "schema": {
@@ -2577,10 +2459,13 @@
             }
           },
           "400": {
-            "description": "Invalid ID or parameters supplied"
+            "description": "Invalid parameter supplied, no mutation requested, or the target may not be modified by the caller"
           },
           "401": {
             "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "404": {
+            "description": "User not found"
           }
         }
       }

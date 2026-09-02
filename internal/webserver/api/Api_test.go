@@ -603,32 +603,46 @@ func TestUserCreateGoogleAuthProviderRejectedWithoutOauth(t *testing.T) {
 }
 
 func TestUserChangeRank(t *testing.T) {
-	const apiUrl = "/user/changeRank"
+	const apiUrl = "/user/modify"
 	const headerUserId = "userid"
 	const headerNewRank = "newRank"
 
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
 
 	testInvalidUserId(t, apiUrl, apiKey.Id, []test.Header{{Name: headerNewRank, Value: "admin"}})
-	var validHeaders = []test.Header{
-		{
-			Name:  headerUserId,
-			Value: strconv.Itoa(idAdmin),
-		},
-	}
 	invalidParameter := []invalidParameterValue{
-		{
-			Value:        "",
-			ErrorMessage: `{"Result":"error","ErrorMessage":"header newRank is required","ErrorCode":4}`,
-			StatusCode:   400,
-		},
 		{
 			Value:        "invalid",
 			ErrorMessage: `{"Result":"error","ErrorMessage":"invalid rank","ErrorCode":4}`,
 			StatusCode:   400,
 		},
 	}
-	testInvalidParameters(t, apiUrl, apiKey.Id, validHeaders, headerNewRank, invalidParameter)
+	testInvalidParameters(t, apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerUserId,
+		Value: strconv.Itoa(idAdmin),
+	}}, headerNewRank, invalidParameter)
+
+	// newRank is optional, so an empty value still counts as present (see checkHeaderExists) and
+	// is rejected the same way as any other unrecognised rank, while omitting it along with every
+	// other mutation is refused as an empty request.
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerUserId,
+		Value: strconv.Itoa(idAdmin),
+	}, {
+		Name:  headerNewRank,
+		Value: "",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"invalid rank","ErrorCode":4}`)
+
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerUserId,
+		Value: strconv.Itoa(idAdmin),
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"no mutation requested","ErrorCode":4}`)
 
 	// Demoting an admin requires outranking them, and only the super admin does - see
 	// canAdministerUser and TestAuthorisationCannotDemoteAdminWithoutRank for the rank-2 case
@@ -640,7 +654,7 @@ func TestUserChangeRank(t *testing.T) {
 	user, ok := database.GetUser(idAdmin)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqual(t, user.UserLevel, models.UserLevelAdmin)
-	w, r := getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
+	w, r = getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
 		Name:  headerUserId,
 		Value: strconv.Itoa(idAdmin),
 	}, {
@@ -686,7 +700,7 @@ func TestUserChangeRank(t *testing.T) {
 	database.SaveUser(user, false)
 
 	defer test.ExpectPanic(t)
-	apiChangeUserRank(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
+	apiModifyUser(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 // TestAuthorisationCannotDemoteAdminWithoutRank verifies that a rank-2 user holding only
@@ -704,7 +718,7 @@ func TestAuthorisationCannotDemoteAdminWithoutRank(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqual(t, admin.UserLevel, models.UserLevelAdmin)
 
-	w, r := getRecorder("/user/changeRank", actorKey.Id, []test.Header{{
+	w, r := getRecorder("/user/modify", actorKey.Id, []test.Header{{
 		Name:  "userid",
 		Value: strconv.Itoa(idAdmin),
 	}, {
@@ -831,7 +845,7 @@ func TestAuthorisationAdminCanAdministerUser(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, user.HasPermission(models.UserPermReplaceUploads), false)
 
-	w, r = getRecorder("/user/changeRank", idApiKeyAdmin, []test.Header{{
+	w, r = getRecorder("/user/modify", idApiKeyAdmin, []test.Header{{
 		Name:  "userid",
 		Value: strconv.Itoa(idUser),
 	}, {
@@ -974,11 +988,6 @@ func TestUserModify(t *testing.T) {
 	}
 	invalidParameter := []invalidParameterValue{
 		{
-			Value:        "",
-			ErrorMessage: `{"Result":"error","ErrorMessage":"header userpermission is required","ErrorCode":4}`,
-			StatusCode:   400,
-		},
-		{
 			Value:        "invalid",
 			ErrorMessage: `{"Result":"error","ErrorMessage":"invalid permission","ErrorCode":4}`,
 			StatusCode:   400,
@@ -990,6 +999,30 @@ func TestUserModify(t *testing.T) {
 		},
 	}
 	testInvalidParameters(t, apiUrl, apiKey.Id, validHeaders, headerPermission, invalidParameter)
+
+	// userpermission and permissionModifier are only required together, unlike the plain-empty
+	// convenience case testInvalidParameters covers above: a header sent with an empty value
+	// still counts as present (see checkHeaderExists), so it reaches the switch below and is
+	// rejected the same way as any other unrecognised value, while omitting it entirely is what
+	// trips the together-check.
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerUserId,
+		Value: strconv.Itoa(idAdmin),
+	}, {
+		Name:  headerPermission,
+		Value: "",
+	}, {
+		Name:  headerModifier,
+		Value: "GRANT",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"invalid permission","ErrorCode":4}`)
+
+	w, r = getRecorder(apiUrl, apiKey.Id, validHeaders)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"userpermission and permissionModifier must be provided together","ErrorCode":4}`)
 
 	// Use a unique username to avoid test pollution
 	uniqueUsername := "ToModify_" + helper.GenerateRandomString(8)
@@ -1005,21 +1038,132 @@ func TestUserModify(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 }
 
+// TestUserModifyOptionalKeys verifies that /user/modify's rank, permission and resetPassword
+// mutations - each its own endpoint before this consolidation - can be requested alone or
+// together in the same call, and that a request specifying none of them is refused rather than
+// silently doing nothing.
+func TestUserModifyOptionalKeys(t *testing.T) {
+	const apiUrl = "/user/modify"
+
+	setPermissionApikey(t, idApiKeySuperAdmin, models.ApiPermManageUsers)
+	defer removePermissionApikey(t, idApiKeySuperAdmin, models.ApiPermManageUsers)
+
+	uniqueUsername := "ToModifyKeys_" + helper.GenerateRandomString(8)
+	database.SaveUser(models.User{
+		Name:         uniqueUsername,
+		UserLevel:    models.UserLevelUser,
+		Permissions:  models.UserPermissionNone,
+		AuthProvider: models.AuthProviderInternal,
+	}, true)
+	retrieved, ok := database.GetUserByName(uniqueUsername)
+	test.IsEqualBool(t, ok, true)
+	targetId := retrieved.Id
+
+	// No mutation at all is refused.
+	w, r := getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(targetId),
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"no mutation requested","ErrorCode":4}`)
+
+	// Permission alone.
+	w, r = getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(targetId),
+	}, {
+		Name:  "userpermission",
+		Value: "PERM_REPLACE",
+	}, {
+		Name:  "permissionModifier",
+		Value: "GRANT",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	user, ok := database.GetUser(targetId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, user.HasPermission(models.UserPermReplaceUploads), true)
+	test.IsEqual(t, user.UserLevel, models.UserLevelUser)
+	test.IsEqualBool(t, user.ResetPassword, false)
+
+	// Rank, combined with a fresh permission grant, in the same call.
+	w, r = getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(targetId),
+	}, {
+		Name:  "newRank",
+		Value: "ADMIN",
+	}, {
+		Name:  "userpermission",
+		Value: "PERM_DELETE",
+	}, {
+		Name:  "permissionModifier",
+		Value: "GRANT",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	user, ok = database.GetUser(targetId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, user.UserLevel, models.UserLevelAdmin)
+	test.IsEqualBool(t, user.HasPermission(models.UserPermDeleteOtherUploads), true)
+
+	// resetPassword, combined with a demotion back to user, in the same call.
+	w, r = getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(targetId),
+	}, {
+		Name:  "newRank",
+		Value: "USER",
+	}, {
+		Name:  "resetPassword",
+		Value: "true",
+	}, {
+		Name:  "generateNewPassword",
+		Value: "true",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	user, ok = database.GetUser(targetId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, user.UserLevel, models.UserLevelUser)
+	test.IsEqualBool(t, user.ResetPassword, true)
+	type response struct {
+		Result   string `json:"Result"`
+		Password string `json:"password"`
+	}
+	var resp response
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	test.IsNil(t, err)
+	test.IsNotEmpty(t, resp.Password)
+}
+
 func TestUserPasswordReset(t *testing.T) {
-	const apiUrl = "/user/resetPassword"
+	const apiUrl = "/user/modify"
 	const headerUserId = "userid"
+	const headerResetPassword = "resetPassword"
 	const headerSetNewPw = "generateNewPassword"
 
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
-	testInvalidUserId(t, apiUrl, apiKey.Id, []test.Header{})
+	testInvalidUserId(t, apiUrl, apiKey.Id, []test.Header{{Name: headerResetPassword, Value: "true"}})
+
+	// Resetting an admin's password requires outranking them, same as every other mutation this
+	// endpoint can make - see canAdministerUser. apiKey's owner (idUser) is a plain user, so the
+	// actual reset below acts as the super admin instead.
+	setPermissionApikey(t, idApiKeySuperAdmin, models.ApiPermManageUsers)
+	defer removePermissionApikey(t, idApiKeySuperAdmin, models.ApiPermManageUsers)
+
 	user, ok := database.GetUser(idAdmin)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, user.ResetPassword, false)
 	user.Password = "1234"
 	database.SaveUser(user, false)
-	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+	w, r := getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
 		Name:  headerUserId,
 		Value: strconv.Itoa(idAdmin),
+	}, {
+		Name:  headerResetPassword,
+		Value: "true",
 	}, {
 		Name:  headerSetNewPw,
 		Value: "false",
@@ -1038,9 +1182,12 @@ func TestUserPasswordReset(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, user.ResetPassword, false)
 
-	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{{
+	w, r = getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
 		Name:  headerUserId,
 		Value: strconv.Itoa(idAdmin),
+	}, {
+		Name:  headerResetPassword,
+		Value: "true",
 	}, {
 		Name:  headerSetNewPw,
 		Value: "true",
@@ -1062,18 +1209,22 @@ func TestUserPasswordReset(t *testing.T) {
 	test.IsNotEmpty(t, resp.Password)
 
 	defer test.ExpectPanic(t)
-	apiResetPassword(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
+	apiModifyUser(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 // TestUserPasswordResetRefusesNonInternalProvider verifies that an admin holding
 // PERM_USERS must not be able to mint a plaintext password for a Google-provisioned user, since
 // that would bypass the IdP entirely (its MFA and deprovisioning) the moment the row has a
-// password hash. Before this fix, apiResetPassword never checked AuthProvider at all.
+// password hash. Before this fix, apiResetPassword (now folded into apiModifyUser) never checked
+// AuthProvider at all.
 func TestUserPasswordResetRefusesNonInternalProvider(t *testing.T) {
-	const apiUrl = "/user/resetPassword"
+	const apiUrl = "/user/modify"
 	const idGoogleUser = 910
 
-	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
+	// The target is a plain user, so the actor must outrank one - idAdmin does, idUser (this
+	// package's usual testAuthorisation actor) does not.
+	setPermissionApikey(t, idApiKeyAdmin, models.ApiPermManageUsers)
+	defer removePermissionApikey(t, idApiKeyAdmin, models.ApiPermManageUsers)
 
 	database.SaveUser(models.User{
 		Id:           idGoogleUser,
@@ -1082,9 +1233,12 @@ func TestUserPasswordResetRefusesNonInternalProvider(t *testing.T) {
 		AuthProvider: models.AuthProviderGoogle,
 	}, false)
 
-	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+	w, r := getRecorder(apiUrl, idApiKeyAdmin, []test.Header{{
 		Name:  "userid",
 		Value: strconv.Itoa(idGoogleUser),
+	}, {
+		Name:  "resetPassword",
+		Value: "true",
 	}, {
 		Name:  "generateNewPassword",
 		Value: "true",
@@ -1572,7 +1726,7 @@ func TestAuthList(t *testing.T) {
 }
 
 func TestChangeFriendlyName(t *testing.T) {
-	const apiUrl = "/auth/friendlyname"
+	const apiUrl = "/auth/modify"
 	const headerApiKeyModify = "targetKey"
 	const headerNewName = "friendlyName"
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermApiMod)
@@ -1591,6 +1745,9 @@ func TestChangeFriendlyName(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, key.FriendlyName, "New name for the key")
 
+	// friendlyName is optional now (it can be combined with a permission change instead), so an
+	// empty value no longer means "header missing" - it reaches setApiKeyFriendlyName like any
+	// other value, which treats an empty name as a reset to the default.
 	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{{
 		Name:  headerApiKeyModify,
 		Value: apiKey.Id,
@@ -1599,10 +1756,22 @@ func TestChangeFriendlyName(t *testing.T) {
 		Value: "",
 	}})
 	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	key, ok = database.GetApiKey(apiKey.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, key.FriendlyName, "Unnamed key")
+
+	// Omitting targetKey's only two mutations entirely is refused as an empty request.
+	w, r = getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerApiKeyModify,
+		Value: apiKey.Id,
+	}})
+	Process(w, r)
 	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"no mutation requested","ErrorCode":4}`)
 
 	defer test.ExpectPanic(t)
-	apiChangeFriendlyName(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
+	apiModifyApiKey(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 // TestChangeFriendlyNameNonAscii verifies that renaming an API key with a non-ASCII friendlyName,
@@ -1610,7 +1779,7 @@ func TestChangeFriendlyName(t *testing.T) {
 // paramAuthFriendlyName.FriendlyName carried supportBase64, the literal "base64:..." string was
 // stored as the key's friendly name.
 func TestChangeFriendlyNameNonAscii(t *testing.T) {
-	const apiUrl = "/auth/friendlyname"
+	const apiUrl = "/auth/modify"
 	const headerApiKeyModify = "targetKey"
 	const headerNewName = "friendlyName"
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermApiMod)
@@ -1665,11 +1834,6 @@ func TestApikeyModify(t *testing.T) {
 	}
 	invalidParameter := []invalidParameterValue{
 		{
-			Value:        "",
-			ErrorMessage: `{"Result":"error","ErrorMessage":"header permission is required","ErrorCode":4}`,
-			StatusCode:   400,
-		},
-		{
 			Value:        "invalid",
 			ErrorMessage: `{"Result":"error","ErrorMessage":"invalid permission","ErrorCode":4}`,
 			StatusCode:   400,
@@ -1696,6 +1860,30 @@ func TestApikeyModify(t *testing.T) {
 		},
 	}
 	testInvalidParameters(t, apiUrl, apiKey.Id, validHeaders, headerPermission, invalidParameter)
+
+	// permission and permissionModifier are only required together, unlike the plain-empty
+	// convenience case testInvalidParameters covers above: a header sent with an empty value
+	// still counts as present (see checkHeaderExists), so it reaches the switch below and is
+	// rejected the same way as any other unrecognised value, while omitting it entirely is what
+	// trips the together-check.
+	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+		Name:  headerApiKeyModify,
+		Value: retrievedApiKey.Id,
+	}, {
+		Name:  headerPermission,
+		Value: "",
+	}, {
+		Name:  headerModifier,
+		Value: "GRANT",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"invalid permission","ErrorCode":4}`)
+
+	w, r = getRecorder(apiUrl, apiKey.Id, validHeaders)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"permission and permissionModifier must be provided together","ErrorCode":4}`)
 
 	grantUserPermission(t, idUser, models.UserPermReplaceUploads)
 	grantUserPermission(t, idUser, models.UserPermManageUsers)

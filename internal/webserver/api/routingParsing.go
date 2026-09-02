@@ -560,48 +560,6 @@ func (p *paramAuthCreate) New() requestParser {
 	return &paramAuthCreate{}
 }
 
-// ParseRequest reads r and saves the passed header values in the paramAuthFriendlyName struct
-// In the end, ProcessParameter() is called
-func (p *paramAuthFriendlyName) ParseRequest(r *http.Request) error {
-	var err error
-	var exists bool
-	p.foundHeaders = make(map[string]bool)
-
-	// RequestParser header value "targetKey", required: true
-	exists, err = checkHeaderExists(r, "targetKey", true, true)
-	if err != nil {
-		return err
-	}
-	p.foundHeaders["targetKey"] = exists
-	if exists {
-		p.KeyId = r.Header.Get("targetKey")
-	}
-
-	// RequestParser header value "friendlyName", required: true, has base64support
-	exists, err = checkHeaderExists(r, "friendlyName", true, true)
-	if err != nil {
-		return err
-	}
-	p.foundHeaders["friendlyName"] = exists
-	if exists {
-		p.FriendlyName = r.Header.Get("friendlyName")
-		if strings.HasPrefix(p.FriendlyName, "base64:") {
-			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.FriendlyName, "base64:"))
-			if err != nil {
-				return err
-			}
-			p.FriendlyName = string(decoded)
-		}
-	}
-
-	return p.ProcessParameter(r)
-}
-
-// New returns a new instance of paramAuthFriendlyName struct
-func (p *paramAuthFriendlyName) New() requestParser {
-	return &paramAuthFriendlyName{}
-}
-
 // ParseRequest reads r and saves the passed header values in the paramAuthModify struct
 // In the end, ProcessParameter() is called
 func (p *paramAuthModify) ParseRequest(r *http.Request) error {
@@ -619,8 +577,8 @@ func (p *paramAuthModify) ParseRequest(r *http.Request) error {
 		p.KeyId = r.Header.Get("targetKey")
 	}
 
-	// RequestParser header value "permission", required: true
-	exists, err = checkHeaderExists(r, "permission", true, true)
+	// RequestParser header value "permission", required: false
+	exists, err = checkHeaderExists(r, "permission", false, true)
 	if err != nil {
 		return err
 	}
@@ -629,14 +587,31 @@ func (p *paramAuthModify) ParseRequest(r *http.Request) error {
 		p.permissionRaw = r.Header.Get("permission")
 	}
 
-	// RequestParser header value "permissionModifier", required: true
-	exists, err = checkHeaderExists(r, "permissionModifier", true, true)
+	// RequestParser header value "permissionModifier", required: false
+	exists, err = checkHeaderExists(r, "permissionModifier", false, true)
 	if err != nil {
 		return err
 	}
 	p.foundHeaders["permissionModifier"] = exists
 	if exists {
-		p.permissionModifier = r.Header.Get("permissionModifier")
+		p.permissionModifierRaw = r.Header.Get("permissionModifier")
+	}
+
+	// RequestParser header value "friendlyName", required: false, has base64support
+	exists, err = checkHeaderExists(r, "friendlyName", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["friendlyName"] = exists
+	if exists {
+		p.FriendlyName = r.Header.Get("friendlyName")
+		if strings.HasPrefix(p.FriendlyName, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.FriendlyName, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.FriendlyName = string(decoded)
+		}
 	}
 
 	return p.ProcessParameter(r)
@@ -714,44 +689,6 @@ func (p *paramUserCreate) New() requestParser {
 	return &paramUserCreate{}
 }
 
-// ParseRequest reads r and saves the passed header values in the paramUserChangeRank struct
-// In the end, ProcessParameter() is called
-func (p *paramUserChangeRank) ParseRequest(r *http.Request) error {
-	var err error
-	var exists bool
-	p.foundHeaders = make(map[string]bool)
-
-	// RequestParser header value "userid", required: true
-	exists, err = checkHeaderExists(r, "userid", true, false)
-	if err != nil {
-		return err
-	}
-	p.foundHeaders["userid"] = exists
-	if exists {
-		p.Id, err = parseHeaderInt(r, "userid")
-		if err != nil {
-			return fmt.Errorf("invalid value in header userid supplied")
-		}
-	}
-
-	// RequestParser header value "newRank", required: true
-	exists, err = checkHeaderExists(r, "newRank", true, true)
-	if err != nil {
-		return err
-	}
-	p.foundHeaders["newRank"] = exists
-	if exists {
-		p.newRankRaw = r.Header.Get("newRank")
-	}
-
-	return p.ProcessParameter(r)
-}
-
-// New returns a new instance of paramUserChangeRank struct
-func (p *paramUserChangeRank) New() requestParser {
-	return &paramUserChangeRank{}
-}
-
 // ParseRequest reads r and saves the passed header values in the paramUserDelete struct
 // In the end, ProcessParameter() is called
 func (p *paramUserDelete) ParseRequest(r *http.Request) error {
@@ -813,8 +750,18 @@ func (p *paramUserModify) ParseRequest(r *http.Request) error {
 		}
 	}
 
-	// RequestParser header value "userpermission", required: true
-	exists, err = checkHeaderExists(r, "userpermission", true, true)
+	// RequestParser header value "newRank", required: false
+	exists, err = checkHeaderExists(r, "newRank", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["newRank"] = exists
+	if exists {
+		p.newRankRaw = r.Header.Get("newRank")
+	}
+
+	// RequestParser header value "userpermission", required: false
+	exists, err = checkHeaderExists(r, "userpermission", false, true)
 	if err != nil {
 		return err
 	}
@@ -823,41 +770,26 @@ func (p *paramUserModify) ParseRequest(r *http.Request) error {
 		p.permissionRaw = r.Header.Get("userpermission")
 	}
 
-	// RequestParser header value "permissionModifier", required: true
-	exists, err = checkHeaderExists(r, "permissionModifier", true, true)
+	// RequestParser header value "permissionModifier", required: false
+	exists, err = checkHeaderExists(r, "permissionModifier", false, true)
 	if err != nil {
 		return err
 	}
 	p.foundHeaders["permissionModifier"] = exists
 	if exists {
-		p.permissionModifier = r.Header.Get("permissionModifier")
+		p.permissionModifierRaw = r.Header.Get("permissionModifier")
 	}
 
-	return p.ProcessParameter(r)
-}
-
-// New returns a new instance of paramUserModify struct
-func (p *paramUserModify) New() requestParser {
-	return &paramUserModify{}
-}
-
-// ParseRequest reads r and saves the passed header values in the paramUserResetPw struct
-// In the end, ProcessParameter() is called
-func (p *paramUserResetPw) ParseRequest(r *http.Request) error {
-	var err error
-	var exists bool
-	p.foundHeaders = make(map[string]bool)
-
-	// RequestParser header value "userid", required: true
-	exists, err = checkHeaderExists(r, "userid", true, false)
+	// RequestParser header value "resetPassword", required: false
+	exists, err = checkHeaderExists(r, "resetPassword", false, false)
 	if err != nil {
 		return err
 	}
-	p.foundHeaders["userid"] = exists
+	p.foundHeaders["resetPassword"] = exists
 	if exists {
-		p.Id, err = parseHeaderInt(r, "userid")
+		p.ResetPassword, err = parseHeaderBool(r, "resetPassword")
 		if err != nil {
-			return fmt.Errorf("invalid value in header userid supplied")
+			return fmt.Errorf("invalid value in header resetPassword supplied")
 		}
 	}
 
@@ -868,7 +800,7 @@ func (p *paramUserResetPw) ParseRequest(r *http.Request) error {
 	}
 	p.foundHeaders["generateNewPassword"] = exists
 	if exists {
-		p.NewPassword, err = parseHeaderBool(r, "generateNewPassword")
+		p.GenerateNewPassword, err = parseHeaderBool(r, "generateNewPassword")
 		if err != nil {
 			return fmt.Errorf("invalid value in header generateNewPassword supplied")
 		}
@@ -877,9 +809,9 @@ func (p *paramUserResetPw) ParseRequest(r *http.Request) error {
 	return p.ProcessParameter(r)
 }
 
-// New returns a new instance of paramUserResetPw struct
-func (p *paramUserResetPw) New() requestParser {
-	return &paramUserResetPw{}
+// New returns a new instance of paramUserModify struct
+func (p *paramUserModify) New() requestParser {
+	return &paramUserModify{}
 }
 
 // ParseRequest parses the header file. As paramE2eStore has no fields with the
