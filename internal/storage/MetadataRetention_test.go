@@ -515,3 +515,100 @@ func TestDisposePreservesEncryptedFileNameWhileSealed(t *testing.T) {
 	test.IsEqualBool(t, stored.IsDisposed(), true)
 	test.IsEqualString(t, stored.Name, secretName)
 }
+
+// --- cleanOrphanShareGrants: the sweep that removes a grant whose resource is gone ---
+
+// TestCleanUpOrphanShareGrantsRemovesGrantForDeletedResource is the safety net for a crash
+// between a resource delete and its cascade (database.DeleteFileBundle, DeleteFileRequest,
+// DeleteMetaData all call DeleteShareGrants themselves, but nothing catches a process that dies
+// between the two), and it is also the one-time backfill for grants that were orphaned before
+// that cascade existed: a grant referencing a bundle that was never saved has no cascade that
+// could ever have caught it, so only this sweep does. A grant on a bundle that genuinely exists
+// must survive the very same sweep untouched.
+func TestCleanUpOrphanShareGrantsRemovesGrantForDeletedResource(t *testing.T) {
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "orphan-sweep-" + helper.GenerateRandomString(8) + "@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	t.Cleanup(func() { database.DeleteShareRecipient(recipientId) })
+
+	orphanBundleId := "orphan_bundle_" + helper.GenerateRandomString(8)
+	database.SetShareGrants(models.ShareResourceBundle, orphanBundleId, []int{recipientId}, 1, 0)
+
+	// Control: a grant on a bundle that genuinely exists must not be touched by the same sweep.
+	liveBundleId := "live_bundle_" + helper.GenerateRandomString(8)
+	database.SaveFileBundle(models.FileBundle{
+		Id:           liveBundleId,
+		Name:         "orphan-sweep-live-bundle",
+		CreationDate: time.Now().Unix(),
+	})
+	t.Cleanup(func() { database.DeleteFileBundle(models.FileBundle{Id: liveBundleId}) })
+	database.SetShareGrants(models.ShareResourceBundle, liveBundleId, []int{recipientId}, 1, 0)
+
+	CleanUp(false)
+
+	test.IsEqualInt(t, len(database.GetShareGrants(models.ShareResourceBundle, orphanBundleId)), 0)
+	test.IsEqualInt(t, len(database.GetShareGrants(models.ShareResourceBundle, liveBundleId)), 1)
+}
+
+// TestCleanUpKeepsGrantsForDisposedButNotPurgedFile is the case the orphan sweep must get
+// right: a disposed file's metadata row is kept on purpose, as owner-visible history, until
+// purgeFile removes it once the retention window elapses - and purgeFile is what deletes its
+// grants, not the orphan sweep. GetMetaDataById returns a disposed row exactly like a live one,
+// so shareResourceExists must (and does) treat it as still existing. Getting this wrong would
+// delete a share's grants at dispose time, which is retention's whole point to prevent.
+func TestCleanUpKeepsGrantsForDisposedButNotPurgedFile(t *testing.T) {
+	setRetention(t, "24h")
+	id := "disposed_not_purged_" + helper.GenerateRandomString(8)
+	database.SaveMetaData(models.File{
+		Id:             id,
+		Name:           "disposed-not-purged.txt",
+		DisposedAt:     time.Now().Add(-time.Minute).Unix(),
+		DisposalReason: models.DisposalReasonExpired,
+	})
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "disposed-not-purged-" + id + "@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, id)
+		database.DeleteShareRecipient(recipientId)
+	})
+	database.SetShareGrants(models.ShareResourceFile, id, []int{recipientId}, 999, 0)
+
+	CleanUp(false)
+
+	stored, ok := database.GetMetaDataById(id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.IsDisposed(), true)
+
+	grants := database.GetShareGrants(models.ShareResourceFile, id)
+	test.IsEqualInt(t, len(grants), 1)
+}
+
+// --- CleanUpExpiredShareLoginTokens: was never called by anything before this ---
+
+// TestCleanUpRunsExpiredShareLoginTokenSweep proves storage.CleanUp actually calls
+// database.CleanUpExpiredShareLoginTokens, which previously had no caller anywhere in the
+// codebase: a token whose ExpiresAt is already in the past must be gone after CleanUp runs, not
+// merely after some other code path that never existed.
+func TestCleanUpRunsExpiredShareLoginTokenSweep(t *testing.T) {
+	tokenHash := "expired-sweep-token-" + helper.GenerateRandomString(8)
+	database.SaveShareLoginToken(models.ShareLoginToken{
+		TokenHash:    tokenHash,
+		RecipientId:  1,
+		ResourceType: models.ShareResourceFile,
+		ResourceId:   "expired-sweep-resource",
+		CreatedAt:    time.Now().Add(-time.Hour).Unix(),
+		ExpiresAt:    time.Now().Add(-time.Minute).Unix(),
+	})
+
+	_, ok := database.GetShareLoginToken(tokenHash)
+	test.IsEqualBool(t, ok, true)
+
+	CleanUp(false)
+
+	_, ok = database.GetShareLoginToken(tokenHash)
+	test.IsEqualBool(t, ok, false)
+}

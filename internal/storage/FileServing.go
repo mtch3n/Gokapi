@@ -1065,6 +1065,8 @@ func CleanUp(periodic bool) {
 	cleanInvalidApiKeys()
 	cleanInvalidFileRequests()
 	cleanInvalidBundles()
+	database.CleanUpExpiredShareLoginTokens(timeNow)
+	cleanOrphanShareGrants()
 	database.RunGarbageCollection()
 
 	if periodic {
@@ -1143,6 +1145,52 @@ func cleanInvalidBundles() {
 		if !hasValidMember {
 			database.DeleteFileBundle(bundle)
 		}
+	}
+}
+
+// cleanOrphanShareGrants removes share grants whose resource no longer
+// exists. This is the safety net for a crash between a resource delete and
+// its cascade (see database.DeleteMetaData, DeleteFileBundle,
+// DeleteFileRequest, and purgeFile/deleteFileHard above), and it is also the
+// one-time backfill for grants that were orphaned before that cascade
+// existed: a grant references a resource across three separate tables
+// depending on its type, so a schema migration step cannot resolve that, and
+// redis has no joins to filter with. Runs on every sweep; cheap at this
+// install's scale.
+//
+// A file that is disposed but not yet purged is NOT an orphan: its metadata
+// row still exists deliberately, as owner-visible history (GetMetaDataById
+// returns disposed rows same as live ones), and its grants are removed by
+// purgeFile once the retention window elapses. Only a resource whose row is
+// gone outright counts as orphaned here.
+func cleanOrphanShareGrants() {
+	for _, recipient := range database.GetAllShareRecipients() {
+		for _, grant := range database.GetShareGrantsForRecipient(recipient.Id) {
+			if shareResourceExists(grant.ResourceType, grant.ResourceId) {
+				continue
+			}
+			database.DeleteShareGrants(grant.ResourceType, grant.ResourceId)
+		}
+	}
+}
+
+// shareResourceExists reports whether the resource a share grant points at is
+// still present, for cleanOrphanShareGrants to decide whether the grant is
+// orphaned. A disposed-but-not-purged file still exists by this measure,
+// since GetMetaDataById returns it.
+func shareResourceExists(resourceType int, resourceId string) bool {
+	switch resourceType {
+	case models.ShareResourceFile:
+		_, exists := database.GetMetaDataById(resourceId)
+		return exists
+	case models.ShareResourceBundle:
+		_, exists := database.GetFileBundle(resourceId)
+		return exists
+	case models.ShareResourceFileRequest:
+		_, exists := database.GetFileRequest(resourceId)
+		return exists
+	default:
+		return false
 	}
 }
 
