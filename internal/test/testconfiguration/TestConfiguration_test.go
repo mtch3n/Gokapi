@@ -14,7 +14,7 @@ import (
 )
 
 func TestCreate(t *testing.T) {
-	Create(true)
+	CreateWithPort(true, PortSelf)
 	test.IsEqualBool(t, helper.FolderExists(dataDir), true)
 	test.FileExists(t, configFile)
 	test.FileExists(t, "test/data/a8fdc205a9f19cc1c7507a60c4f01b13d11d7fd0")

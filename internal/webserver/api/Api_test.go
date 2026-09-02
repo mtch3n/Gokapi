@@ -31,7 +31,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	testconfiguration.Create(true)
+	testconfiguration.CreateWithPort(true, testconfiguration.PortApi)
 	configuration.Load()
 	configuration.ConnectDatabase()
 	generateTestData()
@@ -1884,7 +1884,7 @@ func TestUpload(t *testing.T) {
 	test.IsEqualString(t, result.FileInfo.Size, "3 B")
 	test.IsEqualInt(t, result.FileInfo.DownloadsRemaining, 200)
 	test.IsEqualBool(t, result.FileInfo.IsPasswordProtected, true)
-	test.IsEqualString(t, result.FileInfo.UrlDownload, "http://127.0.0.1:53843/d?id="+result.FileInfo.Id)
+	test.IsEqualString(t, result.FileInfo.UrlDownload, "http://127.0.0.1:53845/d?id="+result.FileInfo.Id)
 	// newFileId := result.FileInfo.Id
 	w, r := test.GetRecorder("POST", "/api/files/add", nil, []test.Header{{
 		Name:  "apikey",

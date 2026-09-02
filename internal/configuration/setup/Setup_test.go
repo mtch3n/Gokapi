@@ -27,7 +27,15 @@ import (
 
 var jsonForms []jsonFormObject
 
+// testPort is a dedicated port for this package's tests, distinct from
+// environment.DefaultPort (53842). RunIfFirstStart/RunConfigModification bind a real webserver
+// on whatever GOKAPI_PORT resolves to; using the real production default here would collide with
+// an actual gokapi instance already listening on it on the same host (e.g. a running dev
+// container), so tests set GOKAPI_PORT below instead of relying on the unset-env default.
+const testPort = "53849"
+
 func TestMain(m *testing.M) {
+	os.Setenv("GOKAPI_PORT", testPort)
 	testconfiguration.SetDirEnv()
 	exitVal := m.Run()
 	testconfiguration.Delete()
@@ -381,7 +389,7 @@ func TestRunConfigModification(t *testing.T) {
 	go func() {
 		waitForServer(t, true)
 		test.HttpPageResult(t, test.HttpTestConfig{
-			Url:             "http://localhost:53842/setup/start",
+			Url:             "http://localhost:53849/setup/start",
 			IsHtml:          false,
 			ExcludedContent: []string{"Gokapi Setup"},
 			Method:          "GET",
@@ -418,7 +426,7 @@ func isServerRunning(t *testing.T) bool {
 		Timeout: 100 * time.Millisecond,
 	}
 	t.Helper()
-	req, err := http.NewRequest("GET", "http://localhost:53842/admin", nil)
+	req, err := http.NewRequest("GET", "http://localhost:53849/admin", nil)
 	test.IsNil(t, err)
 	_, err = client.Do(req)
 	return err == nil
@@ -431,7 +439,7 @@ func TestIntegration(t *testing.T) {
 	waitForServer(t, true)
 
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/admin",
+		Url:             "http://localhost:53849/admin",
 		IsHtml:          false,
 		RequiredContent: []string{"Server is in maintenance mode"},
 		ExcludedContent: []string{"Downloads"},
@@ -439,14 +447,14 @@ func TestIntegration(t *testing.T) {
 		ResultCode:      200,
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/start",
+		Url:             "http://localhost:53849/setup/start",
 		IsHtml:          false,
 		RequiredContent: []string{"Thank you for choosing Gokapi"},
 		Method:          "GET",
 		ResultCode:      200,
 	})
 	test.HttpPostRequest(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/setupResult",
+		Url:             "http://localhost:53849/setup/setupResult",
 		ExcludedContent: []string{"\"result\": \"OK\""},
 		RequiredContent: []string{"\"result\": \"Error\""},
 		IsHtml:          false,
@@ -457,7 +465,7 @@ func TestIntegration(t *testing.T) {
 
 	setupVals := createInputInternalAuth()
 	test.HttpPageResultJson(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/setupResult",
+		Url:             "http://localhost:53849/setup/setupResult",
 		RequiredContent: []string{"\"result\": \"OK\""},
 		ExcludedContent: []string{"\"result\": \"Error\""},
 		IsHtml:          false,
@@ -478,11 +486,11 @@ func TestIntegration(t *testing.T) {
 	test.IsEqualBool(t, settings.Authentication.OnlyRegisteredUsers, false)
 	test.IsEqualString(t, settings.Authentication.HeaderKey, "")
 	test.IsEqualBool(t, strings.Contains(settings.Port, "127.0.0.1"), true)
-	test.IsEqualBool(t, strings.Contains(settings.Port, ":53842"), true)
+	test.IsEqualBool(t, strings.Contains(settings.Port, ":53849"), true)
 	test.IsEqualBool(t, settings.UseSsl, false)
 	test.IsEqualBool(t, settings.SaveIp, false)
 	test.IsEqualBool(t, settings.StoreShareKeys, false)
-	test.IsEqualString(t, settings.ServerUrl, "http://127.0.0.1:53842/")
+	test.IsEqualString(t, settings.ServerUrl, "http://127.0.0.1:53849/")
 	test.IsEqualString(t, settings.RedirectUrl, "https://github.com/Forceu/Gokapi/")
 	cconfig, ok := cloudconfig.Load()
 	test.IsEqualBool(t, ok, true)
@@ -504,7 +512,7 @@ func TestIntegration(t *testing.T) {
 
 	setupInput := createInputHeaderAuth()
 	test.HttpPageResultJson(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/start",
+		Url:             "http://localhost:53849/setup/start",
 		RequiredContent: []string{"Unauthorized"},
 		ExcludedContent: []string{"\"result\":"},
 		IsHtml:          false,
@@ -513,7 +521,7 @@ func TestIntegration(t *testing.T) {
 		Body:            strings.NewReader(setupInput.toJson()),
 	})
 	test.HttpPageResultJson(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/start",
+		Url:             "http://localhost:53849/setup/start",
 		RequiredContent: []string{"You can now change the Gokapi configuration."},
 		ExcludedContent: []string{"Unauthorized"},
 		IsHtml:          false,
@@ -523,7 +531,7 @@ func TestIntegration(t *testing.T) {
 	})
 
 	test.HttpPageResultJson(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/setupResult",
+		Url:             "http://localhost:53849/setup/setupResult",
 		RequiredContent: []string{"Unauthorized"},
 		ExcludedContent: []string{"\"result\":"},
 		IsHtml:          false,
@@ -532,7 +540,7 @@ func TestIntegration(t *testing.T) {
 		Body:            strings.NewReader(setupInput.toJson()),
 	})
 	test.HttpPageResultJson(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/setupResult",
+		Url:             "http://localhost:53849/setup/setupResult",
 		RequiredContent: []string{"\"result\": \"OK\""},
 		ExcludedContent: []string{"\"result\": \"Error\""},
 		IsHtml:          false,
@@ -555,11 +563,11 @@ func TestIntegration(t *testing.T) {
 	test.IsEqualString(t, settings.Authentication.HeaderKey, "testkey")
 	test.IsEqualBool(t, settings.Authentication.OnlyRegisteredUsers, true)
 	test.IsEqualBool(t, strings.Contains(settings.Port, "127.0.0.1"), false)
-	test.IsEqualBool(t, strings.Contains(settings.Port, ":53842"), true)
+	test.IsEqualBool(t, strings.Contains(settings.Port, ":53849"), true)
 	test.IsEqualBool(t, settings.UseSsl, true)
 	test.IsEqualBool(t, settings.SaveIp, true)
 	test.IsEqualBool(t, settings.StoreShareKeys, true)
-	test.IsEqualString(t, settings.ServerUrl, "http://127.0.0.1:53842/")
+	test.IsEqualString(t, settings.ServerUrl, "http://127.0.0.1:53849/")
 	test.IsEqualString(t, settings.RedirectUrl, "https://test.com")
 	test.IsEqualBool(t, settings.PicturesAlwaysLocal, false)
 	cconfig, ok = cloudconfig.Load()
@@ -576,7 +584,7 @@ func TestIntegration(t *testing.T) {
 
 	setupInput = createInputOAuth()
 	test.HttpPageResultJson(t, test.HttpTestConfig{
-		Url:             "http://localhost:53842/setup/setupResult",
+		Url:             "http://localhost:53849/setup/setupResult",
 		RequiredContent: []string{"\"result\": \"OK\""},
 		ExcludedContent: []string{"\"result\": \"Error\""},
 		IsHtml:          false,
@@ -737,8 +745,8 @@ func createInputInternalAuth() setupValues {
 	values.PublicName.Value = "Test Name"
 	values.UseSsl.Value = "0"
 	values.IncludeFilename.Value = "1"
-	values.Port.Value = "53842"
-	values.ExtUrl.Value = "http://127.0.0.1:53842/"
+	values.Port.Value = "53849"
+	values.ExtUrl.Value = "http://127.0.0.1:53849/"
 	values.RedirectUrl.Value = "https://github.com/Forceu/Gokapi/"
 	values.AuthenticationMode.Value = "0"
 	values.AuthUsername.Value = "admin"
@@ -772,8 +780,8 @@ func createInputHeaderAuth() setupValues {
 	values.BindLocalhost.Value = "0"
 	values.PublicName.Value = "Test Name"
 	values.UseSsl.Value = "1"
-	values.Port.Value = "53842"
-	values.ExtUrl.Value = "http://127.0.0.1:53842/"
+	values.Port.Value = "53849"
+	values.ExtUrl.Value = "http://127.0.0.1:53849/"
 	values.RedirectUrl.Value = "https://test.com"
 	values.AuthenticationMode.Value = "2"
 	values.AuthHeaderKey.Value = "testkey"
