@@ -1740,11 +1740,17 @@ func mayUserSeeShareRecipients(resourceType int, resourceId string, user models.
 // who can reach it.
 //
 // A caller who may not is told "not found" rather than "forbidden", so the
-// endpoint cannot be used to discover which IDs exist.
+// endpoint cannot be used to discover which IDs exist. The same "not found" now also covers
+// a resource that no longer exists in any usable sense - expired, exhausted, closed, or
+// pending deletion - the same liveness check the public resend path applies in
+// webserver.describeShareResource, so this path cannot be used to grant or list share access
+// on a resource nobody can actually reach any more.
 func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId string, user models.User) (shareaccess.Resource, bool) {
 	switch resourceType {
 	case models.ShareResourceFile:
-		file, found := database.GetMetaDataById(resourceId)
+		// storage.GetFile refuses a file that is expired, exhausted, or pending deletion,
+		// the same check the public file endpoint relies on to 404 for a dead file.
+		file, found := storage.GetFile(resourceId)
 		if !found || (file.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
 			return shareaccess.Resource{}, false
@@ -1759,10 +1765,18 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
 			return shareaccess.Resource{}, false
 		}
+		if !bundleHasOnlyLiveMembers(bundle.Id) {
+			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
+			return shareaccess.Resource{}, false
+		}
 		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.Name}, true
 	case models.ShareResourceFileRequest:
 		fileRequest, found := database.GetFileRequest(resourceId)
 		if !found || (fileRequest.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
+			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
+			return shareaccess.Resource{}, false
+		}
+		if fileRequest.Closed || (!fileRequest.IsUnlimitedTime() && fileRequest.Expiry < time.Now().Unix()) {
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
 			return shareaccess.Resource{}, false
 		}
@@ -1774,6 +1788,27 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "Unknown resource type.")
 		return shareaccess.Resource{}, false
 	}
+}
+
+// bundleHasOnlyLiveMembers reports whether every non-deleted, non-file-request member of a
+// bundle is currently servable - not expired, not exhausted. A bundle with no members, or
+// with even one that is, is not resolved by resolveShareResource. Mirrors the rule
+// internal/webserver applies to the public folder endpoints (see bundleAvailability there);
+// duplicated rather than shared because the two live in different packages and the check
+// itself is a handful of lines.
+func bundleHasOnlyLiveMembers(bundleId string) bool {
+	timeNow := time.Now().Unix()
+	found := false
+	for _, file := range database.GetAllMetadata() {
+		if file.BundleId != bundleId || file.IsPendingForDeletion() || file.IsFileRequest() {
+			continue
+		}
+		found = true
+		if storage.IsExpiredFile(file, timeNow) {
+			return false
+		}
+	}
+	return found
 }
 
 // shareExpiry reports when the resource stops existing, or 0 when it never
