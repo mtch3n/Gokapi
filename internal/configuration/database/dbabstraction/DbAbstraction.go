@@ -136,8 +136,10 @@ type Database interface {
 	HasShareGrant(resourceType int, resourceId string, recipientId int) bool
 	// GetShareGrantsForRecipient returns every grant the recipient holds.
 	GetShareGrantsForRecipient(recipientId int) []models.ShareGrant
-	// DeleteShareGrants removes every grant on a resource. Called whenever the
-	// resource is removed, so a grant cannot outlive what it refers to.
+	// DeleteShareGrants removes every grant on a resource, and every login
+	// token issued against it. Called whenever the resource is removed, or its
+	// recipient list is cleared, so neither a grant nor a token can outlive
+	// what it refers to.
 	DeleteShareGrants(resourceType int, resourceId string)
 
 	// IncreaseShareGrantDownloadCount atomically records one download by this

@@ -255,16 +255,33 @@ func (p DatabaseProvider) GetShareGrantsForRecipient(recipientId int) []models.S
 	return result
 }
 
-// DeleteShareGrants removes every grant on a resource.
+// DeleteShareGrants removes every grant on a resource, and every login token
+// issued against it: once the grant is gone a leftover token would still let
+// its holder in, so the two must go together. Redis has no resource index for
+// tokens, so this scans allShareLoginTokens() the same way RevokeShareLoginTokens
+// does. Everything runs in one MULTI/EXEC, matching DeleteShareRecipient.
 func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string) {
 	if resourceId == "" {
 		return
 	}
-	for _, grant := range p.GetShareGrants(resourceType, resourceId) {
+	grants := p.GetShareGrants(resourceType, resourceId)
+	tokens := p.allShareLoginTokens()
+
+	conn := p.pool.Get()
+	defer conn.Close()
+	helper.Check(conn.Send("MULTI"))
+	for _, grant := range grants {
 		key := grantKey(resourceType, resourceId, grant.RecipientId)
-		p.deleteKey(prefixShareGrant + key)
-		p.deleteHashmapField(prefixShareGrantByUser+strconv.Itoa(grant.RecipientId), key)
+		helper.Check(conn.Send("DEL", p.dbPrefix+prefixShareGrant+key))
+		helper.Check(conn.Send("HDEL", p.dbPrefix+prefixShareGrantByUser+strconv.Itoa(grant.RecipientId), key))
 	}
+	for _, token := range tokens {
+		if token.ResourceType == resourceType && token.ResourceId == resourceId {
+			helper.Check(conn.Send("DEL", p.dbPrefix+prefixShareLoginToken+token.TokenHash))
+		}
+	}
+	_, err := conn.Do("EXEC")
+	helper.Check(err)
 }
 
 // ---------------------------------------------------------------------------
