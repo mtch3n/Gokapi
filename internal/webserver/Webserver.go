@@ -1408,6 +1408,12 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	if file.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, file.BundleId) {
 		isAuthorisedRecipient = isAuthorisedRecipient && mayAccessShare(w, r, models.ShareResourceBundle, file.BundleId)
 	}
+	if !isAuthorisedRecipient {
+		// An unthrottled fast 200 for a real, restricted id next to every unknown id's slow 404
+		// from respondPubApiNotFound would itself be an existence oracle - a correct guess would
+		// answer faster than a wrong one. The response below is unchanged; only its timing is.
+		ratelimiter.WaitOnFailedId(r)
+	}
 
 	// The filename is withheld until the caller has proved it may have the
 	// file. It is health-adjacent, so leaking it to anyone holding the ID

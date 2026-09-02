@@ -2241,6 +2241,82 @@ func TestPublicApiFileMetadataHidesSizeExpiryForNonRecipient(t *testing.T) {
 	}
 }
 
+// TestPublicApiFileMetadataRateLimitsUnauthorisedIdentityRecipient is the failing-first test for
+// closing the /pubapi/file timing oracle: an identity-restricted file answered a non-recipient
+// with an immediate 200, while an unknown id went through respondPubApiNotFound and was throttled
+// by ratelimiter.WaitOnFailedId - so a real, restricted id answered faster than a wrong guess,
+// letting ids be enumerated by timing. pubApiFileMetadata must now consult the same limiter for a
+// non-recipient, without changing the response itself: the "this link is for specific people"
+// 200 is deliberately kept (see TestPublicApiFileMetadataHidesSizeExpiryForNonRecipient), only its
+// timing changes.
+//
+// Rate limiting is switched on only for the duration of this test, against an id/IP pairing no
+// other test in this file drives through pubApiFileMetadata, so as not to disturb - or be
+// disturbed by - shared limiter state (see the identical concern in
+// TestApiUnsealRateLimitReturns429). The handler is called directly rather than over the network
+// listener so the RemoteAddr driving the limiter key is exact and not shared with any other test.
+func TestPublicApiFileMetadataRateLimitsUnauthorisedIdentityRecipient(t *testing.T) {
+	ratelimiter.SetUnitTestMode(false)
+	t.Cleanup(func() { ratelimiter.SetUnitTestMode(true) })
+
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "timing-oracle-restricted.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "timing-oracle-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	const ip = "203.0.113.201:54321"
+	call := func() (int, map[string]interface{}) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/pubapi/file?id="+fileId, nil)
+		r.RemoteAddr = ip
+		pubApiFileMetadata(w, r)
+		var body map[string]interface{}
+		test.IsNil(t, json.NewDecoder(w.Body).Decode(&body))
+		return w.Code, body
+	}
+
+	// WaitOnFailedId's burst of 10 lets the first ten calls through without blocking.
+	var firstCode int
+	var firstBody map[string]interface{}
+	for i := 0; i < 10; i++ {
+		firstCode, firstBody = call()
+	}
+
+	start := time.Now()
+	lastCode, lastBody := call()
+	elapsed := time.Since(start)
+
+	if elapsed < 700*time.Millisecond {
+		t.Fatalf("call past the burst returned in %v; expected WaitOnFailedId to have throttled it to ~1s, meaning the rate limiter was never consulted", elapsed)
+	}
+
+	// The response itself - status and body - must be exactly what a non-recipient always got;
+	// only the timing above may differ from the pre-fix behaviour.
+	test.IsEqualInt(t, firstCode, http.StatusOK)
+	test.IsEqualInt(t, lastCode, http.StatusOK)
+	test.IsEqual(t, lastBody, firstBody)
+	test.IsEqual(t, lastBody["isAuthorised"], false)
+}
+
 // TestPublicApiShareResendCooldownIsIndistinguishableFromNonRecipient is a regression test for
 // the resend endpoint being usable as a recipient-membership oracle: ErrCooldown was only
 // reachable once the grant check inside shareaccess.ResendLink had already passed, so a caller
