@@ -1054,3 +1054,28 @@ func LogShareLinkRedeemed(resourceType int, resourceId string, recipient models.
 	}
 	appendAuditEntryAsync(entry)
 }
+
+// LogShareInboxOpened records a staff user opening a share from their "shared with me" inbox.
+// This mints no new credential - it exchanges the caller's own existing grant for the same
+// recipient cookie the mailed link would have produced - so the event exists purely to answer
+// "did this account use the inbox path to reach the resource", distinct from the link-mailed and
+// link-redeemed events, which cover the original email delivery. Category auth, non-blocking.
+func LogShareInboxOpened(resourceType int, resourceId string, actor models.User) {
+	createLogEntry(categoryAuth, fmt.Sprintf("Share inbox: %s %s opened by %s (user #%d)",
+		shareResourceLabel(resourceType), resourceId, actor.Name, actor.Id), false)
+	entry := AuditEntry{
+		Category: categoryAuth,
+		Action:   "share.inbox.opened",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
+	}
+	switch resourceType {
+	case models.ShareResourceBundle:
+		entry.BundleId = resourceId
+	case models.ShareResourceFileRequest:
+		entry.RequestId = resourceId
+	default:
+		entry.FileId = resourceId
+	}
+	appendAuditEntryAsync(entry)
+}

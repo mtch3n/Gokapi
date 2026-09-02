@@ -323,19 +323,27 @@ func buildMessage(resource Resource, recipient models.ShareRecipient, rawToken, 
 	}
 }
 
+// PathPrefix returns the single-letter path segment the SPA's public routes use for a resource
+// type ("s" for a file, "f" for a folder, "r" for a file request). Shared by BuildAccessUrl,
+// which mails it inside the access link, and the inbox's open endpoint, which returns it in a
+// same-origin URL for a caller who already holds a cookie.
+func PathPrefix(resourceType int) string {
+	switch resourceType {
+	case models.ShareResourceBundle:
+		return "f"
+	case models.ShareResourceFileRequest:
+		return "r"
+	default:
+		return "s"
+	}
+}
+
 // BuildAccessUrl assembles the link mailed to a recipient.
 func BuildAccessUrl(baseUrl string, resource Resource, rawToken string) string {
-	prefix := "s"
-	switch resource.Type {
-	case models.ShareResourceBundle:
-		prefix = "f"
-	case models.ShareResourceFileRequest:
-		prefix = "r"
-	}
 	// The token rides in the URL fragment, not the query string: a fragment is never sent to
 	// the server, so it never reaches a reverse proxy's access log. The SPA reads it client-side
 	// and forwards it as the sharetoken request header instead (see ShareGuard.recipientFor).
-	return fmt.Sprintf("%s%s/%s#token=%s", ensureTrailingSlash(baseUrl), prefix, resource.Id, url.QueryEscape(rawToken))
+	return fmt.Sprintf("%s%s/%s#token=%s", ensureTrailingSlash(baseUrl), PathPrefix(resource.Type), resource.Id, url.QueryEscape(rawToken))
 }
 
 func ensureTrailingSlash(url string) string {

@@ -154,6 +154,24 @@ var routes = []apiRoute{
 		RequestParser: nil,
 	},
 	{
+		// No parameters: the caller's own identity (user.Name matched against a
+		// ShareRecipient email) is what selects the grants to return, so there is
+		// nothing for the client to supply.
+		Url:           "/share/inbox",
+		ApiPerm:       models.ApiPermView,
+		execution:     apiShareInbox,
+		RequestParser: nil,
+	},
+	{
+		// ApiPermDownload because this issues a download-capable recipient
+		// cookie for the resource, the same class of credential a mailed link
+		// hands out.
+		Url:           "/share/inbox/open",
+		ApiPerm:       models.ApiPermDownload,
+		execution:     apiShareInboxOpen,
+		RequestParser: &paramShareInboxOpen{},
+	},
+	{
 		Url:           "/files/replace",
 		ApiPerm:       models.ApiPermReplace,
 		execution:     apiReplaceFile,
@@ -845,6 +863,21 @@ func (p *paramShareRecipientsList) ProcessParameter(_ *http.Request) error {
 	if !models.IsValidShareResourceType(p.ResourceType) {
 		return errors.New("unknown resourceType")
 	}
+	return nil
+}
+
+type paramShareInboxOpen struct {
+	ResourceType int    `header:"resourceType"`
+	ResourceId   string `header:"resourceId" required:"true"`
+	Request      *http.Request
+	foundHeaders map[string]bool
+}
+
+func (p *paramShareInboxOpen) ProcessParameter(r *http.Request) error {
+	if !models.IsValidShareResourceType(p.ResourceType) {
+		return errors.New("unknown resourceType")
+	}
+	p.Request = r
 	return nil
 }
 

@@ -1758,6 +1758,149 @@ func apiShareRecipientsSummary(w http.ResponseWriter, _ requestParser, user mode
 	_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK", "shares": output})
 }
 
+// apiShareInbox lists every share the caller may open because a ShareRecipient row's email
+// matches the caller's own account name.
+//
+// This is derived, not materialised: there is no inbox table, so every call resolves the one
+// recipient row for user.Name and walks its grants live. That is also why the list is correct
+// the instant a grant is created, cleared or blocked, with nothing to invalidate. A blocked
+// recipient, or an account whose name is not an email (so it can never match a recipient row -
+// internal accounts like "admin" are the only ones affected, and they have no email to begin
+// with), simply gets an empty list rather than an error.
+//
+// Per grant, the resource is re-resolved through the same accessor resolveShareResource uses for
+// each type and excluded on the same conditions that make resolveShareResource itself report
+// "not found": a file that is disposed or past its own expiry, or a file request that is closed
+// or past its expiry. This is a safety net independent of the grant-cascade cleanup: it protects
+// against a grant row that outlived its resource for any reason, not only the ones the cascade
+// deletes deliberately. Requires API permission VIEW.
+func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
+	type inboxItem struct {
+		ResourceType     int    `json:"resourceType"`
+		ResourceId       string `json:"resourceId"`
+		Name             string `json:"name"`
+		SharedBy         string `json:"sharedBy"`
+		SharedAt         int64  `json:"sharedAt"`
+		ExpiresAt        int64  `json:"expiresAt"`
+		DownloadsUsed    int    `json:"downloadsUsed"`
+		DownloadsAllowed int    `json:"downloadsAllowed"`
+		LastDownloadAt   int64  `json:"lastDownloadAt"`
+		Size             int64  `json:"size"`
+	}
+
+	items := make([]inboxItem, 0)
+	recipient, found := database.GetShareRecipientByEmail(database.NormaliseRecipientEmail(user.Name))
+	if !found || recipient.IsBlocked {
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK", "items": items})
+		return
+	}
+
+	timeNow := time.Now().Unix()
+	// GrantedBy resolves to a user id far more often than to distinct ids across one inbox, so a
+	// small cache keeps a page of results from repeating database.GetUser per row.
+	grantedByNames := make(map[int]string)
+
+	for _, grant := range database.GetShareGrantsForRecipient(recipient.Id) {
+		var name string
+		var expiresAt int64
+		var size int64
+
+		switch grant.ResourceType {
+		case models.ShareResourceFile:
+			file, ok := database.GetMetaDataById(grant.ResourceId)
+			if !ok || file.IsDisposed() || (!file.UnlimitedTime && file.ExpireAt < timeNow) {
+				continue
+			}
+			name = file.Name
+			expiresAt = shareExpiry(file.UnlimitedTime, file.ExpireAt)
+			size = file.SizeBytes
+		case models.ShareResourceBundle:
+			bundle, ok := database.GetFileBundle(grant.ResourceId)
+			if !ok {
+				continue
+			}
+			name = bundle.DisplayName()
+		case models.ShareResourceFileRequest:
+			fileRequest, ok := database.GetFileRequest(grant.ResourceId)
+			if !ok || fileRequest.Closed || fileRequest.IsExpired() {
+				continue
+			}
+			name = fileRequest.DisplayName()
+			expiresAt = fileRequest.Expiry
+		default:
+			continue
+		}
+
+		sharedBy, cached := grantedByNames[grant.GrantedBy]
+		if !cached {
+			if grantedByUser, ok := database.GetUser(grant.GrantedBy); ok {
+				sharedBy = grantedByUser.Name
+			} else {
+				sharedBy = "(deleted user)"
+			}
+			grantedByNames[grant.GrantedBy] = sharedBy
+		}
+
+		items = append(items, inboxItem{
+			ResourceType:     grant.ResourceType,
+			ResourceId:       grant.ResourceId,
+			Name:             name,
+			SharedBy:         sharedBy,
+			SharedAt:         grant.GrantedAt,
+			ExpiresAt:        expiresAt,
+			DownloadsUsed:    grant.DownloadsUsed,
+			DownloadsAllowed: grant.DownloadsAllowed,
+			LastDownloadAt:   grant.LastDownloadAt,
+			Size:             size,
+		})
+	}
+
+	// Map iteration order inside GetShareGrantsForRecipient is not guaranteed stable across
+	// providers, so without this the same data could serialise in a different order per call.
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].SharedAt > items[j].SharedAt
+	})
+
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK", "items": items})
+}
+
+// apiShareInboxOpen exchanges the caller's own share grant for the recipient cookie the mailed
+// link would have produced, then hands back the same public URL that link points at.
+//
+// It deliberately does not mint a new access token. shareaccess.WriteCookie only records an
+// in-memory cookie entry against the recipient id the grant already names; unlike issueAndSend it
+// never calls database.RevokeShareLoginTokens or database.SaveShareLoginToken. Minting a fresh
+// token here - the obvious-looking alternative - would revoke the ShareLoginToken row backing
+// the link already sitting in the recipient's mailbox as a side effect, breaking it the moment a
+// signed-in caller opened the same share from their inbox. Reusing the cookie exchange keeps this
+// endpoint from ever touching that row at all.
+//
+// A resource the caller holds no grant for, resolved with the same email match apiShareInbox
+// uses, is reported as 404, matching resolveShareResource's non-enumerable stance: this endpoint
+// cannot be used to probe which resource IDs exist. Requires API permission DOWNLOAD, since it
+// issues a download-capable credential.
+func apiShareInboxOpen(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramShareInboxOpen)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+
+	recipient, found := database.GetShareRecipientByEmail(database.NormaliseRecipientEmail(user.Name))
+	if !found || recipient.IsBlocked || !database.HasShareGrant(request.ResourceType, request.ResourceId, recipient.Id) {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
+		return
+	}
+
+	shareaccess.WriteCookie(w, request.Request, request.ResourceType, request.ResourceId, recipient.Id)
+	logging.LogShareInboxOpened(request.ResourceType, request.ResourceId, user)
+
+	url := fmt.Sprintf("/%s/%s", shareaccess.PathPrefix(request.ResourceType), request.ResourceId)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK", "url": url})
+}
+
 // mayUserSeeShareRecipients reports whether the caller is allowed to know who a
 // resource is shared with. Same rule as listing the resource itself: its owner,
 // or a user who may list other people's uploads.
