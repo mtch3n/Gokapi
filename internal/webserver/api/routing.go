@@ -287,6 +287,14 @@ var routes = []apiRoute{
 		RequestParser: &paramURequestDelete{},
 	},
 	{
+		// Replaces the collaborator list of a request (models.FileRequest.Collaborators). A JSON
+		// body rather than headers because the list is variable length, same as /share/recipients.
+		Url:           "/uploadrequest/collaborators",
+		ApiPerm:       models.ApiPermManageFileRequests,
+		execution:     apiURequestCollaborators,
+		RequestParser: &paramURequestCollaborators{},
+	},
+	{
 		Url:           "/folder/create",
 		ApiPerm:       models.ApiPermUpload,
 		execution:     apiFolderCreate,
@@ -1035,6 +1043,27 @@ type paramURequestDelete struct {
 }
 
 func (p *paramURequestDelete) ProcessParameter(_ *http.Request) error {
+	return nil
+}
+
+// paramURequestCollaborators carries the full replacement collaborator list for one request.
+type paramURequestCollaborators struct {
+	Id           string `json:"id"`
+	UserIds      []int  `json:"userids"`
+	foundHeaders map[string]bool
+}
+
+func (p *paramURequestCollaborators) ProcessParameter(r *http.Request) error {
+	// Bounded so a malformed or hostile request cannot force the server to buffer an unbounded
+	// body before it is even authorised to act.
+	const maxBodySize = 64 * 1024
+	bodyReader := http.MaxBytesReader(nil, r.Body, maxBodySize)
+	if err := json.NewDecoder(bodyReader).Decode(p); err != nil {
+		return err
+	}
+	if p.Id == "" {
+		return errors.New("id is required")
+	}
 	return nil
 }
 

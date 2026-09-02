@@ -2179,6 +2179,73 @@ func apiURequestDelete(w http.ResponseWriter, r requestParser, user models.User,
 	_, _ = w.Write([]byte("{\"result\":\"OK\"}"))
 }
 
+// apiURequestCollaborators replaces the collaborator list of a file request. Owner only, or a
+// user who may edit other people's uploads; a collaborator cannot change the list. Every id must
+// name an existing account and the owner is refused, so the two roles never overlap.
+func apiURequestCollaborators(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramURequestCollaborators)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+	// Same guard as apiURequestSave: SaveFileRequest re-encrypts the name and note.
+	if encryption.IsSealed() {
+		sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, "Instance is sealed")
+		return
+	}
+	uploadRequest, ok := database.GetFileRequest(request.Id)
+	if !ok {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "FileRequest does not exist with the given ID")
+		return
+	}
+	if uploadRequest.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads) {
+		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to change the collaborators of this upload request")
+		return
+	}
+	users := userMap()
+	for _, id := range request.UserIds {
+		if id == uploadRequest.UserId {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "The owner cannot be added as a collaborator")
+			return
+		}
+		if _, exists := users[id]; !exists {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, fmt.Sprintf("User %d does not exist", id))
+			return
+		}
+	}
+	before := uploadRequest.CollaboratorIds()
+	uploadRequest.SetCollaboratorIds(request.UserIds)
+	database.SaveFileRequest(uploadRequest)
+	added, removed := diffIds(before, uploadRequest.CollaboratorIds())
+	logging.LogFileRequestCollaboratorsChanged(uploadRequest, user, added, removed)
+
+	uploadRequest.Name = uploadRequest.DisplayName()
+	fillFileRequestNames(&uploadRequest, users)
+	result, err := json.Marshal(uploadRequest)
+	helper.Check(err)
+	_, _ = w.Write(result)
+}
+
+// diffIds returns what is in after but not before, and in before but not after.
+func diffIds(before, after []int) (added, removed []int) {
+	beforeSet := make(map[int]bool, len(before))
+	for _, id := range before {
+		beforeSet[id] = true
+	}
+	afterSet := make(map[int]bool, len(after))
+	for _, id := range after {
+		afterSet[id] = true
+		if !beforeSet[id] {
+			added = append(added, id)
+		}
+	}
+	for _, id := range before {
+		if !afterSet[id] {
+			removed = append(removed, id)
+		}
+	}
+	return added, removed
+}
+
 func isUserAllowedUnlimited(request *paramURequestSave, isNewRequest bool, user models.User) bool {
 	if user.IsAdmin() {
 		return true

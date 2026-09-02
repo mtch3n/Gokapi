@@ -4649,3 +4649,75 @@ func TestCollaboratorCannotWrite(t *testing.T) {
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 404)
 }
+
+func TestApiURequestCollaborators(t *testing.T) {
+	fr, _, collaboratorKey, strangerKey := collaboratorFixture(t)
+	testAuthorisation(t, "/api/uploadrequest/collaborators", models.ApiPermManageFileRequests)
+	ownerKey := generateNewKey(false, idAdmin, "owner", "")
+	ownerKey.Permissions = getPermissionAll()
+	database.SaveApiKey(ownerKey)
+	jsonHeader := []test.Header{{Name: "Content-Type", Value: "application/json"}}
+	body := func(ids string) io.Reader {
+		return strings.NewReader(`{"id":"` + fr.Id + `","userids":` + ids + `}`)
+	}
+
+	// Owner replaces the list. Duplicates collapse, names come back resolved.
+	w, r := getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader,
+		body(`[`+strconv.Itoa(idStranger)+`,`+strconv.Itoa(idStranger)+`,`+strconv.Itoa(idUser)+`]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	// See TestCollaboratorCanListRequest: ResponseBodyContains reads via w.Result(), which
+	// caches - a second call on the same recorder would read an already-drained Body.
+	respBody := w.Body.String()
+	test.IsEqualBool(t, strings.Contains(respBody, `{"id":`+strconv.Itoa(idUser)+`,"name":"testuser"}`), true)
+	test.IsEqualBool(t, strings.Contains(respBody, `{"id":`+strconv.Itoa(idStranger)+`,"name":"teststranger"}`), true)
+	stored, _ := database.GetFileRequest(fr.Id)
+	test.IsEqual(t, stored.CollaboratorIds(), []int{idUser, idStranger})
+
+	// A collaborator may not change the list - that is a write.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", collaboratorKey.Id, "POST", jsonHeader, body(`[]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+	stored, _ = database.GetFileRequest(fr.Id)
+	test.IsEqualInt(t, len(stored.Collaborators), 2)
+
+	// Nor may an unrelated account.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", strangerKey.Id, "POST", jsonHeader, body(`[]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	// The owner cannot be their own collaborator.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader, body(`[`+strconv.Itoa(idAdmin)+`]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyContains(t, w, "owner cannot be added")
+
+	// Unknown user id.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader, body(`[424242]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyContains(t, w, "does not exist")
+
+	// Unknown request.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader,
+		strings.NewReader(`{"id":"nope","userids":[]}`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+
+	// Missing id is a parameter error.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader,
+		strings.NewReader(`{"userids":[]}`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	// Owner clears the list.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader, body(`[]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, _ = database.GetFileRequest(fr.Id)
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+
+	// Restore the fixture state for other tests in this package.
+	fr.SetCollaboratorIds([]int{idUser})
+	database.SaveFileRequest(fr)
+}

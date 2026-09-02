@@ -2065,6 +2065,67 @@
         }
       }
     },
+    "/uploadrequest/collaborators": {
+      "post": {
+        "tags": [
+          "uploadrequest"
+        ],
+        "summary": "Replaces the collaborator list of an upload request",
+        "description": "Collaborators are other accounts that may see the request in their own list and download the files it collected. They cannot edit, close, delete or share it. The list is replaced as a whole; an empty array clears it. The owner of the request cannot be a collaborator. Requires API permission MANAGE_FILE_REQUESTS. To change a request owned by a different user, the user requires the user permission EDIT",
+        "operationId": "uploadrequestcollaborators",
+        "security": [
+          {
+            "apikey": [
+              "MANAGE_FILE_REQUESTS"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "userids"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "The ID of the upload request"
+                  },
+                  "userids": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "description": "The user IDs allowed to view the request. An empty array clears the list"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operation successful. Returns the updated upload request"
+          },
+          "400": {
+            "description": "Invalid parameter supplied, unknown user ID, or the owner was passed as a collaborator"
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "404": {
+            "description": "Upload request not found"
+          },
+          "503": {
+            "description": "Instance is sealed"
+          }
+        }
+      }
+    },
     "/folder/create": {
       "post": {
         "tags": [

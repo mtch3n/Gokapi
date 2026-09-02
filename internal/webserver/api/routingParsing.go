@@ -1441,6 +1441,17 @@ func (p *paramURequestDelete) New() requestParser {
 	return &paramURequestDelete{}
 }
 
+// ParseRequest parses the header file. As paramURequestCollaborators has no fields with the
+// tag header, this method does nothing, except calling ProcessParameter()
+func (p *paramURequestCollaborators) ParseRequest(r *http.Request) error {
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramURequestCollaborators struct
+func (p *paramURequestCollaborators) New() requestParser {
+	return &paramURequestCollaborators{}
+}
+
 // ParseRequest reads r and saves the passed header values in the paramFolderCreate struct
 // In the end, ProcessParameter() is called
 func (p *paramFolderCreate) ParseRequest(r *http.Request) error {
