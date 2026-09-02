@@ -1,9 +1,9 @@
 #!/bin/sh
 # Runs the full test baseline.
 #
-# The configuration/setup tests bind port 53842 for real, so nothing else may
-# hold it. The local dev container publishes the backend on 8080 and keeps
-# 53842 to itself inside the container, which is why the tests and the running
+# The configuration/setup tests bind port 53849 for real, so nothing else may
+# hold it. The local dev container publishes the backend on 8080. The tests
+# moved to 53849 (and 53843-53848), which is why the tests and the running
 # stack no longer collide.
 set -e
 cd "$(dirname "$0")"

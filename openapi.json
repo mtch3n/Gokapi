@@ -1315,7 +1315,7 @@
             "schema": {
               "type": "integer"
             },
-            "description": "Unix timestamp of the file expiration date. Unlimited if 0 is passed."
+            "description": "Unix timestamp of the file expiration date. 0 is unlimited only if the server has no configured maximum expiry (GOKAPI_MAX_EXPIRY); if a maximum is set, the value is clamped to it instead."
           },
           {
             "name": "password",
@@ -1324,7 +1324,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Sets a new password for this file. Omit this header entirely to leave the file's current password protection untouched - this is the only way to edit other fields (e.g. allowedDownloads) without affecting the password. If the header is present, its value is trimmed and must meet the server's minimum password length (GET /pubapi/authinfo) or the request is rejected with 400; an empty value is NOT treated as 'no password' and is rejected the same way. To remove password protection, use removePassword instead of sending an empty password. A password containing bytes outside printable ASCII (or one that happens to start with the literal text 'base64:') should be sent base64-encoded with a 'base64:' prefix, e.g. 'base64:ZmlsZW5hbWU=' - the server decodes it before hashing. Gokapi's own web UI always does this for you."
+            "description": "Sets a new password for this file. Omit this header entirely to leave the file's current password protection untouched - this is the only way to edit other fields (e.g. allowedDownloads) without affecting the password. If the header is present, its value is trimmed and must meet the server's minimum password length (GET /api/auth/info, field minPasswordLength) or the request is rejected with 400; an empty value is NOT treated as 'no password' and is rejected the same way. To remove password protection, use removePassword instead of sending an empty password. A password containing bytes outside printable ASCII (or one that happens to start with the literal text 'base64:') should be sent base64-encoded with a 'base64:' prefix, e.g. 'base64:ZmlsZW5hbWU=' - the server decodes it before hashing. Gokapi's own web UI always does this for you."
           },
           {
             "name": "generatedpassword",
@@ -1767,6 +1767,7 @@
         "summary": "Get authentication information",
         "description": "This API call returns public authentication information including the authentication method, public name, and minimum password length. This endpoint does not require authentication",
         "operationId": "authinfo",
+        "security": [],
         "responses": {
           "200": {
             "description": "Operation successful",
@@ -1787,7 +1788,7 @@
           "auth"
         ],
         "summary": "Lists API keys",
-        "description": "This API call lists the API keys accessible by the calling user. Shows only keys owned by the user, or all keys if the user has the API_MOD permission. Requires API permission API_MOD",
+        "description": "This API call lists the API keys accessible by the calling user. Shows only keys owned by the user, or all keys if the user has the user permission Manage API keys. Requires API permission API_MANAGE",
         "operationId": "authlist",
         "security": [
           {
@@ -2249,7 +2250,33 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NewUser"
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "example": 14
+                    },
+                    "name": {
+                      "type": "string",
+                      "example": "Gokapi user"
+                    },
+                    "permissions": {
+                      "type": "integer",
+                      "example": 0
+                    },
+                    "userLevel": {
+                      "type": "integer",
+                      "example": 2
+                    },
+                    "lastOnline": {
+                      "type": "integer",
+                      "example": 0
+                    },
+                    "resetPassword": {
+                      "type": "boolean",
+                      "example": false
+                    }
+                  }
                 }
               }
             }

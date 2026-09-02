@@ -147,8 +147,20 @@ levels that ask for the password on startup, that key does not exist until the i
 been unsealed, so the stored names cannot be read yet. Downloads are refused in this state
 for the same reason.
 
-**Fix:** Unseal the instance by posting the encryption password to ``/api/unseal``. The names
-appear on the next reload.
+**Fix:** Unseal the instance by posting the encryption password to ``/api/unseal``. This
+endpoint only answers requests with no ``X-Forwarded-For``/``Forwarded`` header that
+arrive from a loopback or private-network address; a reverse-proxy hop sets a forwarding
+header and gets 404. So run the request on the host itself, or through an SSH tunnel to
+the host:
+
+.. code-block:: bash
+
+   curl -X POST -H 'Content-Type: application/json' \
+     -d '{"password":"..."}' \
+     http://127.0.0.1:53842/api/unseal
+
+Adjust the port if this instance uses a non-default one. The names appear on the next
+reload.
 
 Note that a restart re-seals the instance, so this is expected after every restart at those
 encryption levels.
@@ -164,6 +176,6 @@ Gokapi version are still shown as ``(sealed)``.
 conversion needs the master key, so it runs when the instance is unsealed rather than at
 startup. If the conversion did not finish, the affected names are left unreadable.
 
-**Fix:** Check the log for an ``Encrypted N file name(s) that were stored in plaintext``
+**Fix:** Check the log for an ``Encrypted N name(s)/note(s) that were stored in plaintext``
 entry, which is written once the conversion completes. If it is missing, unseal the instance
 again - the conversion resumes where it stopped and is safe to repeat.

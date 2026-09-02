@@ -1,4 +1,21 @@
-# Security Analysis — gokapi-fork (`feat/sealed-box-inbound`, base 618ecf1)
+# Security Analysis — gokapi-fork (`gojitech-fork`, base 618ecf1)
+
+## Resolution (2026-09-02)
+
+This document reviews commit `35eccd1` and is kept as history; it is not a description
+of the current build. Disposition of each finding:
+
+- **F1** — closed by the encryption-level choice: `isEncryptionRequested()` returns true
+  for encryption levels 3 and 4 regardless of who uploads (`internal/storage/FileServing.go`),
+  so guest/file-request uploads are no longer stored in plaintext.
+- **F2** — closed, `313d719`.
+- **F3, F4, F8** — closed, `b2b2f2f`.
+- **F5** — closed (DSN redaction, `internal/configuration/database/Database.go`).
+- **F6** — closed, `1ae6e19`.
+- **F7** — closed, `b2b2f2f`.
+- **F9** — still open: `internal/configuration/database/Database.go` (~line 98) still
+  calls `SaveEnd2EndInfo` unconditionally.
+- **Open question 1 (multi-instance deployment?)** — answered: single instance.
 
 Scope: read-only static review focused on the new PostgreSQL provider (commit 35eccd1)
 plus authentication, access control, file handling, crypto, and information disclosure.
@@ -9,7 +26,8 @@ Nothing was executed or modified; the `gokapi-test-pg` container was inspected r
 
 ## 1. Executive summary
 
-Do **not** treat this build as safe for CONFIDENTIAL healthcare-adjacent data yet.
+At `35eccd1` this build was **not** safe for CONFIDENTIAL healthcare-adjacent data. See
+the Resolution block above for what has since closed.
 
 The two structural problems that matter most are inherited from upstream and are not fixed
 here: (a) "Level 3" end-to-end encryption is **symmetric-only** and **guest/file-request
@@ -27,9 +45,11 @@ is stored in plaintext config and printed to stdout during migration, nothing en
 the connection, and download-limit ("one-time file") enforcement relies on a **process-local
 mutex** that does not hold across the multiple instances a shared Postgres is meant to enable.
 
-Bottom line: the Postgres port is mergeable after the credential-logging, panic-on-error, and
-TLS-enforcement items are addressed, but the product is **not** suitable for confidential
-client data until the E2E-bypass / plaintext-inbound behaviour is redesigned.
+Bottom line at the time of this review: the Postgres port was mergeable once the
+credential-logging, panic-on-error, and TLS-enforcement items were addressed, but the
+product was **not** suitable for confidential client data until the E2E-bypass /
+plaintext-inbound behaviour was redesigned. That redesign is the encryption-level
+change recorded in the Resolution block above.
 
 ---
 
@@ -82,7 +102,10 @@ Fix: for inbound confidential data, do not rely on browser-side symmetric E2E. E
 server-side full encryption (Level 3/4) for file-request uploads regardless of the E2E toggle, or
 (b) implement genuine asymmetric sealed-box encryption to the recipient's public key (the branch
 name `sealed-box-inbound` suggests this is the intent — it is not implemented; `grep -rE
-'ecdh|x25519|nacl/box'` finds nothing).
+'ecdh|x25519|nacl/box'` finds nothing). **(a) is what was chosen** — see the Resolution block
+above. Note also that later commits use the term "sealed-box" for an unrelated, already-shipped
+token-based share-access feature, not for this X25519/NaCl inbound-crypto design; the two should
+not be conflated.
 
 ### F2 — High — Client-asserted `isE2E` flag enables silent downgrade (Inherited)
 
