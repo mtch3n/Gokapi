@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"syscall"
 
+	"github.com/forceu/gokapi/internal/configuration/database/applymaxexpiry"
 	"github.com/forceu/gokapi/internal/configuration/database/migration"
 	"github.com/forceu/gokapi/internal/helper/systemd"
 	"github.com/forceu/gokapi/internal/logging/serverstats"
@@ -51,6 +52,7 @@ func main() {
 	passedFlags := flagparser.ParseFlags()
 	handleServiceInstall(passedFlags)
 	handleDbMigration(passedFlags)
+	handleApplyMaxExpiry(passedFlags)
 
 	showVersion(passedFlags)
 	fmt.Println(logo)
@@ -206,6 +208,14 @@ func handleDbMigration(passedFlags flagparser.MainFlags) {
 		return
 	}
 	migration.Do(passedFlags.Migration)
+	osExit(0)
+}
+
+func handleApplyMaxExpiry(passedFlags flagparser.MainFlags) {
+	if !passedFlags.ApplyMaxExpiry.DoApply {
+		return
+	}
+	applymaxexpiry.Do(passedFlags.ApplyMaxExpiry)
 	osExit(0)
 }
 

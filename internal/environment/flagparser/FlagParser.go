@@ -20,6 +20,10 @@ func ParseFlags() MainFlags {
 	if ok {
 		return flags
 	}
+	flags, ok = parseApplyMaxExpiry()
+	if ok {
+		return flags
+	}
 
 	passedFlags := flag.FlagSet{}
 	versionFlagLong := passedFlags.Bool("version", false, "Show version info")
@@ -140,6 +144,42 @@ type MigrateFlags struct {
 	Destination string
 }
 
+func parseApplyMaxExpiry() (MainFlags, bool) {
+	if len(os.Args) > 1 && os.Args[1] == "apply-max-expiry" {
+		return MainFlags{
+			ApplyMaxExpiry: parseApplyMaxExpiryFlags(os.Args[2:]),
+		}, true
+	}
+	return MainFlags{}, false
+}
+
+func parseApplyMaxExpiryFlags(args []string) ApplyMaxExpiryFlags {
+	applyFlags := flag.NewFlagSet("apply-max-expiry", flag.ExitOnError)
+	dryRun := applyFlags.Bool("dry-run", false, "Prints what would change without saving anything")
+
+	applyFlags.Usage = func() {
+		fmt.Println("Usage of apply-max-expiry:")
+		applyFlags.PrintDefaults()
+	}
+
+	err := applyFlags.Parse(args)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(2)
+	}
+
+	return ApplyMaxExpiryFlags{
+		DoApply: true,
+		DryRun:  *dryRun,
+	}
+}
+
+// ApplyMaxExpiryFlags contains flags passed if the apply-max-expiry command is requested
+type ApplyMaxExpiryFlags struct {
+	DoApply bool
+	DryRun  bool
+}
+
 func showUsage(mainFlags flag.FlagSet, aliases []alias) func() {
 	return func() {
 		fmt.Print("Usage:\n\n")
@@ -163,6 +203,9 @@ func showUsage(mainFlags flag.FlagSet, aliases []alias) func() {
 		fmt.Printf("\n%-30s %s\n", "migrate-database", "Migrate an old database to a new database (e.g. SQLite to Redis)")
 		fmt.Printf("%-30s %s\n", "--source", "Original database path")
 		fmt.Printf("%-30s %s\n", "--destination", "New database path")
+
+		fmt.Printf("\n%-30s %s\n", "apply-max-expiry", "Clamp every existing file and file request to GOKAPI_MAX_EXPIRY")
+		fmt.Printf("%-30s %s\n", "--dry-run", "Print what would change without saving anything")
 
 	}
 }
@@ -200,6 +243,7 @@ type MainFlags struct {
 	UninstallService   bool
 	Port               int
 	Migration          MigrateFlags
+	ApplyMaxExpiry     ApplyMaxExpiryFlags
 }
 
 func (mf *MainFlags) setBoolValues() {

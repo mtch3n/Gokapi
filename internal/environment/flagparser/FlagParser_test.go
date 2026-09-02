@@ -170,6 +170,9 @@ func TestShowUsage(t *testing.T) {
 migrate-database               Migrate an old database to a new database (e.g. SQLite to Redis)
 --source                       Original database path
 --destination                  New database path
+
+apply-max-expiry               Clamp every existing file and file request to GOKAPI_MAX_EXPIRY
+--dry-run                      Print what would change without saving anything
 `
 
 	test.IsEqualString(t, capturedOutput, expectedOutput)
