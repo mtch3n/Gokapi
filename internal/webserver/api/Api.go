@@ -2168,14 +2168,18 @@ func mayUserSeeShareRecipients(resourceType int, resourceId string, user models.
 // a resource that no longer exists in any usable sense - expired, exhausted, closed, or
 // pending deletion - the same liveness check the public resend path applies in
 // webserver.describeShareResource, so this path cannot be used to grant or list share access
-// on a resource nobody can actually reach any more.
+// on a resource nobody can actually reach any more. For models.ShareResourceFile it also refuses
+// a file received through a file request: its UserId is the request owner's, so ownership alone
+// would otherwise pass, but every public consumption route (showDownload, showHotlink, serveFile,
+// and the pubApi JSON handlers) refuses such a file outright, and a grant on one the owner could
+// never actually deliver.
 func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId string, user models.User) (shareaccess.Resource, bool) {
 	switch resourceType {
 	case models.ShareResourceFile:
 		// storage.GetFile refuses a file that is expired, exhausted, or pending deletion,
 		// the same check the public file endpoint relies on to 404 for a dead file.
 		file, found := storage.GetFile(resourceId)
-		if !found || (file.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
+		if !found || file.IsFileRequest() || (file.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
 			return shareaccess.Resource{}, false
 		}
