@@ -2309,6 +2309,11 @@
                     "resetPassword": {
                       "type": "boolean",
                       "example": false
+                    },
+                    "hasAvatar": {
+                      "type": "boolean",
+                      "example": false,
+                      "description": "Whether a cached OIDC profile picture exists for this user. Only true when the user signed in via OAuth and the provider sent a picture claim; false for every internal account. Check this before calling GET /user/avatar to avoid a request that would just get a 204 back."
                     }
                   }
                 }

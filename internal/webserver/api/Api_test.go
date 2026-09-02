@@ -351,6 +351,38 @@ func TestUserGetMe(t *testing.T) {
 	test.IsEqualBool(t, hasPassword, false)
 }
 
+func TestUserGetMeHasAvatar(t *testing.T) {
+	const apiUrl = "/user/me"
+	generateTestData()
+	userApiKey := generateNewKey(false, idUser, "", "")
+
+	// No cached picture yet: hasAvatar must be false so the client knows to skip
+	// GET /user/avatar rather than requesting it and getting back a 204.
+	w, r := getRecorder(apiUrl, userApiKey.Id, []test.Header{})
+	Process(w, r)
+	var result struct {
+		HasAvatar bool `json:"hasAvatar"`
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, result.HasAvatar, false)
+
+	// Cache a picture at the same path avatar.Path looks for, then confirm the flag flips.
+	avatarDir := filepath.Join(configuration.Get().DataDir, "avatars")
+	err = os.MkdirAll(avatarDir, 0700)
+	test.IsNil(t, err)
+	avatarPath := filepath.Join(avatarDir, strconv.Itoa(idUser)+".png")
+	err = os.WriteFile(avatarPath, []byte("stand-in for a cached picture, only its presence is checked here"), 0600)
+	test.IsNil(t, err)
+	defer os.Remove(avatarPath)
+
+	w, r = getRecorder(apiUrl, userApiKey.Id, []test.Header{})
+	Process(w, r)
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualBool(t, result.HasAvatar, true)
+}
+
 func TestUserList(t *testing.T) {
 	const apiUrl = "/user/list"
 	apiKey := testAuthorisation(t, apiUrl, models.ApiPermManageUsers)
