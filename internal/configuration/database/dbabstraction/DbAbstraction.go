@@ -187,6 +187,13 @@ type Database interface {
 	SaveFileBundle(bundle models.FileBundle)
 	// DeleteFileBundle deletes a file bundle with the given ID
 	DeleteFileBundle(bundle models.FileBundle)
+	// DecreaseBundleDownloadsRemaining atomically spends one of the bundle's own download
+	// allowance (see models.FileBundle.DownloadsRemaining), conditional on it being greater than
+	// 0 - mirrors IncreaseDownloadCount's decrement half for a file. Returns false, and leaves
+	// the allowance untouched, if it was already exhausted; the caller must not serve in that
+	// case. Never called for a bundle with UnlimitedDownloads set - that is checked by the
+	// caller, not here.
+	DecreaseBundleDownloadsRemaining(id string) bool
 
 	// GetStatTraffic returns the total traffic from statistics
 	GetStatTraffic() uint64

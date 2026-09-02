@@ -609,6 +609,12 @@ func DeleteFileBundle(bundle models.FileBundle) {
 	db.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
 }
 
+// DecreaseBundleDownloadsRemaining atomically spends one of the bundle's own download allowance.
+// Returns false if it was already exhausted.
+func DecreaseBundleDownloadsRemaining(id string) bool {
+	return db.DecreaseBundleDownloadsRemaining(id)
+}
+
 // Statistics
 
 // GetStatTraffic returns the total traffic from statistics

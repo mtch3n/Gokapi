@@ -106,6 +106,13 @@ func (p DatabaseProvider) DeleteFileBundle(bundle models.FileBundle) {
 	p.deleteKey(prefixFileBundles + bundle.Id)
 }
 
+// DecreaseBundleDownloadsRemaining atomically spends one of the bundle's own download allowance,
+// conditional on it being greater than 0. Returns false, and leaves the allowance untouched, if
+// it was already exhausted (or the bundle does not exist).
+func (p DatabaseProvider) DecreaseBundleDownloadsRemaining(id string) bool {
+	return p.decrementHashFieldIfPositiveOnly(prefixFileBundles+id, "DownloadsRemaining")
+}
+
 // migrateFileBundleNames re-encrypts every bundle name still stored in the plaintext name hash
 // field and then removes that field, reporting how many bundles it converted. Same shape as
 // metadata.go's migrateFileMetaDataNames.
