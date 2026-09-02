@@ -376,8 +376,21 @@ func apiCreateApiKey(w http.ResponseWriter, r requestParser, user models.User, _
 	_, _ = w.Write(result)
 }
 
+// apiGetCurrentUser returns the calling user's information, plus whether apiGetUserAvatar has a
+// cached picture to serve. HasAvatar lets the client skip that request entirely for the common
+// case of an internal account, rather than making it on every page load only to be told 204.
 func apiGetCurrentUser(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
-	_, _ = w.Write([]byte(user.ToJson()))
+	_, hasAvatar := avatar.Path(user.Id)
+	response := struct {
+		models.User
+		HasAvatar bool `json:"hasAvatar"`
+	}{
+		User:      user,
+		HasAvatar: hasAvatar,
+	}
+	result, err := json.Marshal(response)
+	helper.Check(err)
+	_, _ = w.Write(result)
 }
 
 // apiGetUserAvatar serves the caller's own cached OIDC profile picture. The picture is always a
