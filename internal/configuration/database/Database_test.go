@@ -524,6 +524,162 @@ func TestShareRecipientsAndGrants(t *testing.T) {
 	})
 }
 
+// DeleteShareGrants must retire the resource's login tokens along with its
+// grants: once the grant is gone a leftover token would still let its holder
+// in, and only a hash is stored so nothing sensitive survives regardless.
+// This is also the path the explicit "clear the recipient list" UI action
+// takes, so clearing a list must kill outstanding mailed links, not just the
+// grant rows.
+func TestDeleteShareGrantsAlsoDeletesLoginTokens(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		id := SaveShareRecipient(models.ShareRecipient{Email: "erin@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "res-token-a", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "token-a", RecipientId: id, ResourceType: file,
+			ResourceId: "res-token-a", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		// Control: a different resource's grant and token must survive.
+		SetShareGrants(file, "res-token-b", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "token-b", RecipientId: id, ResourceType: file,
+			ResourceId: "res-token-b", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		DeleteShareGrants(file, "res-token-a")
+
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-token-a")), 0)
+		_, ok := GetShareLoginToken("token-a")
+		test.IsEqualBool(t, ok, false)
+
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-token-b")), 1)
+		_, ok = GetShareLoginToken("token-b")
+		test.IsEqualBool(t, ok, true)
+
+		// The recipient row is the address book entry and audit anchor: it
+		// must not be touched by a grant/token cascade.
+		_, ok = GetShareRecipient(id)
+		test.IsEqualBool(t, ok, true)
+
+		DeleteShareGrants(file, "res-token-b")
+		DeleteShareRecipient(id)
+	})
+}
+
+// DeleteFileBundle must cascade to the bundle's share grants and login
+// tokens, so every caller (filebundle.Delete, cleanInvalidBundles) inherits
+// the cleanup without having to call DeleteShareGrants itself.
+func TestDeleteFileBundleCascadesShareGrants(t *testing.T) {
+	runShareTypes(t, func() {
+		const bundle = models.ShareResourceBundle
+		id := SaveShareRecipient(models.ShareRecipient{Email: "frank@example.com", CreatedAt: 1})
+
+		SetShareGrants(bundle, "bundle-a", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "bundle-token-a", RecipientId: id, ResourceType: bundle,
+			ResourceId: "bundle-a", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		// Control: another bundle's grant and token must not be touched.
+		SetShareGrants(bundle, "bundle-b", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "bundle-token-b", RecipientId: id, ResourceType: bundle,
+			ResourceId: "bundle-b", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		DeleteFileBundle(models.FileBundle{Id: "bundle-a"})
+
+		test.IsEqualInt(t, len(GetShareGrants(bundle, "bundle-a")), 0)
+		_, ok := GetShareLoginToken("bundle-token-a")
+		test.IsEqualBool(t, ok, false)
+
+		test.IsEqualInt(t, len(GetShareGrants(bundle, "bundle-b")), 1)
+		_, ok = GetShareLoginToken("bundle-token-b")
+		test.IsEqualBool(t, ok, true)
+
+		_, ok = GetShareRecipient(id)
+		test.IsEqualBool(t, ok, true)
+
+		DeleteShareGrants(bundle, "bundle-b")
+		DeleteShareRecipient(id)
+	})
+}
+
+// DeleteFileRequest must cascade the same way as DeleteFileBundle.
+func TestDeleteFileRequestCascadesShareGrants(t *testing.T) {
+	runShareTypes(t, func() {
+		const request = models.ShareResourceFileRequest
+		id := SaveShareRecipient(models.ShareRecipient{Email: "grace@example.com", CreatedAt: 1})
+
+		SetShareGrants(request, "req-a", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "req-token-a", RecipientId: id, ResourceType: request,
+			ResourceId: "req-a", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		// Control: another request's grant and token must not be touched.
+		SetShareGrants(request, "req-b", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "req-token-b", RecipientId: id, ResourceType: request,
+			ResourceId: "req-b", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		DeleteFileRequest(models.FileRequest{Id: "req-a"})
+
+		test.IsEqualInt(t, len(GetShareGrants(request, "req-a")), 0)
+		_, ok := GetShareLoginToken("req-token-a")
+		test.IsEqualBool(t, ok, false)
+
+		test.IsEqualInt(t, len(GetShareGrants(request, "req-b")), 1)
+		_, ok = GetShareLoginToken("req-token-b")
+		test.IsEqualBool(t, ok, true)
+
+		_, ok = GetShareRecipient(id)
+		test.IsEqualBool(t, ok, true)
+
+		DeleteShareGrants(request, "req-b")
+		DeleteShareRecipient(id)
+	})
+}
+
+// DeleteMetaData is belt-and-braces: purgeFile/deleteFileHard in
+// internal/storage already call DeleteShareGrants themselves before calling
+// this, but every other caller of DeleteMetaData must not leave an orphaned,
+// still-reachable grant behind either. Calling it twice on the same resource
+// (as the purge path effectively does) must be a harmless no-op the second
+// time, not a panic.
+func TestDeleteMetaDataCascadesShareGrants(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		id := SaveShareRecipient(models.ShareRecipient{Email: "henry@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "file-a", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "file-token-a", RecipientId: id, ResourceType: file,
+			ResourceId: "file-a", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		// Control: another file's grant and token must not be touched.
+		SetShareGrants(file, "file-b", []int{id}, 1, 0)
+		SaveShareLoginToken(models.ShareLoginToken{
+			TokenHash: "file-token-b", RecipientId: id, ResourceType: file,
+			ResourceId: "file-b", CreatedAt: 1, ExpiresAt: 999999999999})
+
+		DeleteMetaData("file-a")
+
+		test.IsEqualInt(t, len(GetShareGrants(file, "file-a")), 0)
+		_, ok := GetShareLoginToken("file-token-a")
+		test.IsEqualBool(t, ok, false)
+
+		test.IsEqualInt(t, len(GetShareGrants(file, "file-b")), 1)
+		_, ok = GetShareLoginToken("file-token-b")
+		test.IsEqualBool(t, ok, true)
+
+		_, ok = GetShareRecipient(id)
+		test.IsEqualBool(t, ok, true)
+
+		DeleteMetaData("file-a")
+
+		DeleteShareGrants(file, "file-b")
+		DeleteShareRecipient(id)
+	})
+}
+
 // The download allowance is per recipient, not per resource, so two recipients
 // on the same file each get their own budget rather than racing for one pool.
 func TestShareGrantDownloadCounter(t *testing.T) {

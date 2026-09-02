@@ -323,9 +323,15 @@ func SaveMetaData(file models.File) {
 	db.SaveMetaData(file)
 }
 
-// DeleteMetaData deletes information about a file
+// DeleteMetaData deletes information about a file. Also removes its share
+// grants and login tokens, so a metadata row deleted through any path other
+// than storage.purgeFile/deleteFileHard (which already do this themselves)
+// still cannot leave an orphaned, still-reachable share behind. Idempotent
+// with those callers: a second DeleteShareGrants on the same resource finds
+// nothing left to remove.
 func DeleteMetaData(id string) {
 	db.DeleteMetaData(id)
+	db.DeleteShareGrants(models.ShareResourceFile, id)
 }
 
 // IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
@@ -568,9 +574,13 @@ func SaveFileRequest(request models.FileRequest) {
 	db.SaveFileRequest(request)
 }
 
-// DeleteFileRequest deletes a file request with the given ID
+// DeleteFileRequest deletes a file request with the given ID, and cascades to
+// its share grants and login tokens so every caller (filerequest.Delete,
+// cleanInvalidFileRequests, expiry in storage.CleanUp) inherits the cleanup
+// without having to call DeleteShareGrants itself.
 func DeleteFileRequest(request models.FileRequest) {
 	db.DeleteFileRequest(request)
+	db.DeleteShareGrants(models.ShareResourceFileRequest, request.Id)
 }
 
 // File Bundles
@@ -590,9 +600,13 @@ func SaveFileBundle(bundle models.FileBundle) {
 	db.SaveFileBundle(bundle)
 }
 
-// DeleteFileBundle deletes a file bundle with the given ID
+// DeleteFileBundle deletes a file bundle with the given ID, and cascades to
+// its share grants and login tokens so every caller (filebundle.Delete,
+// cleanInvalidBundles) inherits the cleanup without having to call
+// DeleteShareGrants itself.
 func DeleteFileBundle(bundle models.FileBundle) {
 	db.DeleteFileBundle(bundle)
+	db.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
 }
 
 // Statistics

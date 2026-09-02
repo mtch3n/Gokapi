@@ -223,14 +223,27 @@ func (p DatabaseProvider) GetShareGrantsForRecipient(recipientId int) []models.S
 	return result
 }
 
-// DeleteShareGrants removes every grant on a resource.
+// DeleteShareGrants removes every grant on a resource, and every login token
+// issued against it: once the grant is gone a leftover token would still let
+// its holder in, so the two must go together. Runs in one transaction so a
+// failure between them cannot leave a token alive with no grant behind it.
 func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string) {
 	if resourceId == "" {
 		return
 	}
-	_, err := p.exec("DELETE FROM ShareGrants WHERE resourcetype = $1 AND resourceid = $2",
+	transaction, err := p.postgresDb.Begin()
+	helper.Check(err)
+	defer func() { _ = transaction.Rollback() }()
+
+	_, err = transaction.Exec("DELETE FROM ShareGrants WHERE resourcetype = $1 AND resourceid = $2",
 		resourceType, resourceId)
 	helper.Check(err)
+
+	_, err = transaction.Exec("DELETE FROM ShareLoginTokens WHERE resourcetype = $1 AND resourceid = $2",
+		resourceType, resourceId)
+	helper.Check(err)
+
+	helper.Check(transaction.Commit())
 }
 
 // ---------------------------------------------------------------------------
