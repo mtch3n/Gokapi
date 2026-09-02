@@ -320,6 +320,20 @@ func (f *File) RequiresClientDecryption() bool {
 func (f *File) IsFileRequest() bool {
 	return f.UploadRequestId != ""
 }
+
+// IsBundleMember reports whether f counts as a current member of the bundle identified by
+// bundleId: matching BundleId, not pending for deletion, not yet disposed of, and not a
+// file-request upload. This is the one place that decides what "belongs to a bundle" means -
+// an owner's member count and size (FileBundle.Populate), the files a recipient is actually
+// handed (bundleMembers in internal/webserver), and the folder-delete confirmation all read
+// through it, so a member excluded on one of those paths can no longer be counted on another.
+// A file request never sets BundleId today, so the IsFileRequest exclusion is currently a no-op
+// in practice - it is kept here anyway so that if that ever changes, every caller starts
+// excluding it, or including it, together rather than one at a time.
+func (f *File) IsBundleMember(bundleId string) bool {
+	return f.BundleId == bundleId && !f.IsPendingForDeletion() && !f.IsDisposed() && !f.IsFileRequest()
+}
+
 func errorAsJson(err error) string {
 	fmt.Println(err)
 	errOutput := struct {

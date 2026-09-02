@@ -1408,6 +1408,12 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	if file.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, file.BundleId) {
 		isAuthorisedRecipient = isAuthorisedRecipient && mayAccessShare(w, r, models.ShareResourceBundle, file.BundleId)
 	}
+	if !isAuthorisedRecipient {
+		// An unthrottled fast 200 for a real, restricted id next to every unknown id's slow 404
+		// from respondPubApiNotFound would itself be an existence oracle - a correct guess would
+		// answer faster than a wrong one. The response below is unchanged; only its timing is.
+		ratelimiter.WaitOnFailedId(r)
+	}
 
 	// The filename is withheld until the caller has proved it may have the
 	// file. It is health-adjacent, so leaking it to anyone holding the ID
@@ -2071,10 +2077,10 @@ func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
 	}
 }
 
-// bundleMembers returns every file that belongs to a bundle for listing/serving purposes -
-// not pending for deletion, not a file request upload - regardless of whether it is currently
-// servable. Servability (expired, or its download allowance exhausted) is deliberately not
-// folded in here: a caller that conflates "is a member" with "is currently servable" ends up
+// bundleMembers returns every file that belongs to a bundle for listing/serving purposes (see
+// models.File.IsBundleMember for exactly which files that includes), regardless of whether it is
+// currently servable. Servability (expired, or its download allowance exhausted) is deliberately
+// not folded in here: a caller that conflates "is a member" with "is currently servable" ends up
 // treating a bundle with some dead members as if those members never existed at all, which is
 // exactly the silent-partial-archive and password-gate-skipping bugs this split exists to
 // prevent. Use servableBundleMembers for the narrowed set, or bundleAvailability to decide
@@ -2082,10 +2088,7 @@ func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
 func bundleMembers(bundleId string, allFiles map[string]models.File) []models.File {
 	var result []models.File
 	for _, file := range allFiles {
-		if file.BundleId == bundleId &&
-			!file.IsPendingForDeletion() &&
-			!file.IsDisposed() &&
-			!file.IsFileRequest() {
+		if file.IsBundleMember(bundleId) {
 			result = append(result, file)
 		}
 	}

@@ -1831,17 +1831,16 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 	}
 }
 
-// bundleHasOnlyLiveMembers reports whether every non-deleted, non-file-request member of a
-// bundle is currently servable - not expired, not exhausted. A bundle with no members, or
-// with even one that is, is not resolved by resolveShareResource. Mirrors the rule
-// internal/webserver applies to the public folder endpoints (see bundleAvailability there);
-// duplicated rather than shared because the two live in different packages and the check
-// itself is a handful of lines.
+// bundleHasOnlyLiveMembers reports whether every member of a bundle (see models.File.IsBundleMember)
+// is currently servable - not expired, not exhausted. A bundle with no members, or with even one
+// that is not servable, is not resolved by resolveShareResource. The servability check itself
+// mirrors bundleAvailability in internal/webserver; membership is the shared predicate both packages
+// use, so the two cannot independently drift on what counts as a member.
 func bundleHasOnlyLiveMembers(bundleId string) bool {
 	timeNow := time.Now().Unix()
 	found := false
 	for _, file := range database.GetAllMetadata() {
-		if file.BundleId != bundleId || file.IsPendingForDeletion() || file.IsDisposed() || file.IsFileRequest() {
+		if !file.IsBundleMember(bundleId) {
 			continue
 		}
 		found = true

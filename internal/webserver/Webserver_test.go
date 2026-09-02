@@ -2110,6 +2110,67 @@ func testShareAccessCookie(resourceType int, resourceId string, recipientId int)
 	return test.Cookie{Name: cookies[0].Name, Value: cookies[0].Value}
 }
 
+// TestFolderMemberCountAgreesWithRecipientMembership is a regression test for
+// FileBundle.Populate and bundleMembers disagreeing about what belongs to a bundle:
+// Populate used to exclude only IsPendingForDeletion, so a disposed member's bytes - no longer
+// stored, see disposeFile - stayed counted in the owner's membercount and totalsizebytes, while
+// bundleMembers (what a recipient is actually handed) already excluded disposed members. A
+// folder with one expired member therefore showed the owner one more file, and more bytes, than
+// a recipient could ever receive.
+//
+// Both callers now read models.File.IsBundleMember, so this drives them both from the exact same
+// three-member input - one active, one disposed, one pending deletion - and checks the owner's
+// count/size from Populate against the recipient's membership from bundleMembers directly. If
+// either caller's exclusion rule is ever changed without touching IsBundleMember, or a future
+// caller inlines its own check instead of using it, this starts disagreeing and fails.
+func TestFolderMemberCountAgreesWithRecipientMembership(t *testing.T) {
+	t.Parallel()
+	bundle := models.FileBundle{Id: "bundle-consistency-" + helper.GenerateRandomString(8)}
+
+	activeFile := models.File{
+		Id:        "active-" + helper.GenerateRandomString(8),
+		BundleId:  bundle.Id,
+		SizeBytes: 111,
+	}
+	disposedFile := models.File{
+		Id:         "disposed-" + helper.GenerateRandomString(8),
+		BundleId:   bundle.Id,
+		SizeBytes:  222,
+		DisposedAt: time.Now().Unix(),
+	}
+	pendingFile := models.File{
+		Id:              "pending-" + helper.GenerateRandomString(8),
+		BundleId:        bundle.Id,
+		SizeBytes:       333,
+		PendingDeletion: time.Now().Unix(),
+	}
+	allFiles := map[string]models.File{
+		activeFile.Id:   activeFile,
+		disposedFile.Id: disposedFile,
+		pendingFile.Id:  pendingFile,
+	}
+
+	_, ownerSize, ownerCount := bundle.Populate(allFiles)
+	recipientMembers := bundleMembers(bundle.Id, allFiles)
+
+	if ownerCount != 1 {
+		t.Fatalf("owner count = %d, want 1 (only the active member, disposed and pending excluded)", ownerCount)
+	}
+	if ownerSize != activeFile.SizeBytes {
+		t.Fatalf("owner total size = %d, want %d (only the active member's bytes)", ownerSize, activeFile.SizeBytes)
+	}
+	if len(recipientMembers) != ownerCount {
+		t.Fatalf("recipient sees %d members but the owner's count says %d - the two disagree", len(recipientMembers), ownerCount)
+	}
+	var recipientSize int64
+	for _, f := range recipientMembers {
+		recipientSize += f.SizeBytes
+	}
+	if recipientSize != ownerSize {
+		t.Fatalf("recipient total size = %d but owner total size = %d - the two disagree", recipientSize, ownerSize)
+	}
+}
+
 // TestSingleFileCascadesRestrictedBundleDeniesAnonymous is a regression test for a
 // broken-access-control bug: serveFile (/d, /dh, /downloadFile) and pubApiFileMetadata
 // (/pubapi/file) checked only a file's own restriction, never whether the file is a member
@@ -2239,6 +2300,82 @@ func TestPublicApiFileMetadataHidesSizeExpiryForNonRecipient(t *testing.T) {
 			t.Errorf("restricted file leaked %q to a non-recipient: %v", field, value)
 		}
 	}
+}
+
+// TestPublicApiFileMetadataRateLimitsUnauthorisedIdentityRecipient is the failing-first test for
+// closing the /pubapi/file timing oracle: an identity-restricted file answered a non-recipient
+// with an immediate 200, while an unknown id went through respondPubApiNotFound and was throttled
+// by ratelimiter.WaitOnFailedId - so a real, restricted id answered faster than a wrong guess,
+// letting ids be enumerated by timing. pubApiFileMetadata must now consult the same limiter for a
+// non-recipient, without changing the response itself: the "this link is for specific people"
+// 200 is deliberately kept (see TestPublicApiFileMetadataHidesSizeExpiryForNonRecipient), only its
+// timing changes.
+//
+// Rate limiting is switched on only for the duration of this test, against an id/IP pairing no
+// other test in this file drives through pubApiFileMetadata, so as not to disturb - or be
+// disturbed by - shared limiter state (see the identical concern in
+// TestApiUnsealRateLimitReturns429). The handler is called directly rather than over the network
+// listener so the RemoteAddr driving the limiter key is exact and not shared with any other test.
+func TestPublicApiFileMetadataRateLimitsUnauthorisedIdentityRecipient(t *testing.T) {
+	ratelimiter.SetUnitTestMode(false)
+	t.Cleanup(func() { ratelimiter.SetUnitTestMode(true) })
+
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "timing-oracle-restricted.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+	})
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "timing-oracle-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 0)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	const ip = "203.0.113.201:54321"
+	call := func() (int, map[string]interface{}) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/pubapi/file?id="+fileId, nil)
+		r.RemoteAddr = ip
+		pubApiFileMetadata(w, r)
+		var body map[string]interface{}
+		test.IsNil(t, json.NewDecoder(w.Body).Decode(&body))
+		return w.Code, body
+	}
+
+	// WaitOnFailedId's burst of 10 lets the first ten calls through without blocking.
+	var firstCode int
+	var firstBody map[string]interface{}
+	for i := 0; i < 10; i++ {
+		firstCode, firstBody = call()
+	}
+
+	start := time.Now()
+	lastCode, lastBody := call()
+	elapsed := time.Since(start)
+
+	if elapsed < 700*time.Millisecond {
+		t.Fatalf("call past the burst returned in %v; expected WaitOnFailedId to have throttled it to ~1s, meaning the rate limiter was never consulted", elapsed)
+	}
+
+	// The response itself - status and body - must be exactly what a non-recipient always got;
+	// only the timing above may differ from the pre-fix behaviour.
+	test.IsEqualInt(t, firstCode, http.StatusOK)
+	test.IsEqualInt(t, lastCode, http.StatusOK)
+	test.IsEqual(t, lastBody, firstBody)
+	test.IsEqual(t, lastBody["isAuthorised"], false)
 }
 
 // TestPublicApiShareResendCooldownIsIndistinguishableFromNonRecipient is a regression test for
