@@ -1147,11 +1147,15 @@ func apiList(w http.ResponseWriter, r requestParser, user models.User, _ models.
 func getFilesForUser(user models.User, includeUploadRequests bool) []models.FileApiOutput {
 	var validFiles []models.FileApiOutput
 	config := configuration.Get()
+	var collaborated map[string]bool
+	if includeUploadRequests {
+		collaborated = collaboratedRequestIds(user)
+	}
 	for _, element := range database.GetAllMetadata() {
 		if !includeUploadRequests && element.IsFileRequest() {
 			continue
 		}
-		if element.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
+		if mayViewFile(element, user, collaborated) {
 			file, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
 			helper.Check(err)
 			validFiles = append(validFiles, file)
@@ -1177,7 +1181,7 @@ func apiListSingle(w http.ResponseWriter, r requestParser, user models.User, _ m
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
 		return
 	}
-	if file.UserId != user.Id && !user.HasPermission(models.UserPermListOtherUploads) {
+	if !mayViewFile(file, user, nil) {
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to view file")
 		return
 	}
@@ -1291,12 +1295,78 @@ func apiDownloadZip(w http.ResponseWriter, r requestParser, user models.User, _ 
 	createAndOutputPresignedUrl(requestedFileIds, w, request.Filename)
 }
 
+// mayViewFileRequest reports whether user may see the request and what it collected: its owner,
+// one of its collaborators (models.FileRequest.Collaborators), or a user who may list other
+// people's uploads. Read side only. Every write path keeps its own owner-or-permission check,
+// which is what makes a collaborator view-and-download and nothing more.
+func mayViewFileRequest(fr models.FileRequest, user models.User) bool {
+	return fr.UserId == user.Id || fr.IsCollaborator(user.Id) || user.HasPermission(models.UserPermListOtherUploads)
+}
+
+// mayViewFile reports whether user may list or download the file: its owner, a user who may list
+// other people's uploads, or - for a file collected through a request - a collaborator on that
+// request. collaboratedRequests is the caller's precomputed set from collaboratedRequestIds, so
+// listing a thousand files does not fetch the request per file; pass nil when checking one file
+// and the request is looked up here.
+func mayViewFile(file models.File, user models.User, collaboratedRequests map[string]bool) bool {
+	if file.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
+		return true
+	}
+	if !file.IsFileRequest() {
+		return false
+	}
+	if collaboratedRequests != nil {
+		return collaboratedRequests[file.UploadRequestId]
+	}
+	fr, ok := database.GetFileRequest(file.UploadRequestId)
+	return ok && fr.IsCollaborator(user.Id)
+}
+
+// collaboratedRequestIds returns the id of every request user collaborates on.
+func collaboratedRequestIds(user models.User) map[string]bool {
+	result := make(map[string]bool)
+	for _, fr := range database.GetAllFileRequests() {
+		if fr.IsCollaborator(user.Id) {
+			result[fr.Id] = true
+		}
+	}
+	return result
+}
+
+// userMap returns every user keyed by id, for resolving display names in one lookup per call.
+func userMap() map[int]models.User {
+	result := make(map[int]models.User)
+	for _, u := range database.GetAllUsers() {
+		result[u.Id] = u
+	}
+	return result
+}
+
+// fillFileRequestNames sets OwnerName and each collaborator's Name from users. Neither is
+// persisted (see the model). An account that no longer exists is shown as "unknown user" rather
+// than dropped, so the id stays visible to whoever is cleaning up.
+func fillFileRequestNames(fr *models.FileRequest, users map[int]models.User) {
+	const unknown = "unknown user"
+	if owner, ok := users[fr.UserId]; ok {
+		fr.OwnerName = owner.Name
+	} else {
+		fr.OwnerName = unknown
+	}
+	for i, c := range fr.Collaborators {
+		if u, ok := users[c.Id]; ok {
+			fr.Collaborators[i].Name = u.Name
+		} else {
+			fr.Collaborators[i].Name = unknown
+		}
+	}
+}
+
 func checkDownloadAllowed(fileId string, user models.User) (models.File, int, int, string) {
 	file, ok := storage.GetFile(fileId)
 	if !ok {
 		return models.File{}, http.StatusNotFound, errorcodes.NotFound, "file not found"
 	}
-	if file.UserId != user.Id && !user.HasPermission(models.UserPermListOtherUploads) {
+	if !mayViewFile(file, user, nil) {
 		return models.File{}, http.StatusUnauthorized, errorcodes.NoPermission, "no permission to download file"
 	}
 	return file, 0, 0, ""
@@ -1771,7 +1841,7 @@ func mayUserSeeShareRecipients(resourceType int, resourceId string, user models.
 		return found && (bundle.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads))
 	case models.ShareResourceFileRequest:
 		fileRequest, found := database.GetFileRequest(resourceId)
-		return found && (fileRequest.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads))
+		return found && mayViewFileRequest(fileRequest, user)
 	default:
 		return false
 	}
@@ -2260,12 +2330,14 @@ func closeFullFileRequest(fr models.FileRequest, user models.User) {
 
 func apiUploadRequestList(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
 	userRequests := make([]models.FileRequest, 0)
+	users := userMap()
 	for _, request := range filerequest.GetAll() {
-		if request.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
+		if mayViewFileRequest(request, user) {
 			// request.Name is empty when it could not be decrypted (see models.FileRequest.Name),
 			// which happens while the instance is sealed. Rendered as the placeholder rather than
 			// left blank; Notes is left as-is, since an empty note is a normal value there.
 			request.Name = request.DisplayName()
+			fillFileRequestNames(&request, users)
 			userRequests = append(userRequests, request)
 		}
 	}
@@ -2285,11 +2357,12 @@ func apiUploadRequestListSingle(w http.ResponseWriter, r requestParser, user mod
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "FileRequest does not exist with the given ID")
 		return
 	}
-	if uploadRequest.UserId != user.Id && !user.HasPermission(models.UserPermListOtherUploads) {
+	if !mayViewFileRequest(uploadRequest, user) {
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to show this upload request")
 		return
 	}
 	uploadRequest.Name = uploadRequest.DisplayName()
+	fillFileRequestNames(&uploadRequest, userMap())
 	result, err := json.Marshal(uploadRequest)
 	helper.Check(err)
 	_, _ = w.Write(result)

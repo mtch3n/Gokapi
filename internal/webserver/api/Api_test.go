@@ -49,6 +49,7 @@ const (
 	idSuperAdmin             = 100
 	idAdmin                  = 101
 	idUser                   = 102
+	idStranger               = 103
 	idApiKeyAdmin            = "ApiKeyAdmin"
 	idApiKeySuperAdmin       = "ApiKeySuperAdmin"
 	idPublicApiKeySuperAdmin = "OGeidahfiep1Akeevahkoh1quechieP6ael"
@@ -4520,4 +4521,131 @@ func TestApiUnsealGatesKeyDependentOperations(t *testing.T) {
 	}, nil)
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
+}
+
+// collaboratorFixture creates a request owned by idAdmin that idUser collaborates on, with one
+// received file, and returns API keys for idUser and for a third account (idStranger) that has
+// no relation to the request. Both accounts hold no user-level permissions, so whatever the
+// collaborator key can reach here it reaches as a collaborator and nothing else.
+func collaboratorFixture(t *testing.T) (models.FileRequest, models.File, models.ApiKey, models.ApiKey) {
+	t.Helper()
+	database.SaveUser(models.User{
+		Id: idStranger, Name: "TestStranger", Permissions: models.UserPermissionNone,
+		UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderInternal,
+	}, false)
+	fr := models.FileRequest{
+		Id: "collabRequest", Name: "Collab request", UserId: idAdmin,
+		ApiKey: "collabRequestKey", CreationDate: time.Now().Unix(),
+	}
+	fr.SetCollaboratorIds([]int{idUser})
+	database.SaveFileRequest(fr)
+	file := models.File{
+		Id: "collabFile", Name: "collab.txt", SHA1: "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin, UploadRequestId: fr.Id,
+	}
+	database.SaveMetaData(file)
+	collaboratorKey := generateNewKey(false, idUser, "collaborator", "")
+	collaboratorKey.Permissions = getPermissionAll()
+	database.SaveApiKey(collaboratorKey)
+	strangerKey := generateNewKey(false, idStranger, "stranger", "")
+	strangerKey.Permissions = getPermissionAll()
+	database.SaveApiKey(strangerKey)
+	return fr, file, collaboratorKey, strangerKey
+}
+
+func TestCollaboratorCanListRequest(t *testing.T) {
+	fr, _, collaboratorKey, strangerKey := collaboratorFixture(t)
+
+	w, r := getRecorder("/api/uploadrequest/list", collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	// httptest.ResponseRecorder.Result() caches its Response, so a second call would read an
+	// already-drained Body; the body is checked once against the recorder's own buffer instead
+	// of calling ResponseBodyContains (which reads via Result()) more than once per recorder.
+	body := w.Body.String()
+	test.IsEqualBool(t, strings.Contains(body, `"id":"`+fr.Id+`"`), true)
+	// Names travel with the row so the list can say whose request it is without a user lookup.
+	test.IsEqualBool(t, strings.Contains(body, `"ownername":"testadmin"`), true)
+	test.IsEqualBool(t, strings.Contains(body, `{"id":`+strconv.Itoa(idUser)+`,"name":"testuser"}`), true)
+
+	w, r = getRecorder("/api/uploadrequest/list", strangerKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), `"id":"`+fr.Id+`"`), false)
+
+	w, r = getRecorder("/api/uploadrequest/list/"+fr.Id, collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.ResponseBodyContains(t, w, `"ownername":"testadmin"`)
+
+	w, r = getRecorder("/api/uploadrequest/list/"+fr.Id, strangerKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+}
+
+func TestCollaboratorCanSeeReceivedFiles(t *testing.T) {
+	_, file, collaboratorKey, strangerKey := collaboratorFixture(t)
+
+	w, r := getRecorder("/api/files/list", collaboratorKey.Id, []test.Header{{Name: "showFileRequests", Value: "true"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.ResponseBodyContains(t, w, `"Id":"`+file.Id+`"`)
+
+	// Without the flag request files stay out of the list for collaborators exactly as for
+	// owners - the Files page never shows them.
+	w, r = getRecorder("/api/files/list", collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), `"Id":"`+file.Id+`"`), false)
+
+	w, r = getRecorder("/api/files/list", strangerKey.Id, []test.Header{{Name: "showFileRequests", Value: "true"}})
+	Process(w, r)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), `"Id":"`+file.Id+`"`), false)
+
+	w, r = getRecorder("/api/files/list/"+file.Id, collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	w, r = getRecorder("/api/files/list/"+file.Id, strangerKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	// Download authorisation is decided by checkDownloadAllowed for both the single and the zip
+	// route; tested directly so the assertion does not depend on the test data dir holding the
+	// file's bytes.
+	collaborator, _ := database.GetUser(idUser)
+	_, code, _, _ := checkDownloadAllowed(file.Id, collaborator)
+	test.IsEqualInt(t, code, 0)
+	stranger, _ := database.GetUser(idStranger)
+	_, code, _, _ = checkDownloadAllowed(file.Id, stranger)
+	test.IsEqualInt(t, code, 401)
+}
+
+func TestCollaboratorCannotWrite(t *testing.T) {
+	fr, file, collaboratorKey, _ := collaboratorFixture(t)
+
+	w, r := getRecorderWithBody("/api/uploadrequest/save", collaboratorKey.Id, "POST",
+		[]test.Header{{Name: "id", Value: fr.Id}, {Name: "name", Value: "renamed"}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	w, r = getRecorderWithBody("/api/uploadrequest/delete", collaboratorKey.Id, "DELETE",
+		[]test.Header{{Name: "id", Value: fr.Id}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+	_, stillThere := database.GetFileRequest(fr.Id)
+	test.IsEqualBool(t, stillThere, true)
+
+	w, r = getRecorderWithBody("/api/files/delete", collaboratorKey.Id, "DELETE",
+		[]test.Header{{Name: "id", Value: file.Id}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	// resolveShareResource answers a caller who may not edit shares with "not found" rather than
+	// "forbidden" (deliberate anti-enumeration design, see that function's comment), so a
+	// collaborator setting recipients gets 404 here, not 401.
+	w, r = getRecorderWithBody("/api/share/recipients", collaboratorKey.Id, "POST",
+		[]test.Header{{Name: "Content-Type", Value: "application/json"}},
+		strings.NewReader(`{"resourceType":2,"resourceId":"`+fr.Id+`","emails":["x@example.com"],"downloadsAllowed":0}`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
 }
