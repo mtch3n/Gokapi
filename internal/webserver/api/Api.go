@@ -1097,6 +1097,8 @@ func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid st
 		closeFullFileRequest(fr, user)
 	}
 
+	storeBundleShareKey(file)
+
 	if len(recipientEmails) > 0 {
 		// Fail closed, per the 2026-09-02 audit decision: a recipient-only share must never
 		// have a window where the file exists with no password and no grants. Creating the
@@ -1122,6 +1124,33 @@ func deleteUnreachableUpload(fileId, reason string) {
 		fmt.Println("audit: could not roll back upload", fileId, "after "+reason+
 			" - the file may still be present on disk without the guarantee that required removing it")
 	}
+}
+
+// storeBundleShareKey mirrors a freshly uploaded bundle member's stored share key (see
+// storage.EncryptSharePassword) onto the member's bundle, the same way file's own
+// EncryptedSharePassword is already populated by createNewMetaData. Folder creation
+// (apiFolderCreate) has no password of its own - a folder's password protection is derived
+// entirely from its members (see isValidFolderPassword) - so upload-complete, where a member's
+// encrypted password is first computed, is the only point that ever has one to store. This
+// mirrors where bundle recipient grants attach (see grantUploadRecipients' doc comment): both
+// are properties of the bundle that only exist once a member upload supplies them.
+//
+// A no-op unless file belongs to a bundle, the upload actually produced a stored key (StoreShareKeys
+// off, no password, or no master key all leave file.EncryptedSharePassword nil - see
+// storage.EncryptSharePassword), and the bundle does not already have one stored. That last check,
+// like grantUploadRecipients' "skip once already restricted", keeps every member after the first
+// from re-writing the bundle row - the SPA applies one password to every member of a folder upload,
+// so whichever member completes first is the one that establishes it.
+func storeBundleShareKey(file models.File) {
+	if file.BundleId == "" || len(file.EncryptedSharePassword) == 0 {
+		return
+	}
+	bundle, ok := database.GetFileBundle(file.BundleId)
+	if !ok || len(bundle.EncryptedSharePassword) > 0 {
+		return
+	}
+	bundle.EncryptedSharePassword = file.EncryptedSharePassword
+	database.SaveFileBundle(bundle)
 }
 
 // grantUploadRecipients makes a freshly uploaded file's recipient restriction part of the same
@@ -1392,6 +1421,37 @@ func apiGetShareKey(w http.ResponseWriter, r requestParser, user models.User, _ 
 	password, ok := storage.GetSharePassword(file)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
+		return
+	}
+	result, err := json.Marshal(struct {
+		Key string `json:"key"`
+	}{Key: password})
+	helper.Check(err)
+	_, _ = w.Write(result)
+}
+
+// apiGetFolderShareKey returns the decrypted share password stored for a bundle (folder), if the
+// caller is authorised to view that bundle and one was actually stored. Mirrors apiGetShareKey
+// exactly - same authorisation (owner, or the list-other-uploads permission, matching
+// apiFolderList), same collapsed not-found response for every refusal reason, same sealed-instance
+// exception - see that function's doc comment for the full reasoning, which applies unchanged here.
+func apiGetFolderShareKey(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramFolderShareKey)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+	bundle, ok := database.GetFileBundle(request.Id)
+	if !ok || (bundle.UserId != user.Id && !user.HasPermission(models.UserPermListOtherUploads)) {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Folder not found")
+		return
+	}
+	if encryption.IsSealed() {
+		sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, "Instance is sealed")
+		return
+	}
+	password, ok := storage.GetBundleSharePassword(bundle)
+	if !ok {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Folder not found")
 		return
 	}
 	result, err := json.Marshal(struct {

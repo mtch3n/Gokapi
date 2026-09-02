@@ -322,6 +322,17 @@ var routes = []apiRoute{
 		RequestParser: &paramFolderDelete{},
 	},
 	{
+		// /folder/{id}/sharekey - the ID sits in the middle of the URL, same as
+		// /files/{id}/sharekey (see paramFilesShareKey). Registered after every other exact
+		// /folder/* route so those are always tried first (see getRouting) - this one only ever
+		// catches genuine {id}/sharekey requests.
+		Url:           "/folder/",
+		ApiPerm:       models.ApiPermView,
+		execution:     apiGetFolderShareKey,
+		HasWildcard:   true,
+		RequestParser: &paramFolderShareKey{},
+	},
+	{
 		Url:              "/uploadrequest/chunk/add",
 		ApiPerm:          models.ApiPermNone,
 		execution:        apiChunkUploadRequestAdd,
@@ -1145,6 +1156,27 @@ type paramFolderDelete struct {
 }
 
 func (p *paramFolderDelete) ProcessParameter(_ *http.Request) error {
+	return nil
+}
+
+// paramFolderShareKey carries the ID parsed out of GET /folder/{id}/sharekey. No header fields,
+// so the code generator emits a ParseRequest that only calls ProcessParameter (see
+// paramFilesShareKey above, which this mirrors exactly).
+type paramFolderShareKey struct {
+	Id string
+}
+
+func (p *paramFolderShareKey) ProcessParameter(r *http.Request) error {
+	url := parseRequestUrl(r)
+	trimmed := strings.TrimPrefix(url, "/folder/")
+	if !strings.HasSuffix(trimmed, "/sharekey") {
+		return errors.New("invalid request")
+	}
+	id := strings.TrimSuffix(trimmed, "/sharekey")
+	if id == "" {
+		return errors.New("invalid request")
+	}
+	p.Id = id
 	return nil
 }
 

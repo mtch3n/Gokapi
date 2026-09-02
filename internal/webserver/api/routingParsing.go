@@ -1489,6 +1489,17 @@ func (p *paramFolderDelete) New() requestParser {
 	return &paramFolderDelete{}
 }
 
+// ParseRequest parses the header file. As paramFolderShareKey has no fields with the
+// tag header, this method does nothing, except calling ProcessParameter()
+func (p *paramFolderShareKey) ParseRequest(r *http.Request) error {
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramFolderShareKey struct
+func (p *paramFolderShareKey) New() requestParser {
+	return &paramFolderShareKey{}
+}
+
 // ParseRequest reads r and saves the passed header values in the paramURequestSave struct
 // In the end, ProcessParameter() is called
 func (p *paramURequestSave) ParseRequest(r *http.Request) error {

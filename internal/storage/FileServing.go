@@ -424,10 +424,22 @@ func EncryptSharePassword(password string) []byte {
 // from "nothing stored" (see the /api/files/{id}/sharekey endpoint, which must not become an
 // oracle for any of those).
 func GetSharePassword(file models.File) (string, bool) {
-	if !configuration.Get().StoreShareKeys || len(file.EncryptedSharePassword) == 0 {
+	return decryptStoredSharePassword(file.EncryptedSharePassword)
+}
+
+// GetBundleSharePassword returns the decrypted share password stored for bundle, if any. Mirrors
+// GetSharePassword exactly (see that function's doc comment for the full reasoning, which applies
+// unchanged here) - the /api/folder/{id}/sharekey endpoint must not become an oracle for "toggle
+// off" vs "no master key" vs "nothing stored" any more than the file endpoint may.
+func GetBundleSharePassword(bundle models.FileBundle) (string, bool) {
+	return decryptStoredSharePassword(bundle.EncryptedSharePassword)
+}
+
+func decryptStoredSharePassword(encrypted []byte) (string, bool) {
+	if !configuration.Get().StoreShareKeys || len(encrypted) == 0 {
 		return "", false
 	}
-	plaintext, err := encryption.DecryptString(file.EncryptedSharePassword)
+	plaintext, err := encryption.DecryptString(encrypted)
 	if err != nil {
 		return "", false
 	}

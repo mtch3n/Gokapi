@@ -2270,6 +2270,57 @@
         }
       }
     },
+    "/folder/{id}/sharekey": {
+      "get": {
+        "tags": [
+          "folder"
+        ],
+        "summary": "Get the stored share password for a folder",
+        "description": "Returns the decrypted share password stored for a bundle (folder), if the server has StoreShareKeys enabled and one was actually stored for it (populated from the password of the first member file uploaded into it that had one, typed or generated). Requires API permission VIEW; to view a folder owned by another user, the caller also needs the user permission LIST. Every refusal - unknown ID, no permission, feature disabled, nothing stored - answers identically with 404, so the response cannot be used to probe which of those applies. A sealed instance is the one deliberate exception: it answers 503 so an administrator can tell 'try again after unsealing' apart from 'there was never a key here'.",
+        "operationId": "getfoldersharekey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID of folder to be requested"
+          }
+        ],
+        "security": [
+          {
+            "apikey": [
+              "VIEW"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid API key provided for authentication or API key does not have the required permission"
+          },
+          "404": {
+            "description": "Folder not found, no key stored for it, or the feature is unavailable"
+          }
+        }
+      }
+    },
     "/user/me": {
       "get": {
         "tags": [
