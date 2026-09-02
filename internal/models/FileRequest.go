@@ -12,23 +12,32 @@ import (
 
 // FileRequest contains information about a file request
 type FileRequest struct {
-	Id              string   `json:"id" redis:"id"`                     // The internal ID of the file request
-	UserId          int      `json:"userid" redis:"userid"`             // The user ID of the owner
-	MaxFiles        int      `json:"maxfiles" redis:"maxfiles"`         // The maximum number of files allowed
-	MaxSize         int      `json:"maxsize" redis:"maxsize"`           // The maximum file size allowed in MB
-	Expiry          int64    `json:"expiry" redis:"expiry"`             // The expiry time of the file request
-	CreationDate    int64    `json:"creationdate" redis:"creationdate"` // The timestamp of the file request creation
-	Name            string   `json:"name" redis:"-"`                    // The given name for the file request, held in plaintext only in memory. Will be NameUnavailable while the instance is sealed
-	ApiKey          string   `json:"apikey" redis:"apikey"`             // The API key related to the file request
-	Notes           string   `json:"notes" redis:"-"`                   // The custom note that was set for this file request, held in plaintext only in memory. Empty while the instance is sealed
-	Closed          bool     `json:"closed" redis:"closed"`             // True if the request was marked complete and no longer accepts uploads
-	UploadedFiles   int      `json:"uploadedfiles" redis:"-"`           // Contains the number of uploaded files for this request. Needs to be calculated with Populate()
-	CombinedMaxSize int      `json:"combinedmaxsize" redis:"-"`         // The lesser of MaxSize and the server's max upload size. Needs to be calculated with Populate()
-	ReservedUploads int      `json:"reserveduploads" redis:"-"`         // How many uploads are currently reserved but not finalised. Needs to be calculated with Populate()
-	LastUpload      int64    `json:"lastupload" redis:"-"`              // Contains the timestamp of the last upload for this request. Needs to be calculated with Populate()
-	TotalFileSize   int64    `json:"totalfilesize" redis:"-"`           // Contains the file size of all uploaded files. Needs to be calculated with Populate()
-	FileIdList      []string `json:"fileidlist" redis:"-"`              // Contains an array of the IDs of all uploaded files. Needs to be calculated with Populate()
-	Files           []File   `json:"-" redis:"-"`                       // Contains an array of the IDs of all uploaded files. Needs to be calculated with Populate()
+	Id           string `json:"id" redis:"id"`                     // The internal ID of the file request
+	UserId       int    `json:"userid" redis:"userid"`             // The user ID of the owner
+	MaxFiles     int    `json:"maxfiles" redis:"maxfiles"`         // The maximum number of files allowed
+	MaxSize      int    `json:"maxsize" redis:"maxsize"`           // The maximum file size allowed in MB
+	Expiry       int64  `json:"expiry" redis:"expiry"`             // The expiry time of the file request
+	CreationDate int64  `json:"creationdate" redis:"creationdate"` // The timestamp of the file request creation
+	Name         string `json:"name" redis:"-"`                    // The given name for the file request, held in plaintext only in memory. Will be NameUnavailable while the instance is sealed
+	ApiKey       string `json:"apikey" redis:"apikey"`             // The API key related to the file request
+	Notes        string `json:"notes" redis:"-"`                   // The custom note that was set for this file request, held in plaintext only in memory. Empty while the instance is sealed
+	Closed       bool   `json:"closed" redis:"closed"`             // True if the request was marked complete and no longer accepts uploads
+	// ClosedAt is the unix timestamp Closed last transitioned from false to true, used by
+	// storage.CleanUp's file request retention sweep (see environment.Environment.
+	// FileRequestRetention) to measure "closed for longer than N" for a request that is closed but
+	// not expired. Reset to 0 when a closed request is reopened, so a later re-close starts a fresh
+	// window rather than reusing a stale one. 0 also covers a request closed before this field
+	// existed - its ALTER TABLE backfill defaults it to 0 like DisposedAt's did - which the sweep
+	// treats as "unknown" rather than "closed at the epoch", so it is left for Expiry to catch
+	// instead of assumed eligible the moment retention is turned on.
+	ClosedAt        int64    `json:"closedat" redis:"closedat"`
+	UploadedFiles   int      `json:"uploadedfiles" redis:"-"`   // Contains the number of uploaded files for this request. Needs to be calculated with Populate()
+	CombinedMaxSize int      `json:"combinedmaxsize" redis:"-"` // The lesser of MaxSize and the server's max upload size. Needs to be calculated with Populate()
+	ReservedUploads int      `json:"reserveduploads" redis:"-"` // How many uploads are currently reserved but not finalised. Needs to be calculated with Populate()
+	LastUpload      int64    `json:"lastupload" redis:"-"`      // Contains the timestamp of the last upload for this request. Needs to be calculated with Populate()
+	TotalFileSize   int64    `json:"totalfilesize" redis:"-"`   // Contains the file size of all uploaded files. Needs to be calculated with Populate()
+	FileIdList      []string `json:"fileidlist" redis:"-"`      // Contains an array of the IDs of all uploaded files. Needs to be calculated with Populate()
+	Files           []File   `json:"-" redis:"-"`               // Contains an array of the IDs of all uploaded files. Needs to be calculated with Populate()
 	// NameEncryptedRaw carries the exact bytes stored for the name, mirroring
 	// models.File.NameEncryptedRaw - see that field's comment for why this exists. For Redis this
 	// also doubles as the wire field: the "NameEncrypted" tag is what SaveFileRequest writes into

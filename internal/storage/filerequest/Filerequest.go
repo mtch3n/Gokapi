@@ -48,22 +48,8 @@ func GetAll() []models.FileRequest {
 	return result
 }
 
-// Delete all files associated with a file request and the request itself
+// Delete all files associated with a file request and the request itself. The cascade itself
+// lives in storage.DeleteFileRequest - see that function's comment for why.
 func Delete(request models.FileRequest) {
-	files := GetAllFiles(request)
-	storage.DeleteFiles(files, true)
-	database.DeleteFileRequest(request)
-	database.DeleteApiKey(request.ApiKey)
-}
-
-// GetAllFiles returns a list of all files associated with a file request
-func GetAllFiles(request models.FileRequest) []models.File {
-	var result []models.File
-	files := database.GetAllMetadata()
-	for _, file := range files {
-		if file.UploadRequestId == request.Id {
-			result = append(result, file)
-		}
-	}
-	return result
+	storage.DeleteFileRequest(request)
 }
