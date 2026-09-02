@@ -942,6 +942,44 @@ func (p *paramShareRecipientsList) New() requestParser {
 	return &paramShareRecipientsList{}
 }
 
+// ParseRequest reads r and saves the passed header values in the paramShareInboxOpen struct
+// In the end, ProcessParameter() is called
+func (p *paramShareInboxOpen) ParseRequest(r *http.Request) error {
+	var err error
+	var exists bool
+	p.foundHeaders = make(map[string]bool)
+
+	// RequestParser header value "resourceType", required: false
+	exists, err = checkHeaderExists(r, "resourceType", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["resourceType"] = exists
+	if exists {
+		p.ResourceType, err = parseHeaderInt(r, "resourceType")
+		if err != nil {
+			return fmt.Errorf("invalid value in header resourceType supplied")
+		}
+	}
+
+	// RequestParser header value "resourceId", required: true
+	exists, err = checkHeaderExists(r, "resourceId", true, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["resourceId"] = exists
+	if exists {
+		p.ResourceId = r.Header.Get("resourceId")
+	}
+
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramShareInboxOpen struct
+func (p *paramShareInboxOpen) New() requestParser {
+	return &paramShareInboxOpen{}
+}
+
 // ParseRequest reads r and saves the passed header values in the paramLogsDelete struct
 // In the end, ProcessParameter() is called
 func (p *paramLogsDelete) ParseRequest(r *http.Request) error {

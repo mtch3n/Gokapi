@@ -4521,3 +4521,229 @@ func TestApiUnsealGatesKeyDependentOperations(t *testing.T) {
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
 }
+
+// --- Share inbox (Part C) ---
+
+type shareInboxItemTest struct {
+	ResourceType     int    `json:"resourceType"`
+	ResourceId       string `json:"resourceId"`
+	Name             string `json:"name"`
+	SharedBy         string `json:"sharedBy"`
+	SharedAt         int64  `json:"sharedAt"`
+	ExpiresAt        int64  `json:"expiresAt"`
+	DownloadsUsed    int    `json:"downloadsUsed"`
+	DownloadsAllowed int    `json:"downloadsAllowed"`
+	LastDownloadAt   int64  `json:"lastDownloadAt"`
+	Size             int64  `json:"size"`
+}
+
+type shareInboxResponseTest struct {
+	Result string               `json:"result"`
+	Items  []shareInboxItemTest `json:"items"`
+}
+
+// TestApiShareInboxListsOnlyOwnEmailGrants proves that /share/inbox is scoped to the caller's own
+// identity: a grant made to a different address never leaks into another account's inbox, even
+// though both grants exist in the same table.
+func TestApiShareInboxListsOnlyOwnEmailGrants(t *testing.T) {
+	now := time.Now().Unix()
+	ownEmail := "inbox-own@example.com"
+	otherEmail := "inbox-other@example.com"
+
+	ownRecipient := database.SaveShareRecipient(models.ShareRecipient{Email: ownEmail, CreatedAt: now})
+	otherRecipient := database.SaveShareRecipient(models.ShareRecipient{Email: otherEmail, CreatedAt: now})
+
+	database.SaveMetaData(models.File{
+		Id: "inboxFileOwn", Name: "own.txt", SHA1: "inboxsha1own",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin,
+	})
+	database.SaveMetaData(models.File{
+		Id: "inboxFileOther", Name: "other.txt", SHA1: "inboxsha1other",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin,
+	})
+
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileOwn", []int{ownRecipient}, idAdmin, 5)
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileOther", []int{otherRecipient}, idAdmin, 5)
+
+	user := models.User{Id: 5001, Name: ownEmail}
+	w := httptest.NewRecorder()
+	apiShareInbox(w, nil, user, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response shareInboxResponseTest
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualInt(t, len(response.Items), 1)
+	test.IsEqualString(t, response.Items[0].ResourceId, "inboxFileOwn")
+	test.IsEqualString(t, response.Items[0].Name, "own.txt")
+	test.IsEqualInt(t, response.Items[0].DownloadsAllowed, 5)
+
+	adminUser, found := database.GetUser(idAdmin)
+	test.IsEqualBool(t, found, true)
+	test.IsEqualString(t, response.Items[0].SharedBy, adminUser.Name)
+}
+
+// TestApiShareInboxBlockedRecipientIsEmpty proves that a recipient blocked by an uploader loses
+// their inbox immediately, without the grant rows themselves being touched.
+func TestApiShareInboxBlockedRecipientIsEmpty(t *testing.T) {
+	now := time.Now().Unix()
+	email := "inbox-blocked@example.com"
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{Email: email, CreatedAt: now, IsBlocked: true})
+	database.SaveMetaData(models.File{
+		Id: "inboxFileBlocked", Name: "blocked.txt", SHA1: "inboxshablocked",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin,
+	})
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileBlocked", []int{recipientId}, idAdmin, 0)
+
+	user := models.User{Id: 5002, Name: email}
+	w := httptest.NewRecorder()
+	apiShareInbox(w, nil, user, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response shareInboxResponseTest
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualInt(t, len(response.Items), 0)
+}
+
+// TestApiShareInboxExcludesDeletedDisposedAndExpiredResources proves the exclusion rules: a grant
+// whose resource no longer exists, a disposed file, a time-expired file, a closed file request
+// and a time-expired file request are all skipped, while a live file with an active grant on the
+// same recipient still comes through.
+func TestApiShareInboxExcludesDeletedDisposedAndExpiredResources(t *testing.T) {
+	now := time.Now().Unix()
+	email := "inbox-excl@example.com"
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{Email: email, CreatedAt: now})
+
+	database.SaveMetaData(models.File{
+		Id: "inboxFileLive", Name: "live.txt", SHA1: "inboxshalive",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin,
+	})
+	database.SaveMetaData(models.File{
+		Id: "inboxFileDisposed", Name: "disposed.txt", SHA1: "inboxshadisposed",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin, DisposedAt: now,
+	})
+	database.SaveMetaData(models.File{
+		Id: "inboxFileExpired", Name: "expired.txt", SHA1: "inboxshaexpired",
+		UnlimitedDownloads: true, UnlimitedTime: false, ExpireAt: now - 3600, UserId: idAdmin,
+	})
+	database.SaveFileRequest(models.FileRequest{
+		Id: "inboxRequestClosed", UserId: idAdmin, Name: "closed request", Closed: true, CreationDate: now,
+	})
+	database.SaveFileRequest(models.FileRequest{
+		Id: "inboxRequestExpired", UserId: idAdmin, Name: "expired request", Expiry: now - 3600, CreationDate: now,
+	})
+
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileLive", []int{recipientId}, idAdmin, 0)
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileDisposed", []int{recipientId}, idAdmin, 0)
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileExpired", []int{recipientId}, idAdmin, 0)
+	database.SetShareGrants(models.ShareResourceFileRequest, "inboxRequestClosed", []int{recipientId}, idAdmin, 0)
+	database.SetShareGrants(models.ShareResourceFileRequest, "inboxRequestExpired", []int{recipientId}, idAdmin, 0)
+	// The resource for this grant was never saved at all - the safety net for an orphaned row.
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileNeverExisted", []int{recipientId}, idAdmin, 0)
+
+	user := models.User{Id: 5003, Name: email}
+	w := httptest.NewRecorder()
+	apiShareInbox(w, nil, user, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response shareInboxResponseTest
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualInt(t, len(response.Items), 1)
+	test.IsEqualString(t, response.Items[0].ResourceId, "inboxFileLive")
+}
+
+// TestApiShareInboxNonEmailAccountNameIsEmpty proves the accepted gap: an internal account whose
+// name is not an email address (e.g. "admin") can never match a ShareRecipient row, so its inbox
+// is simply empty rather than erroring.
+func TestApiShareInboxNonEmailAccountNameIsEmpty(t *testing.T) {
+	user := models.User{Id: 5006, Name: "inbox-test-admin"}
+	w := httptest.NewRecorder()
+	apiShareInbox(w, nil, user, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response shareInboxResponseTest
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualInt(t, len(response.Items), 0)
+}
+
+// findCookieByName is a small test helper for pulling one cookie out of a recorder's Set-Cookie
+// headers by name.
+func findCookieByName(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, c := range cookies {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// TestApiShareInboxOpenSetsCookieAndReturnsUrl proves the open endpoint's whole point: it hands
+// back the same recipient cookie the mailed link's token exchange would have set (so the download
+// that follows is attributed to the correct recipient, per Part F), and a same-origin URL the SPA
+// can navigate to directly.
+func TestApiShareInboxOpenSetsCookieAndReturnsUrl(t *testing.T) {
+	now := time.Now().Unix()
+	email := "inbox-open@example.com"
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{Email: email, CreatedAt: now})
+	database.SaveMetaData(models.File{
+		Id: "inboxFileOpen", Name: "open.txt", SHA1: "inboxshaopen",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin,
+	})
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileOpen", []int{recipientId}, idAdmin, 0)
+
+	user := models.User{Id: 5004, Name: email}
+	w := httptest.NewRecorder()
+	httpReq := httptest.NewRequest(http.MethodPost, "https://x.test/api/share/inbox/open", nil)
+	request := &paramShareInboxOpen{ResourceType: models.ShareResourceFile, ResourceId: "inboxFileOpen", Request: httpReq}
+	apiShareInboxOpen(w, request, user, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response struct {
+		Result string `json:"result"`
+		Url    string `json:"url"`
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualString(t, response.Url, "/s/inboxFileOpen")
+
+	cookie := findCookieByName(w.Result().Cookies(), shareaccess.CookieName(models.ShareResourceFile, "inboxFileOpen"))
+	test.IsNotNil(t, cookie)
+
+	verifyReq := httptest.NewRequest(http.MethodGet, "https://x.test/s/inboxFileOpen", nil)
+	verifyReq.AddCookie(cookie)
+	gotRecipientId, ok := shareaccess.ReadCookie(verifyReq, models.ShareResourceFile, "inboxFileOpen")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, gotRecipientId, recipientId)
+
+	time.Sleep(200 * time.Millisecond)
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	found := false
+	for _, entry := range entries {
+		if entry.Action != "share.inbox.opened" || entry.FileId != "inboxFileOpen" {
+			continue
+		}
+		found = true
+		test.IsEqualInt(t, entry.Actor.UserId, user.Id)
+		test.IsEqualString(t, entry.Actor.Email, user.Name)
+	}
+	test.IsEqualBool(t, found, true)
+}
+
+// TestApiShareInboxOpenNoGrantReturns404 proves the non-enumerable stance: a known recipient with
+// no grant on the specific resource asked for gets the same 404 as a resource that does not
+// exist, matching resolveShareResource on the uploader's side.
+func TestApiShareInboxOpenNoGrantReturns404(t *testing.T) {
+	email := "inbox-nogrant@example.com"
+	database.SaveShareRecipient(models.ShareRecipient{Email: email, CreatedAt: time.Now().Unix()})
+	database.SaveMetaData(models.File{
+		Id: "inboxFileNoGrant", Name: "nogrant.txt", SHA1: "inboxshanogrant",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin,
+	})
+	// Deliberately no database.SetShareGrants call: the recipient exists, but holds no grant on
+	// this resource.
+
+	user := models.User{Id: 5005, Name: email}
+	w := httptest.NewRecorder()
+	httpReq := httptest.NewRequest(http.MethodPost, "https://x.test/api/share/inbox/open", nil)
+	request := &paramShareInboxOpen{ResourceType: models.ShareResourceFile, ResourceId: "inboxFileNoGrant", Request: httpReq}
+	apiShareInboxOpen(w, request, user, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, http.StatusNotFound)
+}
