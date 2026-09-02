@@ -2028,8 +2028,15 @@ func apiDeleteUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 				filerequest.Delete(fRequest)
 			} else {
 				fRequest.UserId = user.Id
+				// The new owner may have been a collaborator; the roles never overlap.
+				fRequest.SetCollaboratorIds(withoutId(fRequest.CollaboratorIds(), user.Id))
 				database.SaveFileRequest(fRequest)
 			}
+			continue
+		}
+		if fRequest.IsCollaborator(userToDelete.Id) {
+			fRequest.SetCollaboratorIds(withoutId(fRequest.CollaboratorIds(), userToDelete.Id))
+			database.SaveFileRequest(fRequest)
 		}
 	}
 
@@ -2263,6 +2270,17 @@ func diffIds(before, after []int) (added, removed []int) {
 		}
 	}
 	return added, removed
+}
+
+// withoutId returns ids with every occurrence of id removed.
+func withoutId(ids []int, id int) []int {
+	result := make([]int, 0, len(ids))
+	for _, candidate := range ids {
+		if candidate != id {
+			result = append(result, candidate)
+		}
+	}
+	return result
 }
 
 func isUserAllowedUnlimited(request *paramURequestSave, isNewRequest bool, user models.User) bool {

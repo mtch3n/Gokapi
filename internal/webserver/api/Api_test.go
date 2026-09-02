@@ -4737,3 +4737,43 @@ func TestApiGetUserDirectory(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(body, "permissions"), false)
 	test.IsEqualBool(t, strings.Contains(body, "lastOnline"), false)
 }
+
+func TestDeleteUserStripsCollaborator(t *testing.T) {
+	const idDoomed = 104
+	database.SaveUser(models.User{
+		Id: idDoomed, Name: "TestDoomed", Permissions: models.UserPermissionNone,
+		UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderInternal,
+	}, false)
+	fr := models.FileRequest{Id: "stripRequest", Name: "Strip", UserId: idAdmin, ApiKey: "stripKey", CreationDate: time.Now().Unix()}
+	fr.SetCollaboratorIds([]int{idUser, idDoomed})
+	database.SaveFileRequest(fr)
+	// A request owned by the doomed user that the deleting admin (idSuperAdmin) collaborates on:
+	// after re-owning, idSuperAdmin must not be both owner and collaborator.
+	owned := models.FileRequest{Id: "stripOwned", Name: "Owned", UserId: idDoomed, ApiKey: "stripOwnedKey", CreationDate: time.Now().Unix()}
+	owned.SetCollaboratorIds([]int{idSuperAdmin})
+	database.SaveFileRequest(owned)
+
+	superKey := generateNewKey(false, idSuperAdmin, "super", "")
+	superKey.Permissions = getPermissionAll()
+	database.SaveApiKey(superKey)
+
+	// Matches the header names and method TestUserDelete/testDeleteUserCall use for
+	// /user/delete: header "userid" (int), header "deleteFiles" (bool); GET, since the routing
+	// dispatch does not gate on HTTP method.
+	w, r := getRecorder("/api/user/delete", superKey.Id, []test.Header{
+		{Name: "userid", Value: strconv.Itoa(idDoomed)},
+		{Name: "deleteFiles", Value: "false"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	stored, _ := database.GetFileRequest("stripRequest")
+	test.IsEqual(t, stored.CollaboratorIds(), []int{idUser})
+
+	reowned, _ := database.GetFileRequest("stripOwned")
+	test.IsEqualInt(t, reowned.UserId, idSuperAdmin)
+	test.IsEqualInt(t, len(reowned.Collaborators), 0)
+
+	database.DeleteFileRequest(stored)
+	database.DeleteFileRequest(reowned)
+}
