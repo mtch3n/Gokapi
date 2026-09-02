@@ -426,6 +426,42 @@ func TestFileRequest(t *testing.T) {
 
 }
 
+func TestFileRequestCollaborators(t *testing.T) {
+	req := models.FileRequest{
+		Id:           "reqCollab",
+		Name:         "Collab request",
+		UserId:       1,
+		ApiKey:       "collabkey",
+		CreationDate: time.Now().Unix(),
+	}
+	req.SetCollaboratorIds([]int{9, 4, 9})
+	dbInstance.SaveFileRequest(req)
+
+	stored, ok := dbInstance.GetFileRequest("reqCollab")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, stored.CollaboratorIds(), []int{4, 9})
+	test.IsEqualString(t, stored.CollaboratorsRaw, "[4,9]")
+	test.IsEqualBool(t, stored.IsCollaborator(9), true)
+
+	// Clearing has to survive the round trip too, or a removed collaborator keeps access.
+	stored.SetCollaboratorIds(nil)
+	dbInstance.SaveFileRequest(stored)
+	stored, _ = dbInstance.GetFileRequest("reqCollab")
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+	test.IsEqualString(t, stored.CollaboratorsRaw, "[]")
+
+	// A request saved without ever touching the list (every caller before this feature) reads
+	// back as nobody, never as null.
+	plain := models.FileRequest{Id: "reqPlain", Name: "Plain", UserId: 1, ApiKey: "plainkey", CreationDate: time.Now().Unix()}
+	dbInstance.SaveFileRequest(plain)
+	stored, _ = dbInstance.GetFileRequest("reqPlain")
+	test.IsEqualBool(t, stored.Collaborators != nil, true)
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+
+	dbInstance.DeleteFileRequest(req)
+	dbInstance.DeleteFileRequest(plain)
+}
+
 func TestGarbageCollectionSessions(t *testing.T) {
 	dbInstance.SaveSession("todelete1", models.Session{
 		RenewAt:    time.Now().Add(-10 * time.Second).Unix(),

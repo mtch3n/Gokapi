@@ -1,6 +1,8 @@
 package models
 
 import (
+	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +38,97 @@ type FileRequest struct {
 	// value (see encryptNoteForSave), so this exists purely for the save-back-unchanged path, not
 	// for distinguishing "empty" from "sealed".
 	NoteEncryptedRaw []byte `json:"-" redis:"NoteEncrypted"`
+	// Collaborators are the staff users who may view this request and download the files it
+	// collects, and nothing else - every write stays with the owner (UserId). Ids are what is
+	// stored; Name is filled by the API layer for display and never persisted. A collaborator is
+	// not a share recipient: a recipient is an outside address with no account whose grant opens
+	// the public upload page, this is an account that sees the request in its own dashboard.
+	Collaborators []FileRequestCollaborator `json:"collaborators" redis:"-"`
+	// CollaboratorsRaw is the JSON array of ids exactly as stored, e.g. "[2,5]". It is the wire
+	// field for Redis (the struct scanner cannot fill a slice) and what the sqlite/postgres
+	// providers write into the Collaborators column. Always kept in step with Collaborators by
+	// SetCollaboratorIds; nothing else should assign it.
+	CollaboratorsRaw string `json:"-" redis:"Collaborators"`
+	// OwnerName is the owner's display name, filled by the API layer so a collaborator's list can
+	// say whose request it is. Never persisted.
+	OwnerName string `json:"ownername" redis:"-"`
+}
+
+// FileRequestCollaborator is one entry of FileRequest.Collaborators.
+type FileRequestCollaborator struct {
+	Id   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// DecodeCollaborators parses the stored JSON array of user ids. An empty string is accepted as
+// "nobody": a Redis hash written before the field existed has no value at all. The result is
+// sorted, de-duplicated and free of ids that cannot name a user.
+func DecodeCollaborators(raw string) ([]int, error) {
+	if raw == "" {
+		return []int{}, nil
+	}
+	var ids []int
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return nil, err
+	}
+	return normaliseCollaboratorIds(ids), nil
+}
+
+// EncodeCollaborators is the inverse of DecodeCollaborators. Never returns "" - the stored value
+// is always a JSON array, so every reader sees valid JSON.
+func EncodeCollaborators(ids []int) string {
+	out, err := json.Marshal(normaliseCollaboratorIds(ids))
+	if err != nil {
+		// A []int cannot fail to marshal; guarding rather than ignoring so a future change to
+		// the element type cannot silently store garbage.
+		panic(err)
+	}
+	return string(out)
+}
+
+func normaliseCollaboratorIds(ids []int) []int {
+	result := make([]int, 0, len(ids))
+	seen := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	slices.Sort(result)
+	return result
+}
+
+// CollaboratorIds returns the ids in Collaborators, in stored order.
+func (f *FileRequest) CollaboratorIds() []int {
+	ids := make([]int, 0, len(f.Collaborators))
+	for _, c := range f.Collaborators {
+		ids = append(ids, c.Id)
+	}
+	return ids
+}
+
+// SetCollaboratorIds replaces the list and keeps CollaboratorsRaw in step. Names are cleared:
+// they are display data the API layer fills from the user table on the way out.
+func (f *FileRequest) SetCollaboratorIds(ids []int) {
+	clean := normaliseCollaboratorIds(ids)
+	f.Collaborators = make([]FileRequestCollaborator, 0, len(clean))
+	for _, id := range clean {
+		f.Collaborators = append(f.Collaborators, FileRequestCollaborator{Id: id})
+	}
+	f.CollaboratorsRaw = EncodeCollaborators(clean)
+}
+
+// IsCollaborator reports whether userId is in Collaborators. The owner is never a collaborator;
+// callers test UserId separately.
+func (f *FileRequest) IsCollaborator(userId int) bool {
+	for _, c := range f.Collaborators {
+		if c.Id == userId {
+			return true
+		}
+	}
+	return false
 }
 
 // Populate inserts the number of uploaded files and the last upload date

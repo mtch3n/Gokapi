@@ -1037,7 +1037,7 @@ func (u *AdminView) convertGlobalConfig(view int, user models.User) *AdminView {
 			if !ok {
 				continue
 			}
-			if fileRequest.UserId != user.Id && !user.HasPermissionListOtherUploads() {
+			if fileRequest.UserId != user.Id && !fileRequest.IsCollaborator(user.Id) && !user.HasPermissionListOtherUploads() {
 				continue
 			}
 			fileRequest.Files = sortMetaData(fileRequest.Files)

@@ -594,6 +594,22 @@ func LogFileRequestFull(fr models.FileRequest, user models.User) {
 	})
 }
 
+// LogFileRequestCollaboratorsChanged adds a log entry when the collaborator list of a file request
+// was replaced. Non-Blocking. Ids rather than names: a name can change or be deleted, an id is
+// what the audit reader joins against.
+func LogFileRequestCollaboratorsChanged(fr models.FileRequest, user models.User, added, removed []int) {
+	detail := fmt.Sprintf("added %v, removed %v", added, removed)
+	createLogEntry(categoryEdit, fmt.Sprintf("File request %s collaborators changed by %s (user #%d): %s", fr.Id, user.Name, user.Id, detail), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category:  categoryEdit,
+		Action:    "filerequest.collaborators.changed",
+		Outcome:   OutcomeSuccess,
+		RequestId: fr.Id,
+		Actor:     AuditActor{UserId: user.Id, Email: user.Name},
+		Detail:    detail,
+	})
+}
+
 // LogDeleteFileRequest adds a log entry when a file request was deleted. Non-Blocking
 func LogDeleteFileRequest(fr models.FileRequest, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("File request %s and associated files deleted by %s (user #%d)", fr.Id, user.Name, user.Id), false)

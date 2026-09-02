@@ -526,6 +526,33 @@ func TestFileRequests(t *testing.T) {
 	test.IsEqualInt(t, len(dbInstance.GetAllFileRequests()), 0)
 }
 
+func TestFileRequestCollaborators(t *testing.T) {
+	testConfig(t)
+
+	req := models.FileRequest{Id: "reqCollab", Name: "Collab request", UserId: 1, ApiKey: "collabkey", CreationDate: time.Now().Unix()}
+	req.SetCollaboratorIds([]int{9, 4, 9})
+	dbInstance.SaveFileRequest(req)
+
+	stored, ok := dbInstance.GetFileRequest("reqCollab")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, stored.CollaboratorIds(), []int{4, 9})
+	test.IsEqualString(t, stored.CollaboratorsRaw, "[4,9]")
+
+	stored.SetCollaboratorIds(nil)
+	dbInstance.SaveFileRequest(stored)
+	stored, _ = dbInstance.GetFileRequest("reqCollab")
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+
+	plain := models.FileRequest{Id: "reqPlain", Name: "Plain", UserId: 1, ApiKey: "plainkey", CreationDate: time.Now().Unix()}
+	dbInstance.SaveFileRequest(plain)
+	stored, _ = dbInstance.GetFileRequest("reqPlain")
+	test.IsEqualBool(t, stored.Collaborators != nil, true)
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+
+	dbInstance.DeleteFileRequest(req)
+	dbInstance.DeleteFileRequest(plain)
+}
+
 func TestStatistics(t *testing.T) {
 	testConfig(t)
 	test.IsEqualInt(t, int(dbInstance.GetStatTraffic()), 0)

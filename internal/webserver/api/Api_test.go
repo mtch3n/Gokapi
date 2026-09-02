@@ -49,6 +49,7 @@ const (
 	idSuperAdmin             = 100
 	idAdmin                  = 101
 	idUser                   = 102
+	idStranger               = 103
 	idApiKeyAdmin            = "ApiKeyAdmin"
 	idApiKeySuperAdmin       = "ApiKeySuperAdmin"
 	idPublicApiKeySuperAdmin = "OGeidahfiep1Akeevahkoh1quechieP6ael"
@@ -4746,4 +4747,259 @@ func TestApiShareInboxOpenNoGrantReturns404(t *testing.T) {
 	request := &paramShareInboxOpen{ResourceType: models.ShareResourceFile, ResourceId: "inboxFileNoGrant", Request: httpReq}
 	apiShareInboxOpen(w, request, user, models.ApiKey{})
 	test.IsEqualInt(t, w.Code, http.StatusNotFound)
+}
+
+// collaboratorFixture creates a request owned by idAdmin that idUser collaborates on, with one
+// received file, and returns API keys for idUser and for a third account (idStranger) that has
+// no relation to the request. Both accounts hold no user-level permissions, so whatever the
+// collaborator key can reach here it reaches as a collaborator and nothing else.
+func collaboratorFixture(t *testing.T) (models.FileRequest, models.File, models.ApiKey, models.ApiKey) {
+	t.Helper()
+	database.SaveUser(models.User{
+		Id: idStranger, Name: "TestStranger", Permissions: models.UserPermissionNone,
+		UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderInternal,
+	}, false)
+	fr := models.FileRequest{
+		Id: "collabRequest", Name: "Collab request", UserId: idAdmin,
+		ApiKey: "collabRequestKey", CreationDate: time.Now().Unix(),
+	}
+	fr.SetCollaboratorIds([]int{idUser})
+	database.SaveFileRequest(fr)
+	file := models.File{
+		Id: "collabFile", Name: "collab.txt", SHA1: "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin, UploadRequestId: fr.Id,
+	}
+	database.SaveMetaData(file)
+	collaboratorKey := generateNewKey(false, idUser, "collaborator", "")
+	collaboratorKey.Permissions = getPermissionAll()
+	database.SaveApiKey(collaboratorKey)
+	strangerKey := generateNewKey(false, idStranger, "stranger", "")
+	strangerKey.Permissions = getPermissionAll()
+	database.SaveApiKey(strangerKey)
+	return fr, file, collaboratorKey, strangerKey
+}
+
+func TestCollaboratorCanListRequest(t *testing.T) {
+	fr, _, collaboratorKey, strangerKey := collaboratorFixture(t)
+
+	w, r := getRecorder("/api/uploadrequest/list", collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	// httptest.ResponseRecorder.Result() caches its Response, so a second call would read an
+	// already-drained Body; the body is checked once against the recorder's own buffer instead
+	// of calling ResponseBodyContains (which reads via Result()) more than once per recorder.
+	body := w.Body.String()
+	test.IsEqualBool(t, strings.Contains(body, `"id":"`+fr.Id+`"`), true)
+	// Names travel with the row so the list can say whose request it is without a user lookup.
+	test.IsEqualBool(t, strings.Contains(body, `"ownername":"testadmin"`), true)
+	test.IsEqualBool(t, strings.Contains(body, `{"id":`+strconv.Itoa(idUser)+`,"name":"testuser"}`), true)
+
+	w, r = getRecorder("/api/uploadrequest/list", strangerKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), `"id":"`+fr.Id+`"`), false)
+
+	w, r = getRecorder("/api/uploadrequest/list/"+fr.Id, collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.ResponseBodyContains(t, w, `"ownername":"testadmin"`)
+
+	w, r = getRecorder("/api/uploadrequest/list/"+fr.Id, strangerKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+}
+
+func TestCollaboratorCanSeeReceivedFiles(t *testing.T) {
+	_, file, collaboratorKey, strangerKey := collaboratorFixture(t)
+
+	w, r := getRecorder("/api/files/list", collaboratorKey.Id, []test.Header{{Name: "showFileRequests", Value: "true"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.ResponseBodyContains(t, w, `"Id":"`+file.Id+`"`)
+
+	// Without the flag request files stay out of the list for collaborators exactly as for
+	// owners - the Files page never shows them.
+	w, r = getRecorder("/api/files/list", collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), `"Id":"`+file.Id+`"`), false)
+
+	w, r = getRecorder("/api/files/list", strangerKey.Id, []test.Header{{Name: "showFileRequests", Value: "true"}})
+	Process(w, r)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), `"Id":"`+file.Id+`"`), false)
+
+	w, r = getRecorder("/api/files/list/"+file.Id, collaboratorKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	w, r = getRecorder("/api/files/list/"+file.Id, strangerKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	// Download authorisation is decided by checkDownloadAllowed for both the single and the zip
+	// route; tested directly so the assertion does not depend on the test data dir holding the
+	// file's bytes.
+	collaborator, _ := database.GetUser(idUser)
+	_, code, _, _ := checkDownloadAllowed(file.Id, collaborator)
+	test.IsEqualInt(t, code, 0)
+	stranger, _ := database.GetUser(idStranger)
+	_, code, _, _ = checkDownloadAllowed(file.Id, stranger)
+	test.IsEqualInt(t, code, 401)
+}
+
+func TestCollaboratorCannotWrite(t *testing.T) {
+	fr, file, collaboratorKey, _ := collaboratorFixture(t)
+
+	w, r := getRecorderWithBody("/api/uploadrequest/save", collaboratorKey.Id, "POST",
+		[]test.Header{{Name: "id", Value: fr.Id}, {Name: "name", Value: "renamed"}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	w, r = getRecorderWithBody("/api/uploadrequest/delete", collaboratorKey.Id, "DELETE",
+		[]test.Header{{Name: "id", Value: fr.Id}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+	_, stillThere := database.GetFileRequest(fr.Id)
+	test.IsEqualBool(t, stillThere, true)
+
+	w, r = getRecorderWithBody("/api/files/delete", collaboratorKey.Id, "DELETE",
+		[]test.Header{{Name: "id", Value: file.Id}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	// resolveShareResource answers a caller who may not edit shares with "not found" rather than
+	// "forbidden" (deliberate anti-enumeration design, see that function's comment), so a
+	// collaborator setting recipients gets 404 here, not 401.
+	w, r = getRecorderWithBody("/api/share/recipients", collaboratorKey.Id, "POST",
+		[]test.Header{{Name: "Content-Type", Value: "application/json"}},
+		strings.NewReader(`{"resourceType":2,"resourceId":"`+fr.Id+`","emails":["x@example.com"],"downloadsAllowed":0}`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+}
+
+func TestApiURequestCollaborators(t *testing.T) {
+	fr, _, collaboratorKey, strangerKey := collaboratorFixture(t)
+	testAuthorisation(t, "/api/uploadrequest/collaborators", models.ApiPermManageFileRequests)
+	ownerKey := generateNewKey(false, idAdmin, "owner", "")
+	ownerKey.Permissions = getPermissionAll()
+	database.SaveApiKey(ownerKey)
+	jsonHeader := []test.Header{{Name: "Content-Type", Value: "application/json"}}
+	body := func(ids string) io.Reader {
+		return strings.NewReader(`{"id":"` + fr.Id + `","userids":` + ids + `}`)
+	}
+
+	// Owner replaces the list. Duplicates collapse, names come back resolved.
+	w, r := getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader,
+		body(`[`+strconv.Itoa(idStranger)+`,`+strconv.Itoa(idStranger)+`,`+strconv.Itoa(idUser)+`]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	// See TestCollaboratorCanListRequest: ResponseBodyContains reads via w.Result(), which
+	// caches - a second call on the same recorder would read an already-drained Body.
+	respBody := w.Body.String()
+	test.IsEqualBool(t, strings.Contains(respBody, `{"id":`+strconv.Itoa(idUser)+`,"name":"testuser"}`), true)
+	test.IsEqualBool(t, strings.Contains(respBody, `{"id":`+strconv.Itoa(idStranger)+`,"name":"teststranger"}`), true)
+	stored, _ := database.GetFileRequest(fr.Id)
+	test.IsEqual(t, stored.CollaboratorIds(), []int{idUser, idStranger})
+
+	// A collaborator may not change the list - that is a write.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", collaboratorKey.Id, "POST", jsonHeader, body(`[]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+	stored, _ = database.GetFileRequest(fr.Id)
+	test.IsEqualInt(t, len(stored.Collaborators), 2)
+
+	// Nor may an unrelated account.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", strangerKey.Id, "POST", jsonHeader, body(`[]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+
+	// The owner cannot be their own collaborator.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader, body(`[`+strconv.Itoa(idAdmin)+`]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyContains(t, w, "owner cannot be added")
+
+	// Unknown user id.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader, body(`[424242]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyContains(t, w, "does not exist")
+
+	// Unknown request.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader,
+		strings.NewReader(`{"id":"nope","userids":[]}`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+
+	// Missing id is a parameter error.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader,
+		strings.NewReader(`{"userids":[]}`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	// Owner clears the list.
+	w, r = getRecorderWithBody("/api/uploadrequest/collaborators", ownerKey.Id, "POST", jsonHeader, body(`[]`))
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, _ = database.GetFileRequest(fr.Id)
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+
+	// Restore the fixture state for other tests in this package.
+	fr.SetCollaboratorIds([]int{idUser})
+	database.SaveFileRequest(fr)
+}
+
+func TestApiGetUserDirectory(t *testing.T) {
+	key := testAuthorisation(t, "/api/user/directory", models.ApiPermManageFileRequests)
+	w, r := getRecorder("/api/user/directory", key.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	body := w.Body.String()
+	// Other accounts, id and name only. Names are lowercased on save (database.SaveUser).
+	test.IsEqualBool(t, strings.Contains(body, `{"id":`+strconv.Itoa(idAdmin)+`,"name":"testadmin"}`), true)
+	// Never the caller: you cannot collaborate with yourself. testAuthorisation's key belongs to
+	// idUser.
+	test.IsEqualBool(t, strings.Contains(body, `"name":"testuser"`), false)
+	// Nothing /user/list would expose to a manage-users admin.
+	test.IsEqualBool(t, strings.Contains(body, "permissions"), false)
+	test.IsEqualBool(t, strings.Contains(body, "lastOnline"), false)
+}
+
+func TestDeleteUserStripsCollaborator(t *testing.T) {
+	const idDoomed = 104
+	database.SaveUser(models.User{
+		Id: idDoomed, Name: "TestDoomed", Permissions: models.UserPermissionNone,
+		UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderInternal,
+	}, false)
+	fr := models.FileRequest{Id: "stripRequest", Name: "Strip", UserId: idAdmin, ApiKey: "stripKey", CreationDate: time.Now().Unix()}
+	fr.SetCollaboratorIds([]int{idUser, idDoomed})
+	database.SaveFileRequest(fr)
+	// A request owned by the doomed user that the deleting admin (idSuperAdmin) collaborates on:
+	// after re-owning, idSuperAdmin must not be both owner and collaborator.
+	owned := models.FileRequest{Id: "stripOwned", Name: "Owned", UserId: idDoomed, ApiKey: "stripOwnedKey", CreationDate: time.Now().Unix()}
+	owned.SetCollaboratorIds([]int{idSuperAdmin})
+	database.SaveFileRequest(owned)
+
+	superKey := generateNewKey(false, idSuperAdmin, "super", "")
+	superKey.Permissions = getPermissionAll()
+	database.SaveApiKey(superKey)
+
+	// Matches the header names and method TestUserDelete/testDeleteUserCall use for
+	// /user/delete: header "userid" (int), header "deleteFiles" (bool); GET, since the routing
+	// dispatch does not gate on HTTP method.
+	w, r := getRecorder("/api/user/delete", superKey.Id, []test.Header{
+		{Name: "userid", Value: strconv.Itoa(idDoomed)},
+		{Name: "deleteFiles", Value: "false"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	stored, _ := database.GetFileRequest("stripRequest")
+	test.IsEqual(t, stored.CollaboratorIds(), []int{idUser})
+
+	reowned, _ := database.GetFileRequest("stripOwned")
+	test.IsEqualInt(t, reowned.UserId, idSuperAdmin)
+	test.IsEqualInt(t, len(reowned.Collaborators), 0)
+
+	database.DeleteFileRequest(stored)
+	database.DeleteFileRequest(reowned)
 }

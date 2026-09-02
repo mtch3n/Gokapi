@@ -440,6 +440,34 @@ func TestFileRequest(t *testing.T) {
 	dbInstance.DeleteUser(45564)
 }
 
+func TestFileRequestCollaborators(t *testing.T) {
+	instance, err := New(config)
+	test.IsNil(t, err)
+
+	req := models.FileRequest{Id: "reqCollab", Name: "Collab request", UserId: 1, ApiKey: "collabkey", CreationDate: time.Now().Unix()}
+	req.SetCollaboratorIds([]int{9, 4, 9})
+	instance.SaveFileRequest(req)
+
+	stored, ok := instance.GetFileRequest("reqCollab")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, stored.CollaboratorIds(), []int{4, 9})
+	test.IsEqualString(t, stored.CollaboratorsRaw, "[4,9]")
+
+	stored.SetCollaboratorIds(nil)
+	instance.SaveFileRequest(stored)
+	stored, _ = instance.GetFileRequest("reqCollab")
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+
+	// A hash written before this field existed has no Collaborators entry at all.
+	instance.deleteHashField(prefixFileRequests+"reqCollab", "Collaborators")
+	stored, ok = instance.GetFileRequest("reqCollab")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.Collaborators != nil, true)
+	test.IsEqualInt(t, len(stored.Collaborators), 0)
+
+	instance.DeleteFileRequest(req)
+}
+
 func TestSession(t *testing.T) {
 	renewAt := time.Now().Add(1 * time.Hour).Unix()
 	dbInstance.SaveSession("newsession", models.Session{

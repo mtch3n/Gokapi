@@ -14,10 +14,12 @@ import (
 // and an API key has to be generated manually
 func New(user models.User) models.FileRequest {
 	return models.FileRequest{
-		Id:           helper.GenerateRandomString(configuration.GetEnvironment().LengthId),
-		UserId:       user.Id,
-		CreationDate: time.Now().Unix(),
-		Name:         "Unnamed file request",
+		Id:               helper.GenerateRandomString(configuration.GetEnvironment().LengthId),
+		UserId:           user.Id,
+		CreationDate:     time.Now().Unix(),
+		Name:             "Unnamed file request",
+		Collaborators:    []models.FileRequestCollaborator{},
+		CollaboratorsRaw: "[]",
 	}
 }
 

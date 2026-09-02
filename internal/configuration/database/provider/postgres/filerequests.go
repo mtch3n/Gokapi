@@ -9,7 +9,7 @@ import (
 	"github.com/forceu/gokapi/internal/models"
 )
 
-const fileRequestColumns = "Id, NameEncrypted, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, NoteEncrypted, Closed"
+const fileRequestColumns = "Id, NameEncrypted, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, NoteEncrypted, Closed, Collaborators"
 
 type schemaFileRequests struct {
 	Id            string
@@ -22,10 +22,11 @@ type schemaFileRequests struct {
 	ApiKey        string
 	NoteEncrypted []byte
 	Closed        bool
+	Collaborators string
 }
 
 func (s schemaFileRequests) toFileRequest() models.FileRequest {
-	return models.FileRequest{
+	result := models.FileRequest{
 		Id:               s.Id,
 		Name:             encryption.DecryptFileName(s.NameEncrypted),
 		NameEncryptedRaw: s.NameEncrypted,
@@ -39,6 +40,10 @@ func (s schemaFileRequests) toFileRequest() models.FileRequest {
 		NoteEncryptedRaw: s.NoteEncrypted,
 		Closed:           s.Closed,
 	}
+	ids, err := models.DecodeCollaborators(s.Collaborators)
+	helper.Check(err)
+	result.SetCollaboratorIds(ids)
+	return result
 }
 
 // GetFileRequest returns the FileRequest or false if not found
@@ -50,7 +55,7 @@ func (p DatabaseProvider) GetFileRequest(id string) (models.FileRequest, bool) {
 	row := p.queryRow("SELECT "+fileRequestColumns+" FROM UploadRequests WHERE Id = $1", id)
 	err := row.Scan(&rowResult.Id, &rowResult.NameEncrypted, &rowResult.UserId, &rowResult.Expiry,
 		&rowResult.MaxFiles, &rowResult.MaxSize, &rowResult.Creation, &rowResult.ApiKey, &rowResult.NoteEncrypted,
-		&rowResult.Closed)
+		&rowResult.Closed, &rowResult.Collaborators)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileRequest{}, false
@@ -72,7 +77,8 @@ func (p DatabaseProvider) GetAllFileRequests() []models.FileRequest {
 	for rows.Next() {
 		rowData := schemaFileRequests{}
 		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.UserId, &rowData.Expiry, &rowData.MaxFiles,
-			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.NoteEncrypted, &rowData.Closed)
+			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.NoteEncrypted, &rowData.Closed,
+			&rowData.Collaborators)
 		helper.Check(err)
 		result = append(result, rowData.toFileRequest())
 	}
@@ -97,17 +103,18 @@ func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
 		ApiKey:        request.ApiKey,
 		NoteEncrypted: encryptedNote,
 		Closed:        request.Closed,
+		Collaborators: models.EncodeCollaborators(request.CollaboratorIds()),
 	}
 
 	_, err = p.exec(`INSERT INTO UploadRequests
-					(Id, NameEncrypted, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, NoteEncrypted, Closed)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+					(Id, NameEncrypted, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, NoteEncrypted, Closed, Collaborators)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
 					ON CONFLICT (Id) DO UPDATE SET NameEncrypted = EXCLUDED.NameEncrypted, UserId = EXCLUDED.UserId,
 						Expiry = EXCLUDED.Expiry, MaxFiles = EXCLUDED.MaxFiles, MaxSize = EXCLUDED.MaxSize,
 						Creation = EXCLUDED.Creation, ApiKey = EXCLUDED.ApiKey, NoteEncrypted = EXCLUDED.NoteEncrypted,
-						Closed = EXCLUDED.Closed`,
+						Closed = EXCLUDED.Closed, Collaborators = EXCLUDED.Collaborators`,
 		newData.Id, newData.NameEncrypted, newData.UserId, newData.Expiry, newData.MaxFiles, newData.MaxSize,
-		newData.Creation, newData.ApiKey, newData.NoteEncrypted, newData.Closed)
+		newData.Creation, newData.ApiKey, newData.NoteEncrypted, newData.Closed, newData.Collaborators)
 	helper.Check(err)
 }
 
