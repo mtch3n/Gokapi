@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 24
+const DatabaseSchemeVersion = 25
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -295,6 +295,16 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			helper.Check(err)
 		}
 	}
+	// File request collaborators (models.FileRequest.Collaborators): a JSON array of user ids.
+	// '[]' rather than '' as the default so every row is valid JSON and the decoder has no
+	// special case. Appended last, same reasoning as the v21 step above. Same idempotency guard
+	// as the v17 step above.
+	if currentDbVersion < 25 {
+		if !p.columnExists("UploadRequests", "Collaborators") {
+			err := p.rawSqlite(`ALTER TABLE UploadRequests ADD COLUMN "Collaborators" TEXT NOT NULL DEFAULT '[]';`)
+			helper.Check(err)
+		}
+	}
 }
 
 // tableExists returns true if the given table is present. Used to make a
@@ -481,6 +491,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"apiKey"	TEXT NOT NULL UNIQUE,
 			"NoteEncrypted"	BLOB,
 			"closed"	INTEGER NOT NULL DEFAULT 0,
+			"Collaborators"	TEXT NOT NULL DEFAULT '[]',
 			PRIMARY KEY("id")
 		);
 		CREATE TABLE "Statistics" (

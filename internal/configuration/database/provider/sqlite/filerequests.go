@@ -12,7 +12,7 @@ import (
 // fileRequestColumns is listed explicitly rather than using SELECT *, for the same reason
 // metadata.go's metaDataColumns and filebundles.go's fileBundleColumns are: the scans below are
 // positional, and an upgraded database orders its columns differently from a fresh one.
-const fileRequestColumns = "Id, NameEncrypted, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, NoteEncrypted, Closed"
+const fileRequestColumns = "Id, NameEncrypted, UserId, Expiry, MaxFiles, MaxSize, Creation, ApiKey, NoteEncrypted, Closed, Collaborators"
 
 type schemaFileRequests struct {
 	Id            string
@@ -25,10 +25,11 @@ type schemaFileRequests struct {
 	ApiKey        string
 	NoteEncrypted []byte
 	Closed        int
+	Collaborators string
 }
 
 func (rowData schemaFileRequests) toFileRequestModel() models.FileRequest {
-	return models.FileRequest{
+	result := models.FileRequest{
 		Id:               rowData.Id,
 		Name:             encryption.DecryptFileName(rowData.NameEncrypted),
 		NameEncryptedRaw: rowData.NameEncrypted,
@@ -42,6 +43,10 @@ func (rowData schemaFileRequests) toFileRequestModel() models.FileRequest {
 		NoteEncryptedRaw: rowData.NoteEncrypted,
 		Closed:           rowData.Closed == 1,
 	}
+	ids, err := models.DecodeCollaborators(rowData.Collaborators)
+	helper.Check(err)
+	result.SetCollaboratorIds(ids)
+	return result
 }
 
 // GetFileRequest returns the FileRequest or false if not found
@@ -53,7 +58,7 @@ func (p DatabaseProvider) GetFileRequest(id string) (models.FileRequest, bool) {
 	row := p.sqliteDb.QueryRow("SELECT "+fileRequestColumns+" FROM UploadRequests WHERE Id = ?", id)
 	err := row.Scan(&rowResult.Id, &rowResult.NameEncrypted, &rowResult.UserId, &rowResult.Expiry,
 		&rowResult.MaxFiles, &rowResult.MaxSize, &rowResult.Creation, &rowResult.ApiKey, &rowResult.NoteEncrypted,
-		&rowResult.Closed)
+		&rowResult.Closed, &rowResult.Collaborators)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileRequest{}, false
@@ -75,7 +80,8 @@ func (p DatabaseProvider) GetAllFileRequests() []models.FileRequest {
 	for rows.Next() {
 		rowData := schemaFileRequests{}
 		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.UserId, &rowData.Expiry, &rowData.MaxFiles,
-			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.NoteEncrypted, &rowData.Closed)
+			&rowData.MaxSize, &rowData.Creation, &rowData.ApiKey, &rowData.NoteEncrypted, &rowData.Closed,
+			&rowData.Collaborators)
 		helper.Check(err)
 		result = append(result, rowData.toFileRequestModel())
 	}
@@ -103,13 +109,14 @@ func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
 		ApiKey:        request.ApiKey,
 		NoteEncrypted: encryptedNote,
 		Closed:        closed,
+		Collaborators: models.EncodeCollaborators(request.CollaboratorIds()),
 	}
 
 	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO UploadRequests
-   				 (id, NameEncrypted, userid, expiry, maxFiles, maxSize, creation, apiKey, NoteEncrypted, closed)
-         			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+   				 (id, NameEncrypted, userid, expiry, maxFiles, maxSize, creation, apiKey, NoteEncrypted, closed, Collaborators)
+         			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newData.Id, newData.NameEncrypted, newData.UserId, newData.Expiry, newData.MaxFiles, newData.MaxSize,
-		newData.Creation, newData.ApiKey, newData.NoteEncrypted, newData.Closed)
+		newData.Creation, newData.ApiKey, newData.NoteEncrypted, newData.Closed, newData.Collaborators)
 	helper.Check(err)
 }
 
