@@ -1924,7 +1924,10 @@ func apiDeleteUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	for _, file := range database.GetAllMetadata() {
 		if file.UserId == userToDelete.Id {
 			if request.DeleteFiles {
-				database.DeleteMetaData(file.Id)
+				// Routed through the normal dispose lifecycle rather than removing the metadata
+				// row directly: that skipped storage.DeleteFile's blob deletion, hotlink cleanup
+				// and share-token revocation entirely, and left the file's share grants behind.
+				storage.DeleteFile(file.Id, true)
 			} else {
 				file.UserId = user.Id
 				database.SaveMetaData(file)

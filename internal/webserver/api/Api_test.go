@@ -915,13 +915,35 @@ func testDeleteUserCall(t *testing.T, apiKey string, mode int) {
 	_, ok = database.GetApiKey(userApiKey.Id)
 	test.IsEqualBool(t, ok, true)
 	testFile := models.File{
-		Id:                 fileId,
-		Name:               fileId,
+		Id:   fileId,
+		Name: fileId + ".jpg",
+		// A SHA1 unique to this call, unlike the shared placeholder hash other fixtures in this
+		// file reuse: mode deleteUserCallModeDeleteFiles drives a real storage.DeleteFile, which
+		// physically removes the blob once its ref count hits zero - sharing a hash with another
+		// fixture would delete a blob that fixture's own timing assertions still depend on.
+		SHA1:               "deleteCascade_" + helper.GenerateRandomString(16),
+		ContentType:        "image/jpeg",
 		UserId:             retrievedUser.Id,
 		UnlimitedDownloads: true,
 		UnlimitedTime:      true,
 	}
+	// A hotlink and a share grant, so deletion with DeleteFiles can be checked to have gone
+	// through storage.DeleteFile's actual dispose lifecycle - see testDeleteUserCall's assertions
+	// below - rather than merely removing the metadata row. AddHotlink has to run before the
+	// grant exists: IsAbleHotlink refuses a share-restricted file.
+	storage.AddHotlink(&testFile)
+	test.IsEqualBool(t, mode != deleteUserCallModeDeleteFiles || testFile.HotlinkId != "", true)
+	hotlinkId := testFile.HotlinkId
 	database.SaveMetaData(testFile)
+	var recipientId int
+	if mode == deleteUserCallModeDeleteFiles {
+		recipientId = database.SaveShareRecipient(models.ShareRecipient{
+			Email:     "delete-cascade-" + fileId + "@example.com",
+			CreatedAt: time.Now().Unix(),
+		})
+		database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, retrievedUser.Id, 0)
+		test.IsEqualInt(t, len(database.GetShareGrants(models.ShareResourceFile, fileId)), 1)
+	}
 	testFile, ok = database.GetMetaDataById(fileId)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, testFile.UserId, retrievedUser.Id)
@@ -955,14 +977,31 @@ func testDeleteUserCall(t *testing.T, apiKey string, mode int) {
 		test.IsEqualBool(t, ok, false)
 		_, ok = database.GetApiKey(userApiKey.Id)
 		test.IsEqualBool(t, ok, false)
-		testFile, ok = database.GetMetaDataById(fileId)
-		test.IsEqualBool(t, ok, mode == deleteUserCallModeKeepFiles)
-		if mode == deleteUserCallModeKeepFiles {
-			test.IsEqualBool(t, ok, true)
-			test.IsEqualInt(t, testFile.UserId, idUser)
-		} else {
+
+		if mode == deleteUserCallModeDeleteFiles {
+			// storage.DeleteFile only schedules disposal and runs CleanUp in a background
+			// goroutine (see storage.DeleteFile's doc comment), so the row, its hotlink and its
+			// share grant are not necessarily gone the instant Process returns.
+			startTime := time.Now()
+			for {
+				_, stillExists := database.GetMetaDataById(fileId)
+				if !stillExists {
+					break
+				}
+				if time.Since(startTime) > 5*time.Second {
+					t.Fatal("Timeout waiting for deleted user's file to be disposed of")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			_, ok = database.GetHotlink(hotlinkId)
 			test.IsEqualBool(t, ok, false)
+			test.IsEqualInt(t, len(database.GetShareGrants(models.ShareResourceFile, fileId)), 0)
+			return
 		}
+
+		testFile, ok = database.GetMetaDataById(fileId)
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt(t, testFile.UserId, idUser)
 	}
 
 }
