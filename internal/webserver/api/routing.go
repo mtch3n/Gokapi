@@ -956,10 +956,21 @@ type paramChunkComplete struct {
 	// together with a non-empty password. Informational only: it gates nothing today, because
 	// storage.EncryptSharePassword stores a typed password on the same terms as a generated
 	// one. It is the signal that would be re-gated on to restore the old rule.
-	GeneratedPassword  bool   `header:"generatedpassword"`
-	BundleId           string `header:"bundleid"`
-	IsE2E              bool   `header:"isE2E" unpublished:"true"` // not published in API documentation
-	IsNonBlocking      bool   `header:"nonblocking"`
+	GeneratedPassword bool   `header:"generatedpassword"`
+	BundleId          string `header:"bundleid"`
+	IsE2E             bool   `header:"isE2E" unpublished:"true"` // not published in API documentation
+	IsNonBlocking     bool   `header:"nonblocking"`
+	// Recipients is a comma-separated list of email addresses, the same list-in-a-header
+	// convention paramFilesDownloadZip uses for "ids". When non-empty, the file (or its
+	// bundle, if bundleid is also set) is restricted to these recipients as part of the
+	// same request that creates it, per the 2026-09-02 audit decision that a recipient-only
+	// share must never have a window where it exists with no password and no grants - see
+	// grantUploadRecipients in Api.go. A JSON body was not used here the way
+	// paramShareRecipients uses one, because this endpoint's body is reserved for chunk
+	// bytes on the earlier /chunk/add calls and carries nothing on this one.
+	Recipients string `header:"recipients"`
+	// RecipientEmails is Recipients split on commas and cleaned up; see ProcessParameter.
+	RecipientEmails    []string
 	UnlimitedDownloads bool
 	UnlimitedTime      bool
 	WebRequest         *http.Request
@@ -1000,6 +1011,17 @@ func (p *paramChunkComplete) ProcessParameter(r *http.Request) error {
 
 	if p.ExpiryTimestamp != 0 && p.ExpiryTimestamp < time.Now().Unix() {
 		return errors.New("expiryTimestamp is in the past")
+	}
+
+	if p.Recipients != "" {
+		emails := make([]string, 0, strings.Count(p.Recipients, ",")+1)
+		for _, email := range strings.Split(p.Recipients, ",") {
+			email = strings.TrimSpace(email)
+			if email != "" {
+				emails = append(emails, email)
+			}
+		}
+		p.RecipientEmails = emails
 	}
 
 	p.FileName = helper.SanitiseFilename(p.FileName)

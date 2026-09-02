@@ -1003,11 +1003,11 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 		// The client is told "OK" here, before the file is even created - see the doc comment
 		// on doBlockingPartCompleteChunk for why the audit fail-closed guarantee does not cover
 		// this branch.
-		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
+		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams, request.RecipientEmails)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
 		return
 	}
-	doBlockingPartCompleteChunk(w, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
+	doBlockingPartCompleteChunk(w, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams, request.RecipientEmails)
 }
 
 // doBlockingPartCompleteChunk finalises an uploaded chunked file and is the choke point for the
@@ -1020,7 +1020,12 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 // upload" guarantee does not hold for that path: the client has already been told the upload
 // was accepted before the file, let alone its audit record, exists. Closing that gap would need
 // a callback/polling completion signal, which is out of scope for this item.
-func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid string, fileHeader chunking.FileHeader, user models.User, uploadParameters models.UploadParameters) {
+//
+// recipientEmails is only ever non-empty from apiChunkComplete (the authenticated upload path):
+// apiChunkUploadRequestComplete, the guest/file-request completion path, always passes nil - a
+// file request's own recipient list is managed separately, by editing the request itself, not by
+// a guest uploading into it.
+func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid string, fileHeader chunking.FileHeader, user models.User, uploadParameters models.UploadParameters, recipientEmails []string) {
 	file, err := fileupload.CompleteChunk(uuid, fileHeader, user.Id, uploadParameters)
 	if err != nil {
 		_ = chunking.DeleteChunk(uuid)
@@ -1051,17 +1056,145 @@ func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid st
 	if err != nil {
 		// Fail closed: without a durable audit record of this upload, the file must not be
 		// confirmed. Remove what was just stored rather than leave an unaudited file behind.
-		if !storage.DeleteFile(file.Id, true) {
-			fmt.Println("audit: could not roll back unaudited upload", file.Id, "after an audit write failure - "+
-				"the file may still be present on disk without a durable audit record")
-		}
+		deleteUnreachableUpload(file.Id, "an audit write failure")
 		sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, upload refused")
 		return
 	}
 	if fr.Id != "" && !fr.Closed && !fr.IsUnlimitedFiles() && fr.UploadedFiles >= fr.MaxFiles {
 		closeFullFileRequest(fr, user)
 	}
+
+	if len(recipientEmails) > 0 {
+		// Fail closed, per the 2026-09-02 audit decision: a recipient-only share must never
+		// have a window where the file exists with no password and no grants. Creating the
+		// grants is made part of this same request rather than left to a second call the SPA
+		// used to make afterwards, which could fail on its own (mail down) or never happen at
+		// all (browser closed before it fired) while leaving a fully public file behind.
+		results, ok := grantUploadRecipients(w, file, user, recipientEmails)
+		if !ok {
+			return
+		}
+		outputFileJsonWithRecipients(w, file, results)
+		return
+	}
 	outputFileJson(w, file)
+}
+
+// deleteUnreachableUpload removes a just-created file so that nothing it left behind is
+// reachable, used by doBlockingPartCompleteChunk's fail-closed rollback paths: a missing audit
+// record, or - now - a requested recipient restriction that could not be created. reason is
+// logged only, never returned to the client.
+func deleteUnreachableUpload(fileId, reason string) {
+	if !storage.DeleteFile(fileId, true) {
+		fmt.Println("audit: could not roll back upload", fileId, "after "+reason+
+			" - the file may still be present on disk without the guarantee that required removing it")
+	}
+}
+
+// grantUploadRecipients makes a freshly uploaded file's recipient restriction part of the same
+// atomic operation as the upload itself. If it cannot create the grants, it deletes the file
+// that was just created and sends the error response, so the caller only needs to check ok and
+// return - deleting rather than merely leaving the file unconfirmed matches the choice Ming made
+// for this item: a `ShareRestricted` fail-closed column was rejected specifically because it
+// would leave unreachable files behind, and creating the file first, then deleting it on failure,
+// is the one mechanism doBlockingPartCompleteChunk already has (see the LogUpload failure branch
+// above) for guaranteeing nothing is left reachable - inventing a second one (e.g. reserving the
+// grants before the file exists) would need the file's own ID before CompleteChunk has assigned
+// one, for no behavioural difference to the caller.
+//
+// A member of a bundle is restricted at the bundle, not at itself: FileServing gates a bundle
+// member on the bundle's own restriction (see database.IsShareRestricted(ShareResourceBundle, ...)
+// in Webserver.go), matching how the SPA has always applied one grant to the whole folder rather
+// than to each file in it. Skipping the call once the bundle is already restricted keeps a
+// multi-file folder upload from re-granting - and so re-mailing every recipient and revoking
+// their still-live link - once per member file; the SPA sends the same recipient list with every
+// member's completion for exactly this reason, so that whichever member happens to complete first
+// is the one that establishes the restriction, and every member is refused until it does.
+func grantUploadRecipients(w http.ResponseWriter, file models.File, user models.User, emails []string) ([]shareaccess.GrantResult, bool) {
+	resource := shareaccess.Resource{
+		Type: models.ShareResourceFile,
+		Id:   file.Id,
+		Name: file.Name,
+		// ExpiresAt is left at the file's own expiry for a plain file. A bundle member below
+		// overrides this to the bundle's own resource, which - matching resolveShareResource's
+		// ShareResourceBundle case - leaves ExpiresAt at zero (capped at the access link's own
+		// maximum) rather than trying to derive one from the bundle.
+		ExpiresAt: shareExpiry(file.UnlimitedTime, file.ExpireAt),
+	}
+
+	if file.BundleId != "" {
+		bundle, found := database.GetFileBundle(file.BundleId)
+		if !found {
+			deleteUnreachableUpload(file.Id, "its bundle disappeared before recipient grants could be created")
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "bundle not found")
+			return nil, false
+		}
+		resource = shareaccess.Resource{Type: models.ShareResourceBundle, Id: bundle.Id, Name: bundle.DisplayName()}
+		if database.IsShareRestricted(resource.Type, resource.Id) {
+			return nil, true
+		}
+	}
+
+	results, err := shareaccess.GrantAccess(resource, emails, user, 0, configuration.Get().ServerUrl)
+	if err != nil {
+		deleteUnreachableUpload(file.Id, "its requested recipient grants could not be created: "+err.Error())
+		if errors.Is(err, shareaccess.ErrMailNotConfigured) {
+			sendError(w, http.StatusPreconditionFailed, errorcodes.NoPermission, err.Error())
+		} else {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+		}
+		return nil, false
+	}
+	return results, true
+}
+
+// chunkCompleteRecipientOutput mirrors apiSetShareRecipients' recipientOutput: same fields, same
+// json tags, so the SPA's ShareRecipientResult type covers both responses without a variant.
+type chunkCompleteRecipientOutput struct {
+	Email          string `json:"email"`
+	IsNewRecipient bool   `json:"isNewRecipient"`
+	MailError      string `json:"mailError,omitempty"`
+}
+
+// outputFileJsonWithRecipients is outputFileJson plus a "recipients" field reporting what
+// grantUploadRecipients did. Only called when the request actually asked for a recipient
+// restriction, so a plain upload's response is untouched (still exactly outputFileJson's shape) -
+// this is the regression risk the "no recipients" tests guard.
+func outputFileJsonWithRecipients(w http.ResponseWriter, file models.File, results []shareaccess.GrantResult) {
+	if w == nil {
+		return
+	}
+	config := configuration.Get()
+	info, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
+	helper.Check(err)
+
+	output := make([]chunkCompleteRecipientOutput, 0, len(results))
+	for _, result := range results {
+		entry := chunkCompleteRecipientOutput{Email: result.Email, IsNewRecipient: result.IsNewRecipient}
+		if result.MailErr != nil {
+			// The grant was still created, so the uploader can resend rather than rebuild the
+			// share - see GrantResult.MailErr. Surfacing it here, on the upload response itself,
+			// is what makes this visible even though it is not fatal to the upload: a toast alone
+			// could be missed, or never seen if the tab is closed right after upload.
+			entry.MailError = result.MailErr.Error()
+		}
+		output = append(output, entry)
+	}
+
+	type chunkCompleteResult struct {
+		Result          string                         `json:"Result"`
+		FileInfo        models.FileApiOutput           `json:"FileInfo"`
+		IncludeFilename bool                           `json:"IncludeFilename"`
+		Recipients      []chunkCompleteRecipientOutput `json:"recipients"`
+	}
+	output2, err := json.Marshal(chunkCompleteResult{
+		Result:          "OK",
+		FileInfo:        info,
+		IncludeFilename: config.IncludeFilename,
+		Recipients:      output,
+	})
+	helper.Check(err)
+	_, _ = w.Write(output2)
 }
 
 func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user models.User, apikey models.ApiKey) {
@@ -1085,11 +1218,11 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 		// The client is told "OK" here, before the file is even created - see the doc comment
 		// on doBlockingPartCompleteChunk for why the audit fail-closed guarantee does not cover
 		// this branch.
-		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
+		go doBlockingPartCompleteChunk(nil, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams, nil)
 		_, _ = io.WriteString(w, "{\"result\":\"OK\"}")
 		return
 	}
-	doBlockingPartCompleteChunk(w, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams)
+	doBlockingPartCompleteChunk(w, request.WebRequest, request.Uuid, request.FileHeader, user, uploadParams, nil)
 }
 
 func apiVersionInfo(w http.ResponseWriter, _ requestParser, _ models.User, _ models.ApiKey) {
