@@ -3258,6 +3258,98 @@ func TestFolderZipThreeMembersTwoExhaustedRefusesWhole(t *testing.T) {
 	}
 }
 
+// TestFolderZipRaceWindowRefusesWhole forces the exact interleaving pubApiFolderZip's own
+// comments describe but TestFolderZipCounterEnforced and
+// TestFolderZipThreeMembersTwoExhaustedRefusesWhole above can only hit by chance under
+// contention: a member that becomes exhausted in the window between the upfront availability
+// check and the metering loop that re-checks and consumes each member, both inside a single
+// request. It uses ids= to fix processing order (member order is otherwise map-derived and not
+// deterministic) and the folderZipRaceHooks test seam to run the exhausting write at the exact
+// instant the metering loop reaches the second member, simulating a second, concurrent download
+// of that member landing in that window. This hits the race window on every run instead of only
+// under load, and asserts the fix: the whole request is refused rather than the archive silently
+// narrowing to just the first member.
+func TestFolderZipRaceWindowRefusesWhole(t *testing.T) {
+	t.Parallel()
+	uniqueName := "TestFolderRaceWindow_" + helper.GenerateRandomString(8)
+	bundle := filebundle.Create(uniqueName, 999)
+
+	firstId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 firstId,
+		Name:               "first.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: false,
+		DownloadsRemaining: 5,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	racedId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 racedId,
+		Name:               "raced.txt",
+		Size:               "10 B",
+		SizeBytes:          10,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		UnlimitedDownloads: false,
+		DownloadsRemaining: 1,
+		UnlimitedTime:      true,
+		ContentType:        "text/plain",
+		UserId:             999,
+		BundleId:           bundle.Id,
+	})
+
+	t.Cleanup(func() {
+		database.DeleteMetaData(firstId)
+		database.DeleteMetaData(racedId)
+		filebundle.Delete(bundle)
+	})
+
+	// Registers the race: fires the instant the metering loop reaches racedId, consuming its
+	// only remaining download out from under it - exactly what a second, concurrent request for
+	// the same file would do if it won that race in production. LoadAndDelete makes this
+	// one-shot, and it is keyed by racedId's own random id, so it cannot affect any other test's
+	// bundle running in parallel.
+	folderZipRaceHooks.Store(racedId, func() {
+		if !database.IncreaseDownloadCount(racedId, true) {
+			t.Errorf("Race setup failed: expected to be able to consume racedId's only download")
+		}
+	})
+	t.Cleanup(func() { folderZipRaceHooks.Delete(racedId) })
+
+	client := &http.Client{}
+	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id + "&ids=" + firstId + "," + racedId)
+	if err != nil {
+		t.Fatalf("Failed to request folderzip: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected the whole request refused once the race window exhausts a member mid-loop, got %d: %s", resp.StatusCode, body)
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType == "application/zip" {
+		t.Errorf("Expected no archive body once a member is exhausted mid-loop, got a zip response")
+	}
+	// firstId is processed before racedId (ids= fixes the order) and is therefore already
+	// atomically decremented by the time racedId's failure refuses the request. This is the
+	// accepted, documented cost in pubApiFolderZip: there is no re-increment primitive to undo
+	// it with.
+	if remaining := database.GetDownloadsRemaining(firstId); remaining != 4 {
+		t.Errorf("Expected firstId's allowance to be spent by the metering loop before the refusal, got %d remaining, want 4", remaining)
+	}
+	if remaining := database.GetDownloadsRemaining(racedId); remaining != 0 {
+		t.Errorf("Expected racedId's allowance to stay at 0 (not go negative), got %d remaining", remaining)
+	}
+}
+
 // TestFolderZipMembershipAndFileRequestExclusion tests membership validation and file request exclusion.
 // (a) ids containing a file from a different bundle returns 400
 // (b) Files with UploadRequestId set are excluded from /pubapi/folder and /pubapi/folderzip

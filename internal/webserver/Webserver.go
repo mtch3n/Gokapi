@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	templatetext "text/template"
 	"time"
 
@@ -1837,6 +1838,23 @@ func pubApiFolderPassword(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, "{\"ok\":true}")
 }
 
+// folderZipRaceHooks lets tests force the exact interleaving between the upfront
+// availability check in pubApiFolderZip and its metering loop, by registering a callback
+// against a specific file id that runs the moment the metering loop reaches that file - the
+// narrow window a real client can only hit by racing another download against this one.
+// Empty outside of tests, so looking a file id up here is a no-op in production. A sync.Map
+// is safe under concurrent, parallel folderzip requests, so a hook registered by one test for
+// its own file id never fires for - or blocks - another test's unrelated bundle running at the
+// same time.
+var folderZipRaceHooks sync.Map // map[string]func()
+
+// runFolderZipRaceHook runs and clears a hook registered for id, if any.
+func runFolderZipRaceHook(id string) {
+	if hook, ok := folderZipRaceHooks.LoadAndDelete(id); ok {
+		hook.(func())()
+	}
+}
+
 // Handling of /pubapi/folderzip
 // Public, unauthenticated endpoint that serves folder files as a zip or single file raw.
 func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
@@ -1964,43 +1982,54 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Serve as zip - folder downloads meter every member by rechecking expiry and
-	// atomically consuming one download before streaming each member. This is a race-only
-	// backstop: the availability check above already confirmed every requested member is
-	// servable moments earlier, using a fresh read, so this loop is only expected to
-	// exclude a member on a download that lands in the narrow window between that check and
-	// this one - not as the mechanism that decides whether the archive is complete.
+	// atomically consuming one download before streaming each member. The availability
+	// check above already confirmed every requested member was servable, using a fresh
+	// read, moments earlier - but that was a read, not a lock, so a download landing in
+	// the narrow window between that check and this loop can still expire or exhaust a
+	// member here. Unlike that availability check, a failure in this loop used to just
+	// exclude the affected member from the archive and keep going, which resurrects the
+	// exact silent-partial-archive bug this endpoint exists to prevent - just narrowed
+	// down to this race window instead of removed. A failure here now refuses the whole
+	// request the same way the availability check does, so the archive is either complete
+	// or not sent at all.
+	//
+	// A member earlier in this loop than the one that fails has already been atomically
+	// decremented by the time the request is refused, and that decrement is not undone:
+	// no storage provider in this codebase has a re-increment primitive, and adding one
+	// solely to cover this race window is a larger change than this fix. That member's
+	// download allowance is spent on an archive that is never delivered to this
+	// requester. This is accepted rather than built around - moving the counter onto the
+	// bundle instead of each member would remove it entirely, but that is separate work.
 	filesToServeInZip := make([]models.File, 0, len(requestedMembers))
 	for _, file := range requestedMembers {
+		runFolderZipRaceHook(file.Id)
 		// Recheck expiry and atomically consume one download, reusing the same primitives ServeFile uses
 		if !file.UnlimitedDownloads {
 			file.DownloadsRemaining = database.GetDownloadsRemaining(file.Id)
 		}
 		if storage.IsExpiredFile(file, time.Now().Unix()) {
-			// This member has expired; exclude it from the archive
-			continue
+			respondPubApiNotFound(w, r)
+			return
 		}
 		if !file.UnlimitedDownloads {
 			if !database.IncreaseDownloadCount(file.Id, true) {
-				// Atomic, floored decrement lost the race (or found the allowance already exhausted);
-				// exclude this member from the archive
-				continue
+				// Atomic, floored decrement lost the race (or found the allowance
+				// already exhausted): refuse the whole request rather than excluding
+				// this member.
+				respondPubApiNotFound(w, r)
+				return
 			}
 		} else {
 			database.IncreaseDownloadCount(file.Id, false)
 		}
-		// A member that is itself identity-restricted also spends its own
-		// recipient allowance; exclude it from the archive like any other
-		// exhausted member rather than failing the whole zip.
+		// A member that is itself identity-restricted also spends its own recipient
+		// allowance; refuse the whole request the same way if that allowance is spent,
+		// rather than excluding just this member.
 		if !consumeShareDownload(r, models.ShareResourceFile, file.Id) {
-			continue
+			respondPubApiNotFound(w, r)
+			return
 		}
 		filesToServeInZip = append(filesToServeInZip, file)
-	}
-
-	if len(filesToServeInZip) == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
-		return
 	}
 
 	// Serve as zip - keep the audit logging that ServeFilesAsZip already performs per entry
