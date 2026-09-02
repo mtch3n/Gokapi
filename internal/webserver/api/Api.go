@@ -1038,6 +1038,9 @@ func doBlockingPartCompleteChunk(w http.ResponseWriter, r *http.Request, uuid st
 		sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, upload refused")
 		return
 	}
+	if fr.Id != "" && !fr.Closed && !fr.IsUnlimitedFiles() && fr.UploadedFiles >= fr.MaxFiles {
+		closeFullFileRequest(fr, user)
+	}
 	outputFileJson(w, file)
 }
 
@@ -2220,6 +2223,19 @@ func apiURequestComplete(w http.ResponseWriter, r requestParser, user models.Use
 		logging.LogCloseFileRequest(uploadRequest, user, true)
 	}
 	_, _ = w.Write([]byte(`{"Result":"OK"}`))
+}
+
+// closeFullFileRequest marks a request complete once it holds every file it may accept. A
+// full request can take nothing more, so leaving it open would only hide from the owner that
+// the upload is finished.
+func closeFullFileRequest(fr models.FileRequest, user models.User) {
+	stored, ok := database.GetFileRequest(fr.Id)
+	if !ok || stored.Closed {
+		return
+	}
+	stored.Closed = true
+	database.SaveFileRequest(stored)
+	logging.LogFileRequestFull(stored, user)
 }
 
 func apiUploadRequestList(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {

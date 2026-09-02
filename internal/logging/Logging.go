@@ -553,6 +553,19 @@ func LogCloseFileRequest(fr models.FileRequest, user models.User, byRecipient bo
 	})
 }
 
+// LogFileRequestFull adds a log entry when a file request reached its file limit and was marked
+// complete automatically. Non-Blocking
+func LogFileRequestFull(fr models.FileRequest, user models.User) {
+	createLogEntry(categoryEdit, fmt.Sprintf("File request %s reached its file limit and was marked complete, owned by %s (user #%d)", fr.Id, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category:  categoryEdit,
+		Action:    "filerequest.closed.full",
+		Outcome:   OutcomeSuccess,
+		RequestId: fr.Id,
+		Actor:     AuditActor{UserId: user.Id, Email: user.Name},
+	})
+}
+
 // LogDeleteFileRequest adds a log entry when a file request was deleted. Non-Blocking
 func LogDeleteFileRequest(fr models.FileRequest, user models.User) {
 	createLogEntry(categoryEdit, fmt.Sprintf("File request %s and associated files deleted by %s (user #%d)", fr.Id, user.Name, user.Id), false)

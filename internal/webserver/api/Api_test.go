@@ -3165,6 +3165,101 @@ func TestChunkUploadRequestCompleteSanitisation(t *testing.T) {
 	test.IsEqualString(t, p.FileHeader.ContentType, p.ContentType)
 }
 
+// uploadChunkToFileRequest uploads a single small chunked file through the public file-request
+// endpoints, the same way apiChunkUploadRequestAdd/apiChunkUploadRequestComplete are reached by a
+// real client.
+func uploadChunkToFileRequest(t *testing.T, frId, publicKey, tmpName string) {
+	w, r := getRecorderWithBody("/uploadrequest/chunk/reserve", publicKey, "POST", []test.Header{
+		{Name: "id", Value: frId},
+	}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var reserved struct {
+		Uuid string
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &reserved))
+
+	err := os.WriteFile("test/"+tmpName, []byte("closetest"), 0600)
+	test.IsNil(t, err)
+	body, formcontent := test.FileToMultipartFormBody(t, test.HttpTestConfig{
+		UploadFileName:  "test/" + tmpName,
+		UploadFieldName: "file",
+		PostValues: []test.PostBody{{
+			Key:   "filesize",
+			Value: "9",
+		}, {
+			Key:   "offset",
+			Value: "0",
+		}, {
+			Key:   "uuid",
+			Value: reserved.Uuid,
+		}},
+	})
+	w, r = getRecorderWithBody("/uploadrequest/chunk/add", publicKey, "POST", []test.Header{
+		{Name: "fileRequestId", Value: frId},
+	}, body)
+	r.Header.Add("Content-Type", formcontent)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	w, r = getRecorderWithBody("/uploadrequest/chunk/complete", publicKey, "POST", []test.Header{
+		{Name: "uuid", Value: reserved.Uuid},
+		{Name: "filename", Value: tmpName + ".upload"},
+		{Name: "filesize", Value: "9"},
+		{Name: "fileRequestId", Value: frId},
+	}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+}
+
+// TestChunkUploadRequestClosesOnLastFile proves a file request is marked complete automatically
+// once it holds the last file it may accept, so the owner is not left thinking the request is
+// still open when it can no longer take anything more. A request with no file limit must not be
+// affected.
+func TestChunkUploadRequestClosesOnLastFile(t *testing.T) {
+	admin := models.User{Id: idAdmin, UserLevel: models.UserLevelAdmin, Permissions: models.UserPermissionAll}
+
+	w := httptest.NewRecorder()
+	request := &paramURequestSave{
+		Name:          "close-on-full-request",
+		MaxFiles:      1,
+		IsMaxFilesSet: true,
+		foundHeaders:  map[string]bool{},
+	}
+	apiURequestSave(w, request, admin, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+	var response struct {
+		FileRequest models.FileRequest
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+
+	uploadChunkToFileRequest(t, response.FileRequest.Id, response.FileRequest.ApiKey, "closetestuuid")
+
+	saved, ok := database.GetFileRequest(response.FileRequest.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, saved.Closed, true)
+
+	w2 := httptest.NewRecorder()
+	request2 := &paramURequestSave{
+		Name:          "unlimited-request",
+		MaxFiles:      0,
+		IsMaxFilesSet: true,
+		foundHeaders:  map[string]bool{},
+	}
+	apiURequestSave(w2, request2, admin, models.ApiKey{})
+	test.IsEqualInt(t, w2.Code, 200)
+	var response2 struct {
+		FileRequest models.FileRequest
+	}
+	test.IsNil(t, json.Unmarshal(w2.Body.Bytes(), &response2))
+
+	uploadChunkToFileRequest(t, response2.FileRequest.Id, response2.FileRequest.ApiKey, "closetestuuid2")
+
+	saved2, ok := database.GetFileRequest(response2.FileRequest.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, saved2.Closed, false)
+}
+
 func TestFilesDuplicateSanitisation(t *testing.T) {
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermUpload)

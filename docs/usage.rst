@@ -137,7 +137,7 @@ Sharing the Request
 
 Marking a Request Complete
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-A request otherwise keeps accepting uploads until it reaches its file limit or expires. Marking it complete closes it immediately, whether or not it is full, and the upload page then shows it as finished instead of a drop target. The files already collected are kept and stay downloadable.
+A request otherwise keeps accepting uploads until it expires or reaches its file limit; reaching the file limit marks it complete automatically, the same as closing it manually. Marking it complete closes it immediately, whether or not it is full, and the upload page then shows it as finished instead of a drop target. The files already collected are kept and stay downloadable.
 
 Reopening the request from the same menu makes it accept uploads again.
 

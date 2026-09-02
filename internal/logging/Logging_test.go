@@ -113,6 +113,33 @@ func TestLogUserCreationIncludesAuthProvider(t *testing.T) {
 	test.IsEqualBool(t, found, true)
 }
 
+func TestLogFileRequestFull(t *testing.T) {
+	dir := t.TempDir()
+	Init(dir)
+
+	fr := models.FileRequest{Id: "fullRequestId"}
+	owner := models.User{Id: 7, Name: "requestowner"}
+	LogFileRequestFull(fr, owner)
+
+	// appendAuditEntryAsync writes on a goroutine; give it time to land.
+	time.Sleep(500 * time.Millisecond)
+
+	content, _ := os.ReadFile(dir + "/log.txt")
+	test.IsEqualBool(t, strings.Contains(string(content), "File request fullRequestId reached its file limit and was marked complete, owned by requestowner (user #7)"), true)
+
+	entries, _ := GetAuditEntriesSince(0, 100)
+	found := false
+	for _, entry := range entries {
+		if entry.Action != "filerequest.closed.full" {
+			continue
+		}
+		found = true
+		test.IsEqualString(t, entry.RequestId, "fullRequestId")
+		test.IsEqualInt(t, entry.Actor.UserId, 7)
+	}
+	test.IsEqualBool(t, found, true)
+}
+
 func TestLogDownloadDenied(t *testing.T) {
 	Init("test")
 	file := models.File{Id: "deniedTestId", Name: "deniedTestName"}
