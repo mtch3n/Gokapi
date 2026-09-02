@@ -20,3 +20,4 @@ custom/
 gokapi-cli
 gokapi-cli.json
 internal/webserver/api/test/
+internal/webserver/test/
