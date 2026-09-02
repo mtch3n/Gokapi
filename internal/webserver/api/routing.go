@@ -1141,12 +1141,33 @@ func (p *paramURequestCollaborators) ProcessParameter(r *http.Request) error {
 	return nil
 }
 
+// paramFolderCreate's optional password/expiry/downloads headers give the bundle its own
+// settings at creation time - the only settings a folder now has, replacing the old "derived
+// from whichever member happens to carry one" behaviour (see models.FileBundle.PasswordHash and
+// friends). Same header names, and the same "absent header leaves the field untouched" and
+// "present header with a zero value means unlimited" conventions as paramFilesModify, so a
+// caller that already knows how to edit a file's own settings needs nothing new to learn. Leaving
+// every header off keeps the bundle at filebundle.Create's own defaults (open, no limits).
 type paramFolderCreate struct {
-	Name         string `header:"name" required:"true" supportBase64:"true"`
-	foundHeaders map[string]bool
+	Name               string `header:"name" required:"true" supportBase64:"true"`
+	AllowedDownloads   int    `header:"allowedDownloads"`
+	ExpiryTimestamp    int64  `header:"expiryTimestamp"`
+	Password           string `header:"password" supportBase64:"true"`
+	GeneratedPassword  bool   `header:"generatedpassword"`
+	UnlimitedDownloads bool
+	UnlimitedExpiry    bool
+	IsPasswordSet      bool
+	foundHeaders       map[string]bool
 }
 
 func (p *paramFolderCreate) ProcessParameter(_ *http.Request) error {
+	if p.foundHeaders["allowedDownloads"] && p.AllowedDownloads == 0 {
+		p.UnlimitedDownloads = true
+	}
+	if p.foundHeaders["expiryTimestamp"] && p.ExpiryTimestamp == 0 {
+		p.UnlimitedExpiry = true
+	}
+	p.IsPasswordSet = p.foundHeaders["password"]
 	return nil
 }
 

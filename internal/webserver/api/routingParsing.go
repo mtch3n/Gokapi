@@ -1456,6 +1456,62 @@ func (p *paramFolderCreate) ParseRequest(r *http.Request) error {
 		}
 	}
 
+	// RequestParser header value "allowedDownloads", required: false
+	exists, err = checkHeaderExists(r, "allowedDownloads", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["allowedDownloads"] = exists
+	if exists {
+		p.AllowedDownloads, err = parseHeaderInt(r, "allowedDownloads")
+		if err != nil {
+			return fmt.Errorf("invalid value in header allowedDownloads supplied")
+		}
+	}
+
+	// RequestParser header value "expiryTimestamp", required: false
+	exists, err = checkHeaderExists(r, "expiryTimestamp", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["expiryTimestamp"] = exists
+	if exists {
+		p.ExpiryTimestamp, err = parseHeaderInt64(r, "expiryTimestamp")
+		if err != nil {
+			return fmt.Errorf("invalid value in header expiryTimestamp supplied")
+		}
+	}
+
+	// RequestParser header value "password", required: false, has base64support
+	exists, err = checkHeaderExists(r, "password", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["password"] = exists
+	if exists {
+		p.Password = r.Header.Get("password")
+		if strings.HasPrefix(p.Password, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Password, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Password = string(decoded)
+		}
+	}
+
+	// RequestParser header value "generatedpassword", required: false
+	exists, err = checkHeaderExists(r, "generatedpassword", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["generatedpassword"] = exists
+	if exists {
+		p.GeneratedPassword, err = parseHeaderBool(r, "generatedpassword")
+		if err != nil {
+			return fmt.Errorf("invalid value in header generatedpassword supplied")
+		}
+	}
+
 	return p.ProcessParameter(r)
 }
 
