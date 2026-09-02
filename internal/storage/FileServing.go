@@ -704,6 +704,13 @@ func GetFile(id string) (models.File, bool) {
 	if file.IsPendingForDeletion() {
 		return emptyResult, false
 	}
+	// A disposed record is owner-visible history and nothing else: every public path treats it
+	// exactly like a record that was deleted outright. GetFile is the single choke point every
+	// public path (download, hotlink, share resend, ...) resolves a file through, so the check
+	// belongs here rather than duplicated at each caller.
+	if file.IsDisposed() {
+		return emptyResult, false
+	}
 	if IsExpiredFile(file, time.Now().Unix()) {
 		return emptyResult, false
 	}
@@ -988,45 +995,69 @@ func FileExists(file models.File, dataDir string) bool {
 	return exists
 }
 
-// CleanUp removes expired files from the config and from the filesystem if they are not referenced by other files anymore
-// Will be called periodically or after a file has been manually deleted in the admin view.
-// If the parameter periodic is true, this function is recursive and calls itself every hour.
+// CleanUp disposes of expired, exhausted or owner-deleted files, purges disposed records once
+// their retention window has elapsed, and removes files whose stored content has gone missing
+// outright. Will be called periodically or after a file has been manually deleted in the admin
+// view. If the parameter periodic is true, this function is recursive and calls itself every
+// hour.
+//
+// One pass, first match wins, per file:
+//  1. its pending deletion timer elapsed and it is not currently downloading -> dispose of it,
+//     reason "deleted"
+//  2. it is already disposed of and past the retention window -> purge the record
+//  3. it is already disposed of (but not past retention) -> skip entirely, not even a stat call
+//  4. its stored content is missing -> hard delete; corruption is not history, so this bypasses
+//     retention and disposal both
+//  5. it is expired or its downloads are exhausted, and it is not currently downloading ->
+//     dispose of it, reason "downloaded" if the downloads ran out, else "expired"; if retention
+//     is disabled, purge it in the same step
+//
+// The SHA1 reference count below is computed once per pass, over every row that is not already
+// disposed of: a disposed row holds no content of its own anymore, so it must be structurally
+// incapable of protecting another row's blob from deletion. It is decremented as rows in this
+// pass are disposed of, so that two rows sharing a blob and expiring in the same pass still only
+// have it deleted once, on whichever of them is processed last.
 func CleanUp(periodic bool) {
 	downloadstatus.Clean()
 	timeNow := time.Now().Unix()
-	wasItemDeleted := false
-	for key, element := range database.GetAllMetadata() {
-		fileExists := FileExists(element, configuration.Get().DataDir)
-		reason := ""
-		switch {
-		case !fileExists:
-			reason = "stored object missing"
-		case isExpiredFileWithoutDownload(element, timeNow):
-			reason = "expired"
-		case isPendingToBeDeleted(element, timeNow):
-			reason = "pending deletion timer elapsed"
-		}
-		if reason != "" {
-			deleteFile := true
-			for _, secondLoopElement := range database.GetAllMetadata() {
-				if (element.Id != secondLoopElement.Id) && (element.SHA1 == secondLoopElement.SHA1) {
-					deleteFile = false
-					break
-				}
-			}
-			if deleteFile && fileExists {
-				deleteSource(element, configuration.Get().DataDir)
-			}
-			if element.HotlinkId != "" {
-				database.DeleteHotlink(element.HotlinkId)
-			}
-			database.DeleteMetaData(key)
-			logging.LogFileExpired(element, reason)
-			wasItemDeleted = true
+	dataDir := configuration.Get().DataDir
+	retention := time.Duration(environment.New().MetadataRetention)
+
+	allFiles := database.GetAllMetadata()
+	shaRefCount := make(map[string]int, len(allFiles))
+	for _, file := range allFiles {
+		if !file.IsDisposed() {
+			shaRefCount[file.SHA1]++
 		}
 	}
-	if wasItemDeleted {
-		CleanUp(false)
+
+	for key, element := range allFiles {
+		switch {
+		case !element.IsDisposed() && isPendingToBeDeletedWithoutDownload(element, timeNow):
+			disposeFile(element, models.DisposalReasonDeleted, "pending deletion timer elapsed", timeNow, dataDir, shaRefCount)
+			if retention <= 0 {
+				purgeFile(key, "metadata retention is disabled")
+			}
+		case element.IsDisposed():
+			if retention > 0 && timeNow-element.DisposedAt >= int64(retention.Seconds()) {
+				purgeFile(key, "metadata retention window elapsed")
+			}
+			// Not yet past retention: skip entirely, including the FileExists stat below - the
+			// content is already gone, so there is nothing to check.
+		case !FileExists(element, dataDir):
+			deleteFileHard(element, key, "stored object missing")
+		case isExpiredFileWithoutDownload(element, timeNow):
+			reason := models.DisposalReasonExpired
+			reasonText := "expired"
+			if element.DownloadsRemaining < 1 && !element.UnlimitedDownloads {
+				reason = models.DisposalReasonDownloaded
+				reasonText = "downloads exhausted"
+			}
+			disposeFile(element, reason, reasonText, timeNow, dataDir, shaRefCount)
+			if retention <= 0 {
+				purgeFile(key, "metadata retention is disabled")
+			}
+		}
 	}
 	cleanOldTempFiles()
 	cleanHotlinks()
@@ -1104,7 +1135,7 @@ func cleanInvalidBundles() {
 		}
 		hasValidMember := false
 		for _, file := range files {
-			if file.BundleId == bundle.Id && !file.IsPendingForDeletion() {
+			if file.BundleId == bundle.Id && !file.IsPendingForDeletion() && !file.IsDisposed() {
 				hasValidMember = true
 				break
 			}
@@ -1181,12 +1212,30 @@ func isOldTempFile(file os.DirEntry) bool {
 
 }
 
-// isPendingToBeDeleted returns true if a pending deletion has to be executed
+// isPendingToBeDeleted returns true if a pending deletion has to be executed.
+//
+// Strictly <, not <=: PendingDeletion can be a genuine future deadline truncated to whole
+// seconds by time.Time.Unix() (DeleteFileSchedule with a sub-second delay), which often lands on
+// the current second - a <= here would then read that as already elapsed the instant it was set,
+// letting CancelPendingFileDeletion refuse a restore that should still have most of a second left
+// to run. DeleteFile backdates PendingDeletion by a second for the immediate-delete case (see its
+// comment) specifically so it does not need <= here to be picked up promptly.
 func isPendingToBeDeleted(file models.File, timeNow int64) bool {
 	if !file.IsPendingForDeletion() {
 		return false
 	}
 	return file.PendingDeletion < timeNow
+}
+
+// isPendingToBeDeletedWithoutDownload returns true if there is no active download for a file
+// whose pending deletion timer has elapsed. Same shape as isExpiredFileWithoutDownload below,
+// for the same reason: a download in progress is given the chance to finish before the file's
+// content is disposed of out from under it.
+func isPendingToBeDeletedWithoutDownload(file models.File, timeNow int64) bool {
+	if downloadstatus.IsCurrentlyDownloading(file) {
+		return false
+	}
+	return isPendingToBeDeleted(file, timeNow)
 }
 
 // IsExpiredFile returns true if the file is expired, either due to download count
@@ -1217,8 +1266,84 @@ func deleteSource(file models.File, dataDir string) {
 	}
 }
 
+// disposeFile deletes a file's stored content - unless shaRefCount shows another, still-live row
+// shares the same blob - and strips every field that a retained history row must not carry:
+// the dedup hash, the encryption key/nonce, the password hash, the stored share password, any
+// hotlink, and every recipient login token issued against it. The record itself is kept and
+// marked, not removed; removing it is purgeFile's job, once the retention window has passed.
+//
+// NameEncryptedRaw and Name are deliberately left untouched, so SaveMetaData's save-back path
+// still has what it needs to write the stored name bytes back verbatim rather than blank them -
+// see models.File.NameEncryptedRaw.
+func disposeFile(file models.File, reason int, reasonText string, timeNow int64, dataDir string, shaRefCount map[string]int) {
+	shaRefCount[file.SHA1]--
+	if shaRefCount[file.SHA1] <= 0 {
+		deleteSource(file, dataDir)
+	}
+	if file.HotlinkId != "" {
+		database.DeleteHotlink(file.HotlinkId)
+		file.HotlinkId = ""
+	}
+	revokeShareTokens(models.ShareResourceFile, file.Id)
+	file.SHA1 = ""
+	file.Encryption.DecryptionKey = nil
+	file.Encryption.Nonce = nil
+	file.PasswordHash = ""
+	file.EncryptedSharePassword = nil
+	file.DisposedAt = timeNow
+	file.DisposalReason = reason
+	database.SaveMetaData(file)
+	logging.LogFileExpired(file, reasonText)
+}
+
+// purgeFile removes a disposed file's history record once its retention window has passed: the
+// grants recording who it was shared with, and the metadata row itself. The content is already
+// gone - disposeFile deleted it when the record was disposed of - so there is nothing left to
+// remove from storage here.
+func purgeFile(fileId string, reasonText string) {
+	database.DeleteShareGrants(models.ShareResourceFile, fileId)
+	database.DeleteMetaData(fileId)
+	logging.LogFilePurged(fileId, reasonText)
+}
+
+// deleteFileHard removes a file's record and content outright, bypassing disposal and retention
+// entirely. Used when the stored content has gone missing on its own - corruption or an
+// out-of-band deletion, not something CleanUp did - so there is no content left to have been
+// "disposed of" and nothing worth keeping as history.
+func deleteFileHard(file models.File, fileId string, reasonText string) {
+	if file.HotlinkId != "" {
+		database.DeleteHotlink(file.HotlinkId)
+	}
+	database.DeleteShareGrants(models.ShareResourceFile, fileId)
+	database.DeleteMetaData(fileId)
+	logging.LogFileExpired(file, reasonText)
+}
+
+// revokeShareTokens revokes every recipient login token issued against a resource. Used when a
+// file is disposed of: the grant rows recording who had access are kept as history, but the
+// tokens that let a recipient actually use one must not survive - a retained record carries no
+// credential material.
+func revokeShareTokens(resourceType int, resourceId string) {
+	for _, grant := range database.GetShareGrants(resourceType, resourceId) {
+		database.RevokeShareLoginTokens(grant.RecipientId, resourceType, resourceId)
+	}
+}
+
 // DeleteFile is called when an admin requests deletion of a file.
-// Returns true if the file was deleted or false if ID did not exist.
+//
+// A record that still has content is scheduled for disposal: PendingDeletion is set to one
+// second in the past, which the next CleanUp pass - already running near-immediately when
+// deleteSource is true - picks up as reason "deleted" and disposes of through the normal
+// retention path, exactly like an expired or downloads-exhausted file. Backdated rather than set
+// to exactly now: isPendingToBeDeleted compares with a strict <, on purpose (see its comment), so
+// a PendingDeletion of precisely time.Now().Unix() would frequently still equal the CleanUp
+// goroutine's own timeNow a few instructions later - the two calls are microseconds apart, not a
+// full second - and be skipped until some later sweep instead of "near-immediately" as promised
+// here. A record that has already been disposed of has nothing left to dispose of, so it is
+// purged outright instead - this is what lets an owner clear an entry out of their history early,
+// before the retention window elapses on its own ("Remove from History" in the frontend).
+//
+// Returns true if the file was found and acted on, or false if ID did not exist.
 // deleteSource forces a clean-up and will delete the source if it is not
 // used by a different file
 func DeleteFile(fileId string, deleteSource bool) bool {
@@ -1229,8 +1354,11 @@ func DeleteFile(fileId string, deleteSource bool) bool {
 	if !ok {
 		return false
 	}
-	file.ExpireAt = 0
-	file.UnlimitedTime = false
+	if file.IsDisposed() {
+		purgeFile(file.Id, "removed by owner")
+		return true
+	}
+	file.PendingDeletion = time.Now().Add(-time.Second).Unix()
 	database.SaveMetaData(file)
 	downloadstatus.SetAllComplete(file.Id)
 	if deleteSource {
@@ -1261,6 +1389,10 @@ func DeleteFileSchedule(fileId string, delayMs int, deleteSource bool) bool {
 	if !ok {
 		return false
 	}
+	if file.IsDisposed() {
+		purgeFile(file.Id, "removed by owner")
+		return true
+	}
 	deletionTime := time.Now().Add(time.Duration(delayMs) * time.Millisecond).Unix()
 	file.PendingDeletion = deletionTime
 	database.SaveMetaData(file)
@@ -1281,13 +1413,26 @@ func DeleteFileSchedule(fileId string, delayMs int, deleteSource bool) bool {
 }
 
 // CancelPendingFileDeletion removes the pending deletion flag for a file identified by the given ID.
-// Returns false if the file was not found
+//
+// Refuses once the record is disposed of, whatever the reason - IsDisposed(), not
+// Status() == StatusDeleted: Status reports "expired" or "downloaded" rather than "deleted" for
+// two of the three disposal reasons (see models.File.Status), and there is nothing to restore for
+// any of them either way, since the content is already gone. Also refuses once the record's
+// pending deletion timer has already elapsed and CleanUp simply has not caught up to it yet -
+// without that second check, a restore requested in the gap between the timer elapsing and the
+// next sweep would succeed and then be disposed of anyway moments later, silently undoing the
+// restore.
+//
+// Returns false if the file was not found, or if it can no longer be restored.
 func CancelPendingFileDeletion(fileId string) (models.File, bool) {
 	if fileId == "" {
 		return models.File{}, false
 	}
 	file, ok := database.GetMetaDataById(fileId)
 	if !ok {
+		return models.File{}, false
+	}
+	if file.IsDisposed() || file.Status(time.Now().Unix()) == models.StatusDeleted {
 		return models.File{}, false
 	}
 	file.PendingDeletion = 0

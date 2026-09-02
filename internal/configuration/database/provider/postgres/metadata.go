@@ -13,7 +13,8 @@ import (
 
 const metaDataColumns = `Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes, DownloadsRemaining, DownloadCount,
 	PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption, UnlimitedDownloads, UnlimitedTime,
-	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId, EncryptedSharePassword`
+	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId, EncryptedSharePassword,
+	DisposedAt, DisposalReason`
 
 type schemaMetaData struct {
 	Id                     string
@@ -37,6 +38,8 @@ type schemaMetaData struct {
 	UploadRequestId        string
 	BundleId               string
 	EncryptedSharePassword []byte
+	DisposedAt             int64
+	DisposalReason         int
 }
 
 func (rowData schemaMetaData) ToFileModel() (models.File, error) {
@@ -63,6 +66,8 @@ func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 		UploadRequestId:        rowData.UploadRequestId,
 		BundleId:               rowData.BundleId,
 		EncryptedSharePassword: rowData.EncryptedSharePassword,
+		DisposedAt:             rowData.DisposedAt,
+		DisposalReason:         rowData.DisposalReason,
 	}
 
 	buf := bytes.NewBuffer(rowData.Encryption)
@@ -76,7 +81,8 @@ func scanMetaData(scan func(dest ...any) error, rowData *schemaMetaData) error {
 		&rowData.DownloadsRemaining, &rowData.DownloadCount, &rowData.PasswordHash, &rowData.HotlinkId,
 		&rowData.ContentType, &rowData.AwsBucket, &rowData.Encryption, &rowData.UnlimitedDownloads,
 		&rowData.UnlimitedTime, &rowData.UserId, &rowData.UploadDate, &rowData.PendingDeletion,
-		&rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword)
+		&rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword,
+		&rowData.DisposedAt, &rowData.DisposalReason)
 }
 
 // GetAllMetadata returns a map of all available files
@@ -140,6 +146,8 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 		UploadRequestId:        file.UploadRequestId,
 		BundleId:               file.BundleId,
 		EncryptedSharePassword: file.EncryptedSharePassword,
+		DisposedAt:             file.DisposedAt,
+		DisposalReason:         file.DisposalReason,
 	}
 
 	if file.UnlimitedDownloads {
@@ -158,8 +166,8 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 	_, err = p.exec(`INSERT INTO FileMetaData (Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes,
 					DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
 					UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId,
-					EncryptedSharePassword)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+					EncryptedSharePassword, DisposedAt, DisposalReason)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 					ON CONFLICT (Id) DO UPDATE SET NameEncrypted = EXCLUDED.NameEncrypted, Size = EXCLUDED.Size, SHA1 = EXCLUDED.SHA1,
 						ExpireAt = EXCLUDED.ExpireAt, SizeBytes = EXCLUDED.SizeBytes,
 						DownloadsRemaining = EXCLUDED.DownloadsRemaining, DownloadCount = EXCLUDED.DownloadCount,
@@ -169,11 +177,13 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 						UnlimitedTime = EXCLUDED.UnlimitedTime, UserId = EXCLUDED.UserId,
 						UploadDate = EXCLUDED.UploadDate, PendingDeletion = EXCLUDED.PendingDeletion,
 						UploadRequestId = EXCLUDED.UploadRequestId, BundleId = EXCLUDED.BundleId,
-						EncryptedSharePassword = EXCLUDED.EncryptedSharePassword`,
+						EncryptedSharePassword = EXCLUDED.EncryptedSharePassword,
+						DisposedAt = EXCLUDED.DisposedAt, DisposalReason = EXCLUDED.DisposalReason`,
 		newData.Id, newData.NameEncrypted, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
 		newData.DownloadsRemaining, newData.DownloadCount, newData.PasswordHash, newData.HotlinkId, newData.ContentType,
 		newData.AwsBucket, newData.Encryption, newData.UnlimitedDownloads, newData.UnlimitedTime, newData.UserId,
-		newData.UploadDate, newData.PendingDeletion, newData.UploadRequestId, newData.BundleId, newData.EncryptedSharePassword)
+		newData.UploadDate, newData.PendingDeletion, newData.UploadRequestId, newData.BundleId, newData.EncryptedSharePassword,
+		newData.DisposedAt, newData.DisposalReason)
 	helper.Check(err)
 }
 

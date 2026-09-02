@@ -2067,6 +2067,7 @@ func bundleMembers(bundleId string, allFiles map[string]models.File) []models.Fi
 	for _, file := range allFiles {
 		if file.BundleId == bundleId &&
 			!file.IsPendingForDeletion() &&
+			!file.IsDisposed() &&
 			!file.IsFileRequest() {
 			result = append(result, file)
 		}

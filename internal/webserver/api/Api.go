@@ -1116,20 +1116,22 @@ func apiList(w http.ResponseWriter, r requestParser, user models.User, _ models.
 	_, _ = w.Write(result)
 }
 
+// getFilesForUser lists every file the caller may see, including one whose content has already
+// been disposed of: retention keeps that record around specifically so its owner can still see
+// it as history, so unlike storage.GetFile - which every public path resolves a file through and
+// which does refuse a disposed record - this omits nothing past the ownership/permission and
+// file-request checks below.
 func getFilesForUser(user models.User, includeUploadRequests bool) []models.FileApiOutput {
 	var validFiles []models.FileApiOutput
-	timeNow := time.Now().Unix()
 	config := configuration.Get()
 	for _, element := range database.GetAllMetadata() {
 		if !includeUploadRequests && element.IsFileRequest() {
 			continue
 		}
 		if element.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
-			if !storage.IsExpiredFile(element, timeNow) {
-				file, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
-				helper.Check(err)
-				validFiles = append(validFiles, file)
-			}
+			file, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
+			helper.Check(err)
+			validFiles = append(validFiles, file)
 		}
 	}
 	// Sort by UploadDate descending, then by Id ascending for stable ordering
@@ -1816,7 +1818,7 @@ func bundleHasOnlyLiveMembers(bundleId string) bool {
 	timeNow := time.Now().Unix()
 	found := false
 	for _, file := range database.GetAllMetadata() {
-		if file.BundleId != bundleId || file.IsPendingForDeletion() || file.IsFileRequest() {
+		if file.BundleId != bundleId || file.IsPendingForDeletion() || file.IsDisposed() || file.IsFileRequest() {
 			continue
 		}
 		found = true

@@ -46,29 +46,112 @@ func (f *File) AccessMode(hasRecipients bool) string {
 	return AccessModePublic
 }
 
+// DisposalReason records why a file's content was deleted. Valid only once DisposedAt is set.
+const (
+	// DisposalReasonNone means the file has not been disposed of.
+	DisposalReasonNone = iota
+	// DisposalReasonExpired means the file's expiry timestamp passed.
+	DisposalReasonExpired
+	// DisposalReasonDownloaded means the file's download allowance was used up.
+	DisposalReasonDownloaded
+	// DisposalReasonDeleted means the owner deleted the file.
+	DisposalReasonDeleted
+)
+
+// Status values reported to a client so it knows how to render a file. The server decides the
+// status; a client never infers it from a combination of booleans, the same rule AccessMode
+// above follows and for the same reason: adding a status is a server-side change that old
+// clients fail closed on, rather than one they silently misinterpret.
+const (
+	// StatusActive means the file is live and can be downloaded.
+	StatusActive = "active"
+	// StatusPendingDeletion means the owner scheduled a deletion whose delay has not yet elapsed.
+	StatusPendingDeletion = "pending_deletion"
+	// StatusExpired means the file's content was disposed of because its expiry timestamp passed.
+	StatusExpired = "expired"
+	// StatusDownloaded means the file's content was disposed of because its download allowance
+	// was used up.
+	StatusDownloaded = "downloaded"
+	// StatusDeleted means the file's content was disposed of because the owner deleted it, or an
+	// owner-scheduled deletion has elapsed and is about to be.
+	StatusDeleted = "deleted"
+)
+
+// IsDisposed returns true if the file's content has been deleted, leaving this row behind as
+// history. A disposed row carries no credential material - see storage.CleanUp - and every
+// public path must treat it exactly like a row that was deleted outright.
+func (f *File) IsDisposed() bool {
+	return f.DisposedAt != 0
+}
+
+// Status computes which of the Status* values applies to this file, given the current time.
+//
+// A record already marked disposed reports the reason it was disposed of. One that is not yet
+// physically disposed but whose condition for disposal has already been met - a pending
+// deletion whose delay elapsed, an expiry timestamp in the past, a download allowance run out -
+// reports the same status it will carry once the next storage.CleanUp pass catches up to it.
+// The alternative, reporting "active" until the sweep actually runs, would make the owner's view
+// depend on cron timing rather than on the file's own state.
+func (f *File) Status(timeNow int64) string {
+	if f.IsDisposed() {
+		switch f.DisposalReason {
+		case DisposalReasonExpired:
+			return StatusExpired
+		case DisposalReasonDownloaded:
+			return StatusDownloaded
+		default:
+			return StatusDeleted
+		}
+	}
+	if f.PendingDeletion != 0 {
+		// <, matching storage.isPendingToBeDeleted exactly, for the same reason: this method's
+		// own doc comment promises the same status CleanUp will land on, so the two must agree
+		// at the boundary too - see that function's comment for why it is strict.
+		if f.PendingDeletion < timeNow {
+			return StatusDeleted
+		}
+		return StatusPendingDeletion
+	}
+	if f.DownloadsRemaining < 1 && !f.UnlimitedDownloads {
+		return StatusDownloaded
+	}
+	if f.ExpireAt < timeNow && !f.UnlimitedTime {
+		return StatusExpired
+	}
+	return StatusActive
+}
+
 // File is a struct used for saving information about an uploaded file
 type File struct {
-	Id                      string         `json:"Id" redis:"Id"`                                 // The internal ID of the file
-	Name                    string         `json:"Name" redis:"-"`                                // The filename, held in plaintext only in memory. Will be 'Encrypted file' for end-to-end encrypted files, and NameUnavailable while the instance is sealed
-	Size                    string         `json:"Size" redis:"Size"`                             // Filesize in a human-readable format
-	SHA1                    string         `json:"SHA1" redis:"SHA1"`                             // The hash of the file, used for deduplication
-	PasswordHash            string         `json:"PasswordHash" redis:"PasswordHash"`             // The hash of the password (if the file is password-protected)
-	HotlinkId               string         `json:"HotlinkId" redis:"HotlinkId"`                   // If file is a picture file and can be hotlinked, this is the ID for the hotlink
-	ContentType             string         `json:"ContentType" redis:"ContentType"`               // The MIME type for the file
-	AwsBucket               string         `json:"AwsBucket" redis:"AwsBucket"`                   // If the file is stored in the cloud, this is the bucket that is being used
-	UploadRequestId         string         `json:"FileRequestId" redis:"FileRequestId"`           // If the file belongs to a file request, this is the ID of the file request
-	BundleId                string         `json:"BundleId" redis:"BundleId"`                     // If the file belongs to a bundle, this is the ID of the bundle
-	ExpireAt                int64          `json:"ExpireAt" redis:"ExpireAt"`                     // UTC timestamp of file expiry
-	PendingDeletion         int64          `json:"PendingDeletion" redis:"PendingDeletion"`       // UTC timestamp when the file will be deleted, if pending. Otherwise 0
-	SizeBytes               int64          `json:"SizeBytes" redis:"SizeBytes"`                   // Filesize in bytes
-	UploadDate              int64          `json:"UploadDate" redis:"UploadDate"`                 // UTC timestamp of upload time
-	DownloadsRemaining      int            `json:"DownloadsRemaining" redis:"DownloadsRemaining"` // The remaining downloads for this file
-	DownloadCount           int            `json:"DownloadCount" redis:"DownloadCount"`           // The number of times the file has been downloaded
-	UserId                  int            `json:"UserId" redis:"UserId"`                         // The user ID of the uploader
-	Encryption              EncryptionInfo `json:"Encryption" redis:"-"`                          // If the file is encrypted, this stores all info for decrypting
-	UnlimitedDownloads      bool           `json:"UnlimitedDownloads" redis:"UnlimitedDownloads"` // True if the uploader did not limit the downloads
-	UnlimitedTime           bool           `json:"UnlimitedTime" redis:"UnlimitedTime"`           // True if the uploader did not limit the time
-	InternalRedisEncryption []byte         `redis:"EncryptionRedis"`                              // This field is an internal field, used to store the EncryptionInfo in a Redis Hashmap
+	Id                 string         `json:"Id" redis:"Id"`                                 // The internal ID of the file
+	Name               string         `json:"Name" redis:"-"`                                // The filename, held in plaintext only in memory. Will be 'Encrypted file' for end-to-end encrypted files, and NameUnavailable while the instance is sealed
+	Size               string         `json:"Size" redis:"Size"`                             // Filesize in a human-readable format
+	SHA1               string         `json:"SHA1" redis:"SHA1"`                             // The hash of the file, used for deduplication. Cleared once the file is disposed
+	PasswordHash       string         `json:"PasswordHash" redis:"PasswordHash"`             // The hash of the password (if the file is password-protected). Cleared once the file is disposed
+	HotlinkId          string         `json:"HotlinkId" redis:"HotlinkId"`                   // If file is a picture file and can be hotlinked, this is the ID for the hotlink
+	ContentType        string         `json:"ContentType" redis:"ContentType"`               // The MIME type for the file
+	AwsBucket          string         `json:"AwsBucket" redis:"AwsBucket"`                   // If the file is stored in the cloud, this is the bucket that is being used
+	UploadRequestId    string         `json:"FileRequestId" redis:"FileRequestId"`           // If the file belongs to a file request, this is the ID of the file request
+	BundleId           string         `json:"BundleId" redis:"BundleId"`                     // If the file belongs to a bundle, this is the ID of the bundle
+	ExpireAt           int64          `json:"ExpireAt" redis:"ExpireAt"`                     // UTC timestamp of file expiry
+	PendingDeletion    int64          `json:"PendingDeletion" redis:"PendingDeletion"`       // UTC timestamp when the file will be deleted, if pending. Otherwise 0
+	SizeBytes          int64          `json:"SizeBytes" redis:"SizeBytes"`                   // Filesize in bytes
+	UploadDate         int64          `json:"UploadDate" redis:"UploadDate"`                 // UTC timestamp of upload time
+	DownloadsRemaining int            `json:"DownloadsRemaining" redis:"DownloadsRemaining"` // The remaining downloads for this file
+	DownloadCount      int            `json:"DownloadCount" redis:"DownloadCount"`           // The number of times the file has been downloaded
+	UserId             int            `json:"UserId" redis:"UserId"`                         // The user ID of the uploader
+	Encryption         EncryptionInfo `json:"Encryption" redis:"-"`                          // If the file is encrypted, this stores all info for decrypting. Key/nonce cleared once the file is disposed
+	UnlimitedDownloads bool           `json:"UnlimitedDownloads" redis:"UnlimitedDownloads"` // True if the uploader did not limit the downloads
+	UnlimitedTime      bool           `json:"UnlimitedTime" redis:"UnlimitedTime"`           // True if the uploader did not limit the time
+	// DisposedAt is the UTC timestamp the file's content was deleted, leaving this row behind as
+	// history. Zero means the content is still present. See Status/IsDisposed - nothing reads this
+	// directly to decide whether a record is live; the point of that method is that no caller ever
+	// has to.
+	DisposedAt int64 `json:"DisposedAt" redis:"DisposedAt"`
+	// DisposalReason records why the content was disposed of, valid only once DisposedAt is set.
+	// See the DisposalReason* constants.
+	DisposalReason          int    `json:"DisposalReason" redis:"DisposalReason"`
+	InternalRedisEncryption []byte `redis:"EncryptionRedis"` // This field is an internal field, used to store the EncryptionInfo in a Redis Hashmap
 	// NameEncryptedRaw carries the exact bytes stored for the name (format-prefixed ciphertext or
 	// plaintext, see encryption.EncryptFileName/DecryptFileName), alongside the decrypted Name
 	// above. Every provider's read path (GetAllMetadata/GetMetaDataById) populates this regardless
@@ -113,7 +196,7 @@ type FileApiOutput struct {
 	IsEndToEndEncrypted          bool   `json:"IsEndToEndEncrypted"`          // True if the file is end-to-end encrypted
 	IsPasswordProtected          bool   `json:"IsPasswordProtected"`          // True if a password has to be entered before downloading the file
 	IsSavedOnLocalStorage        bool   `json:"IsSavedOnLocalStorage"`        // True if the file does not use cloud storage
-	IsPendingDeletion            bool   `json:"IsPendingDeletion"`            // True if the file is about to be deleted
+	Status                       string `json:"Status"`                       // One of the Status* constants: active, pending_deletion, expired, downloaded or deleted
 	IsFileRequest                bool   `json:"IsFileRequest"`                // True if the file belongs to a file request
 	UploaderId                   int    `json:"UploaderId"`                   // The user ID of the uploader
 }
@@ -173,7 +256,7 @@ func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool) (FileApi
 		result.UrlDownload = getDownloadUrl(result, serverUrl, useFilenameInUrl)
 	}
 	result.UploaderId = f.UserId
-	result.IsPendingDeletion = f.IsPendingForDeletion()
+	result.Status = f.Status(time.Now().Unix())
 	result.FileRequestId = f.UploadRequestId
 	result.ExpireAtString = time.Unix(f.ExpireAt, 0).UTC().Format("2006-01-02 15:04:05")
 

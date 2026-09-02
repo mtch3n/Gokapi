@@ -1062,7 +1062,10 @@ func TestDeleteFile(t *testing.T) {
 	test.IsEqualBool(t, file.ExpireAt != 0, true)
 	DeleteFile(file.Id, false)
 	file, ok = database.GetMetaDataById("testfiledownload")
-	test.IsEqualInt(t, int(file.ExpireAt), 0)
+	// DeleteFile no longer zeroes ExpireAt (the old immediate-expiry hack); it schedules
+	// disposal via PendingDeletion instead. deleteSource is false here, so no CleanUp pass
+	// is triggered and the row - still mid-download - is left in place, merely marked.
+	test.IsEqualBool(t, file.PendingDeletion != 0, true)
 	test.IsEqualBool(t, ok, true)
 
 	if aws.IsIncludedInBuild {

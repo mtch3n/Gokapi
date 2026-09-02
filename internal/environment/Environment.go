@@ -76,6 +76,13 @@ type Environment struct {
 	// but it must therefore be present on every start, the same way production supplies it
 	// through deploy config
 	MaxExpiry Duration `env:"MAX_EXPIRY" envDefault:"0"`
+	// Sets how long a file's metadata record is kept as history after its content is disposed of
+	// (expired, downloaded out, or deleted by its owner). Accepts a Go duration such as "12h",
+	// plus "d" (day) and "w" (week) suffixes, e.g. "365d". Set to 0 to remove the record together
+	// with its content, which is the behaviour prior to this setting existing. Not persistent, for
+	// the same reason as GOKAPI_MAX_EXPIRY: storage.CleanUp re-reads it from the environment on
+	// every sweep, so it must be present on every start.
+	MetadataRetention Duration `env:"METADATA_RETENTION" envDefault:"7d"`
 	// Sets the expiry presets a client offers for a new upload, e.g. "1h,1d,7d,14d,30d,365d".
 	// Comma separated, same format as GOKAPI_MAX_EXPIRY per entry. An entry that is not
 	// positive, a duplicate, or greater than GOKAPI_MAX_EXPIRY is dropped; if that empties

@@ -17,7 +17,8 @@ import (
 // fresh from the CREATE TABLE above - which SELECT * would silently scan into the wrong fields.
 const metaDataColumns = `Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes, DownloadsRemaining, DownloadCount,
 	PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption, UnlimitedDownloads, UnlimitedTime,
-	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId, EncryptedSharePassword`
+	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId, EncryptedSharePassword,
+	DisposedAt, DisposalReason`
 
 type schemaMetaData struct {
 	Id                     string
@@ -41,6 +42,8 @@ type schemaMetaData struct {
 	UploadRequestId        string
 	BundleId               string
 	EncryptedSharePassword []byte
+	DisposedAt             int64
+	DisposalReason         int
 }
 
 func (rowData schemaMetaData) ToFileModel() (models.File, error) {
@@ -67,6 +70,8 @@ func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 		UploadRequestId:        rowData.UploadRequestId,
 		BundleId:               rowData.BundleId,
 		EncryptedSharePassword: rowData.EncryptedSharePassword,
+		DisposedAt:             rowData.DisposedAt,
+		DisposalReason:         rowData.DisposalReason,
 	}
 
 	buf := bytes.NewBuffer(rowData.Encryption)
@@ -86,7 +91,8 @@ func (p DatabaseProvider) GetAllMetadata() map[string]models.File {
 		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.Size, &rowData.SHA1, &rowData.ExpireAt, &rowData.SizeBytes,
 			&rowData.DownloadsRemaining, &rowData.DownloadCount, &rowData.PasswordHash, &rowData.HotlinkId, &rowData.ContentType,
 			&rowData.AwsBucket, &rowData.Encryption, &rowData.UnlimitedDownloads, &rowData.UnlimitedTime, &rowData.UserId,
-			&rowData.UploadDate, &rowData.PendingDeletion, &rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword)
+			&rowData.UploadDate, &rowData.PendingDeletion, &rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword,
+			&rowData.DisposedAt, &rowData.DisposalReason)
 		helper.Check(err)
 		var metaData models.File
 		metaData, err = rowData.ToFileModel()
@@ -106,7 +112,8 @@ func (p DatabaseProvider) GetMetaDataById(id string) (models.File, bool) {
 		&rowData.DownloadsRemaining, &rowData.DownloadCount, &rowData.PasswordHash,
 		&rowData.HotlinkId, &rowData.ContentType, &rowData.AwsBucket, &rowData.Encryption,
 		&rowData.UnlimitedDownloads, &rowData.UnlimitedTime, &rowData.UserId, &rowData.UploadDate,
-		&rowData.PendingDeletion, &rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword)
+		&rowData.PendingDeletion, &rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword,
+		&rowData.DisposedAt, &rowData.DisposalReason)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return result, false
@@ -142,6 +149,8 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 		UploadRequestId:        file.UploadRequestId,
 		BundleId:               file.BundleId,
 		EncryptedSharePassword: file.EncryptedSharePassword,
+		DisposedAt:             file.DisposedAt,
+		DisposalReason:         file.DisposalReason,
 	}
 
 	if file.UnlimitedDownloads {
@@ -160,12 +169,13 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO FileMetaData (Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes,
                                    DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
                                    UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId,
-                                   EncryptedSharePassword)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                   EncryptedSharePassword, DisposedAt, DisposalReason)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newData.Id, newData.NameEncrypted, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
 		newData.DownloadsRemaining, newData.DownloadCount, newData.PasswordHash, newData.HotlinkId, newData.ContentType,
 		newData.AwsBucket, newData.Encryption, newData.UnlimitedDownloads, newData.UnlimitedTime, newData.UserId, newData.UploadDate,
-		newData.PendingDeletion, newData.UploadRequestId, newData.BundleId, newData.EncryptedSharePassword)
+		newData.PendingDeletion, newData.UploadRequestId, newData.BundleId, newData.EncryptedSharePassword,
+		newData.DisposedAt, newData.DisposalReason)
 	helper.Check(err)
 }
 

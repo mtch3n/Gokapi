@@ -665,6 +665,20 @@ func LogFileExpired(file models.File, reason string) {
 	})
 }
 
+// LogFilePurged records that a disposed file's history record was permanently removed - either
+// because its retention window elapsed or its owner cleared it early ("Remove from History").
+// Non-blocking, as this may run off the request path.
+func LogFilePurged(fileId string, reason string) {
+	createLogEntry(categoryExpiry, fmt.Sprintf("ID %s, history entry purged: %s", fileId, reason), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryExpiry,
+		Action:   "file.purged",
+		Outcome:  OutcomeSuccess,
+		FileId:   fileId,
+		Detail:   reason,
+	})
+}
+
 // LogApiKeyCreated records that an API key was created. Non-blocking.
 func LogApiKeyCreated(key models.ApiKey, actor models.User) {
 	createLogEntry(categoryApiKey, fmt.Sprintf("API key %s (%s) created by %s (user #%d)", key.GetRedactedId(), key.FriendlyName, actor.Name, actor.Id), false)

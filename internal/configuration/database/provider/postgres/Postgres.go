@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 23
+const DatabaseSchemeVersion = 24
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -235,6 +235,15 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		ALTER TABLE UploadRequests ADD COLUMN IF NOT EXISTS NoteEncrypted BYTEA;`)
 		helper.Check(err)
 	}
+	// Metadata retention: a file whose content is disposed of keeps its row as history instead of
+	// being deleted outright. Every row that already exists is active by definition - it has
+	// content, so DisposedAt defaulting to 0 is correct with no backfill needed. IF NOT EXISTS
+	// keeps this idempotent, same as the steps above.
+	if currentDbVersion < 24 {
+		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS DisposedAt BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS DisposalReason INTEGER NOT NULL DEFAULT 0;`)
+		helper.Check(err)
+	}
 }
 
 // GetDbVersion gets the version number of the database.
@@ -355,6 +364,8 @@ func (p DatabaseProvider) createNewDatabase() error {
 			UploadRequestId	TEXT NOT NULL,
 			BundleId	TEXT NOT NULL,
 			EncryptedSharePassword	BYTEA,
+			DisposedAt	BIGINT NOT NULL DEFAULT 0,
+			DisposalReason	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Hotlinks (

@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 23
+const DatabaseSchemeVersion = 24
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -281,6 +281,20 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			helper.Check(err)
 		}
 	}
+	// Metadata retention: a file whose content is disposed of keeps its row as history instead of
+	// being deleted outright. Every row that already exists is active by definition - it has
+	// content, so DisposedAt defaulting to 0 is correct with no backfill needed. Same idempotency
+	// guard as the v17 step above.
+	if currentDbVersion < 24 {
+		if !p.columnExists("FileMetaData", "DisposedAt") {
+			err := p.rawSqlite(`ALTER TABLE FileMetaData ADD COLUMN "DisposedAt" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+		if !p.columnExists("FileMetaData", "DisposalReason") {
+			err := p.rawSqlite(`ALTER TABLE FileMetaData ADD COLUMN "DisposalReason" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+	}
 }
 
 // tableExists returns true if the given table is present. Used to make a
@@ -427,6 +441,8 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"UploadRequestId"	TEXT NOT NULL,
 			"BundleId"	TEXT NOT NULL,
 			"EncryptedSharePassword"	BLOB,
+			"DisposedAt"	INTEGER NOT NULL DEFAULT 0,
+			"DisposalReason"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("Id")
 		);
 		CREATE TABLE "Hotlinks" (

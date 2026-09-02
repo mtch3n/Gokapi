@@ -1738,7 +1738,13 @@ func TestRestoreFile(t *testing.T) {
 		}
 	}
 	test.IsEqualInt64(t, file.PendingDeletion, 0)
-	storage.DeleteFile(fileUser.Id, true)
+	// Removed directly rather than via storage.DeleteFile(id, true): that only schedules
+	// disposal and fires CleanUp in a background goroutine, racing TestList (the very next
+	// top-level test), which asserts idUser has no files the moment it starts. A direct
+	// database.DeleteMetaData guarantees the row is gone before this test returns, without
+	// running a full CleanUp sweep over every other fixture row this package's other tests
+	// still depend on.
+	database.DeleteMetaData(fileUser.Id)
 }
 
 func testRestoreFileCall(t *testing.T, apiKey models.ApiKey, fileId string, resultCode int, expectedResponse string) {

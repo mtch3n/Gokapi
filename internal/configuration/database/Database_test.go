@@ -269,6 +269,8 @@ func TestMetaData(t *testing.T) {
 		},
 		UnlimitedDownloads: true,
 		UnlimitedTime:      true,
+		DisposedAt:         time.Now().Add(-time.Hour).Unix(),
+		DisposalReason:     models.DisposalReasonExpired,
 	}
 	runAllTypesNoOutput(t, func() { SaveMetaData(file) })
 	runAllTypesCompareOutput(t, func() any { return GetDownloadsRemaining(file.Id) }, 2)
@@ -1024,6 +1026,61 @@ func TestMigratePreservesEncryptedFileName(t *testing.T) {
 	migrated, ok := dbNew.GetMetaDataById("encnamefile")
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, migrated.Name, secretName)
+}
+
+// TestDisposedMetaDataRoundTripsThroughRedis is the "genuinely unverified" item the task calls
+// out by name: no redis provider file was touched to add DisposedAt/DisposalReason, so it only
+// compiles because redigo's ScanStruct/AddFlat reflect over the `redis:"..."` struct tags -
+// nothing proves those tags actually round-trip until something reads the values back through
+// Redis. This targets the Redis provider directly (bypassing the cross-provider harness, which
+// strips NameEncryptedRaw from its comparisons - see withoutNameEncryptedRaw) and checks the new
+// fields together with NameEncryptedRaw in the same read, the combination storage.disposeFile
+// actually produces: a disposed row whose name is still stored encrypted.
+//
+// Opens its own connection (a distinct prefix, so it cannot collide with any other test's keys)
+// rather than reusing availableDatabases[0]/the shared db var: TestClose permanently closes both
+// of those, and file order in this package runs this test after TestClose - see
+// TestMigratePreservesEncryptedFileName just above, which does the same for the same reason.
+func TestDisposedMetaDataRoundTripsThroughRedis(t *testing.T) {
+	defer encryption.Init(models.Configuration{Encryption: models.Encryption{Level: encryption.NoEncryption}})
+	cipher, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level: encryption.FullEncryptionStored, Cipher: cipher}})
+
+	dbRedis, err := dbabstraction.GetNew(models.DbConnection{
+		RedisPrefix: "testdisposedredis_",
+		HostUrl:     "127.0.0.1:26379",
+		Type:        1, // dbabstraction.TypeRedis
+	})
+	test.IsNil(t, err)
+	defer dbRedis.Close()
+
+	const secretName = "redis-disposed-name.pdf"
+	const fileId = "redisdisposedtest"
+	dbRedis.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               secretName,
+		SHA1:               "", // disposal clears this
+		DisposedAt:         1750000000,
+		DisposalReason:     models.DisposalReasonExpired,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	})
+
+	stored, ok := dbRedis.GetMetaDataById(fileId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt64(t, stored.DisposedAt, 1750000000)
+	test.IsEqualInt(t, stored.DisposalReason, models.DisposalReasonExpired)
+	test.IsEqualString(t, stored.Name, secretName)
+	test.IsEqualBool(t, len(stored.NameEncryptedRaw) > 0, true)
+
+	all := dbRedis.GetAllMetadata()
+	fromAll, found := all[fileId]
+	test.IsEqualBool(t, found, true)
+	test.IsEqualInt64(t, fromAll.DisposedAt, 1750000000)
+	test.IsEqualInt(t, fromAll.DisposalReason, models.DisposalReasonExpired)
+	test.IsEqualString(t, fromAll.Name, secretName)
 }
 
 func TestRedactUrl(t *testing.T) {

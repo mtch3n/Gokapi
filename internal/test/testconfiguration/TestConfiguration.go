@@ -48,6 +48,11 @@ const (
 func SetDirEnv() {
 	os.Setenv("GOKAPI_CONFIG_DIR", baseDir)
 	os.Setenv("GOKAPI_DATA_DIR", dataDir)
+	// Retention off by default, reproducing the pre-retention behaviour every existing test was
+	// written against: a disposed file's record is removed together with its content, instead of
+	// being kept as history. Tests that exercise retention itself set GOKAPI_METADATA_RETENTION
+	// explicitly and restore it afterwards.
+	os.Setenv("GOKAPI_METADATA_RETENTION", "0")
 	err := os.MkdirAll(baseDir, 0777)
 	if err != nil {
 		panic(err)

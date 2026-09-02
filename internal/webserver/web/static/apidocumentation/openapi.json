@@ -292,7 +292,7 @@
           "files"
         ],
         "summary": "Lists all files",
-        "description": "This API call lists all files that are not expired. Returns null, if no files are stored. Requires API permission VIEW. To view files that were not uploaded by the user, the user needs to have the user permission LIST",
+        "description": "This API call lists all files owned by the caller (or, with the LIST permission, every file), including ones whose content has since been disposed of - expired, downloads exhausted, or deleted - and is kept as owner-visible history until the configured metadata retention window removes the record; see the Status field on each entry. Returns null, if no files are stored. Requires API permission VIEW. To view files that were not uploaded by the user, the user needs to have the user permission LIST",
         "operationId": "list",
         "security": [
           {
@@ -342,7 +342,7 @@
           "files"
         ],
         "summary": "Get metadata by ID",
-        "description": "This API call lists all metadata about a file that is not expired. Returns 404 if an invalid/expired ID was passed. Requires API permission VIEW. To view files that were not uploaded by the user, the user needs to have the user permission LIST",
+        "description": "This API call lists all metadata about a file that is not expired and has not been disposed of. Returns 404 if an invalid, expired, or disposed-of ID was passed - use /files/list to see a disposed file's history entry instead. Requires API permission VIEW. To view files that were not uploaded by the user, the user needs to have the user permission LIST",
         "operationId": "listbyid",
         "parameters": [
           {
@@ -1441,7 +1441,7 @@
           "files"
         ],
         "summary": "Deletes the selected file",
-        "description": "This API call deletes the selected file and runs the clean-up procedure which purges all expired files from the data directory. Deletetion can be postponed with the parameter delay to be able to cancel deletion with the call /files/restore.  Requires API permission DELETE. To delete a file that was not uploaded by the user, the user needs to have the user permission DELETE",
+        "description": "This API call deletes the selected file. If the file's content still exists, it is disposed of (removed from storage) while its metadata record is kept as owner-visible history until the configured metadata retention window elapses; if the file was already disposed of (e.g. previously expired), its history record is removed immediately instead. Deletion can be postponed with the parameter delay, to be able to cancel it with the call /files/restore before the content is disposed of. Requires API permission DELETE. To delete a file that was not uploaded by the user, the user needs to have the user permission DELETE",
         "operationId": "delete",
         "security": [
           {
@@ -1489,7 +1489,7 @@
           "files"
         ],
         "summary": "Restores a file that is pending to be deleted",
-        "description": "This API call cancels a pending deletion of the selected file that originally deleted with /files/delete. The call to restore has to be within the timeframe specified in the delay parameter of /files/delete. Requires API permission DELETE. To delete a file that was not uploaded by the user, the user needs to have the user permission DELETE",
+        "description": "This API call cancels a pending deletion of the selected file that was originally deleted with /files/delete. The call to restore has to be within the timeframe specified in the delay parameter of /files/delete, and before the file's content has actually been disposed of - once disposed (for any reason: the pending deletion went through, or the file separately expired or ran out of downloads), it can no longer be restored. Requires API permission DELETE. To delete a file that was not uploaded by the user, the user needs to have the user permission DELETE",
         "operationId": "restore",
         "security": [
           {
@@ -1524,7 +1524,7 @@
             "description": "Invalid API key provided for authentication or API key does not have the required permission"
           },
           "404": {
-            "description": "Invalid ID supplied or the file has already been deleted"
+            "description": "Invalid ID supplied, or the file's content has already been disposed of and can no longer be restored"
           }
         }
       }
@@ -2982,10 +2982,10 @@
             "type": "boolean",
             "example": "true"
           },
-          "IsPendingDeletion": {
-            "description": "True if the file is about to be deleted",
-            "type": "boolean",
-            "example": "false"
+          "Status": {
+            "description": "One of active, pending_deletion, expired, downloaded or deleted. A status other than active means the file's content has been removed; expired/downloaded/deleted records are kept as owner-visible history until the metadata retention window (GOKAPI_METADATA_RETENTION) removes them",
+            "type": "string",
+            "example": "active"
           },
           "IsFileRequest": {
             "description": "True if the file belongs to an upload request",
