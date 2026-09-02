@@ -1,7 +1,10 @@
 package configuration
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -394,6 +397,92 @@ func TestValidatePasswordComplexity(t *testing.T) {
 	test.IsNotNil(t, ValidatePasswordComplexity("Passw0rd"))
 	test.IsNotNil(t, ValidatePasswordComplexity(""))
 }
+
+// TestValidatePasswordComplexityMatchesFrontendFixture reads the shared vectors from
+// frontend/testdata/password-classification.json and checks ValidatePasswordComplexity's
+// per-class classification against every one of them, so the Go and TypeScript
+// implementations cannot silently drift apart again the way they did before: the frontend
+// used ASCII-only regexes while this function uses unicode.IsLower/IsUpper/IsDigit, and a
+// password with a non-ASCII letter passed client-side validation but was then rejected by
+// the server after every chunk had already uploaded.
+//
+// The fixture lives in the frontend repository, a sibling directory of this one, not inside
+// this repo. It is referenced by relative path from this file rather than copied in, because
+// a copy would drift exactly like the two implementations did. That means this test only
+// finds the fixture when backend/ and frontend/ are checked out side by side; a standalone
+// clone of this repo (as it is a public fork) does not have the frontend tree, so the test
+// skips instead of failing in that case.
+func TestValidatePasswordComplexityMatchesFrontendFixture(t *testing.T) {
+	fixturePath := passwordClassificationFixturePath()
+	data, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Skipf("frontend password-classification fixture not found at %s (expected backend/ and frontend/ as sibling directories): %v", fixturePath, err)
+	}
+
+	var fixture struct {
+		Vectors []struct {
+			Name     string `json:"name"`
+			Password string `json:"password"`
+			Lower    bool   `json:"lower"`
+			Upper    bool   `json:"upper"`
+			Digit    bool   `json:"digit"`
+			Special  bool   `json:"special"`
+		} `json:"vectors"`
+	}
+	err = json.Unmarshal(data, &fixture)
+	if err != nil {
+		t.Fatalf("failed to parse %s: %v", fixturePath, err)
+	}
+	if len(fixture.Vectors) == 0 {
+		t.Fatalf("%s contained no vectors", fixturePath)
+	}
+
+	for _, vector := range fixture.Vectors {
+		vector := vector
+		t.Run(vector.Name, func(t *testing.T) {
+			test.IsEqualBool(t, passwordHasLower(vector.Password), vector.Lower)
+			test.IsEqualBool(t, passwordHasUpper(vector.Password), vector.Upper)
+			test.IsEqualBool(t, passwordHasDigit(vector.Password), vector.Digit)
+			test.IsEqualBool(t, passwordHasSpecial(vector.Password), vector.Special)
+		})
+	}
+}
+
+// passwordClassificationFixturePath resolves the shared fixture relative to this source
+// file's own location, rather than the process working directory, so `go test` behaves the
+// same whether it is invoked from this package, the repo root or anywhere else.
+func passwordClassificationFixturePath() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "frontend", "testdata", "password-classification.json")
+}
+
+// ValidatePasswordComplexity only reports pass/fail for "all four classes present", stopping
+// at the first missing class rather than listing every one that is missing. The four
+// passwordHasX probes below recover a single class's presence in isolation: each pads the
+// password with filler characters that cover the other three required classes, so the only
+// class that can still be missing from that combined string is the one under test.
+func passwordHasLower(password string) bool {
+	return ValidatePasswordComplexity(password+fillerUpper+fillerDigit+fillerSpecial) == nil
+}
+
+func passwordHasUpper(password string) bool {
+	return ValidatePasswordComplexity(password+fillerLower+fillerDigit+fillerSpecial) == nil
+}
+
+func passwordHasDigit(password string) bool {
+	return ValidatePasswordComplexity(password+fillerLower+fillerUpper+fillerSpecial) == nil
+}
+
+func passwordHasSpecial(password string) bool {
+	return ValidatePasswordComplexity(password+fillerLower+fillerUpper+fillerDigit) == nil
+}
+
+const (
+	fillerLower   = "a"
+	fillerUpper   = "A"
+	fillerDigit   = "1"
+	fillerSpecial = "!"
+)
 
 func TestValidateSharePasswordComplexity(t *testing.T) {
 	// ValidateSharePassword reads the minimum length from the environment, which
