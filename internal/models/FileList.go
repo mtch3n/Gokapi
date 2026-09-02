@@ -191,6 +191,7 @@ type FileApiOutput struct {
 	DownloadCount                int    `json:"DownloadCount"`                // The number of times the file has been downloaded
 	UnlimitedDownloads           bool   `json:"UnlimitedDownloads"`           // True if the uploader did not limit the downloads
 	UnlimitedTime                bool   `json:"UnlimitedTime"`                // True if the uploader did not limit the time
+	DisposedAt                   int64  `json:"DisposedAt"`                   // UTC timestamp the file's content was deleted, or 0 if not disposed
 	RequiresClientSideDecryption bool   `json:"RequiresClientSideDecryption"` // True if the file has to be decrypted client-side
 	IsEncrypted                  bool   `json:"IsEncrypted"`                  // True if the file is encrypted
 	IsEndToEndEncrypted          bool   `json:"IsEndToEndEncrypted"`          // True if the file is end-to-end encrypted
