@@ -26,6 +26,7 @@ import (
 	gokapimail "github.com/forceu/gokapi/internal/mail"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/shareaccess"
+	"github.com/forceu/gokapi/internal/storage/chunking/chunkreservation"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
 	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/test"
@@ -1238,6 +1239,165 @@ func TestPublicApiUploadRequestValid(t *testing.T) {
 	// holder already has it in the URL.
 	if apiKey, ok := response["apikey"]; !ok || apiKey != "testkey123" {
 		t.Errorf("Expected apikey 'testkey123', got %v", apiKey)
+	}
+}
+
+// TestEffectiveGuestMaxSizeMB is a pure, table-driven test for effectiveGuestMaxSizeMB - each of
+// the three caps (server, guest, request) gets to be the binding minimum in turn, and an admin
+// owner is confirmed to skip the guest cap entirely, matching isUserAllowedUnlimited's own
+// "user.IsAdmin() -> true" short-circuit (Api.go).
+func TestEffectiveGuestMaxSizeMB(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		serverMaxMB   int
+		guestCapMB    int
+		isOwnerAdmin  bool
+		requestMaxMB  int
+		expectedMaxMB int
+	}{
+		{"request cap is smallest", 1000, 500, false, 50, 50},
+		{"server cap is smallest, request uncapped", 25, 10240, false, 0, 25},
+		{"guest cap is smallest and binds", 1000, 10, false, 0, 10},
+		{"guest cap would bind but is skipped for an admin owner", 1000, 10, true, 0, 1000},
+		{"guest cap disabled (0) never binds", 1000, 0, false, 0, 1000},
+		{"every cap uncapped except server", 1000, 0, false, 0, 1000},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := effectiveGuestMaxSizeMB(c.serverMaxMB, c.guestCapMB, c.isOwnerAdmin, c.requestMaxMB)
+			if got != c.expectedMaxMB {
+				t.Errorf("effectiveGuestMaxSizeMB(%d, %d, %v, %d) = %d, want %d",
+					c.serverMaxMB, c.guestCapMB, c.isOwnerAdmin, c.requestMaxMB, got, c.expectedMaxMB)
+			}
+		})
+	}
+}
+
+// TestPublicApiUploadRequestReportsEffectiveMaxSize is the failing-first test that GET
+// /pubapi/uploadrequest reports the EFFECTIVE maxSizeMB (the server's own MaxFileSizeMB cap, here
+// well below the request's own raw cap) rather than echoing request.MaxSize unchanged - the old
+// behaviour that told a guest a limit the chunk path (apiChunkUploadRequestAdd) would silently
+// override partway through the upload.
+func TestPublicApiUploadRequestReportsEffectiveMaxSize(t *testing.T) {
+	t.Parallel()
+
+	testRequest := models.FileRequest{
+		Id:       "testuploadreqmaxsize1",
+		UserId:   5,
+		MaxFiles: 10,
+		// Deliberately far above the test server's own MaxFileSizeMB (25, see
+		// testconfiguration.Create) so the server cap - not the request's raw value - must be
+		// the one reported.
+		MaxSize: 999999,
+		Expiry:  time.Now().Add(24 * time.Hour).Unix(),
+		Name:    "Test Upload Request Max Size",
+		ApiKey:  "testkeymaxsize1",
+	}
+	database.SaveFileRequest(testRequest)
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqmaxsize1", nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.Header.Set("apikey", "testkeymaxsize1")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+	}
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	maxSizeMB, ok := response["maxSizeMB"].(float64)
+	if !ok {
+		t.Fatalf("Missing or invalid maxSizeMB field, got %v", response["maxSizeMB"])
+	}
+	expected := float64(configuration.Get().MaxFileSizeMB)
+	if maxSizeMB != expected {
+		t.Errorf("Expected effective maxSizeMB %v (the server cap, not the request's raw %d), got %v",
+			expected, testRequest.MaxSize, maxSizeMB)
+	}
+}
+
+// TestPublicApiUploadRequestReportsRemainingFilesAfterReservations is the failing-first test that
+// GET /pubapi/uploadrequest reports remainingFiles via models.FileRequest.FilesRemaining(), which
+// subtracts ReservedUploads (chunks a guest has started but not yet completed - see
+// chunkreservation), rather than the old inline "MaxFiles - UploadedFiles" that ignored them and
+// so overstated how much room was actually left, compared to what enforcement
+// (checkFileRequestAndApiKey/FilesRemaining) would accept.
+func TestPublicApiUploadRequestReportsRemainingFilesAfterReservations(t *testing.T) {
+	t.Parallel()
+
+	testRequest := models.FileRequest{
+		Id:       "testuploadreqremain1",
+		UserId:   5,
+		MaxFiles: 5,
+		MaxSize:  100,
+		Expiry:   time.Now().Add(24 * time.Hour).Unix(),
+		Name:     "Test Upload Request Remaining Files",
+		ApiKey:   "testkeyremain1",
+	}
+	database.SaveFileRequest(testRequest)
+
+	// UploadedFiles is not stored directly - Populate recomputes it from the files actually
+	// associated with this request (see models.FileRequest.Populate), so two need to exist for
+	// real.
+	database.SaveMetaData(models.File{
+		Id:              "remainfile1",
+		Name:            "remainfile1",
+		SHA1:            "03cfd743661f07975fa2f1220c5194cbaff48451",
+		ExpireAt:        2147483646,
+		UploadRequestId: testRequest.Id,
+	})
+	database.SaveMetaData(models.File{
+		Id:              "remainfile2",
+		Name:            "remainfile2",
+		SHA1:            "03cfd743661f07975fa2f1220c5194cbaff48451",
+		ExpireAt:        2147483646,
+		UploadRequestId: testRequest.Id,
+	})
+
+	// One chunk reserved but not yet completed - MaxFiles(5) - UploadedFiles(2) - Reserved(1) = 2,
+	// while the old "MaxFiles - UploadedFiles" formula would report 3.
+	_, ok := chunkreservation.NewIfUnder(testRequest.Id, -1)
+	if !ok {
+		t.Fatalf("Failed to reserve a chunk for the test file request")
+	}
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqremain1", nil)
+	if err != nil {
+		t.Fatalf("Failed to build request: %v", err)
+	}
+	req.Header.Set("apikey", "testkeyremain1")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+	}
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	remainingFiles, ok := response["remainingFiles"].(float64)
+	if !ok {
+		t.Fatalf("Missing or invalid remainingFiles field, got %v", response["remainingFiles"])
+	}
+	if int(remainingFiles) != 2 {
+		t.Errorf("Expected remainingFiles 2 (5 max - 2 uploaded - 1 reserved), got %v", remainingFiles)
 	}
 }
 
@@ -3142,6 +3302,24 @@ func TestPublicApiConfig(t *testing.T) {
 			t.Errorf("Missing or invalid expiryOptionsSeconds field in limits")
 		} else if len(options) == 0 {
 			t.Errorf("expiryOptionsSeconds must never be empty")
+		}
+
+		// maxFilesGuestUpload/maxSizeGuestUploadMB must match GOKAPI_MAX_FILES_GUESTUPLOAD and
+		// GOKAPI_MAX_SIZE_GUESTUPLOAD exactly - the same env values isUserAllowedUnlimited
+		// (internal/webserver/api/Api.go) reads to cap a non-admin file request owner. Publishing
+		// anything else would let RequestDialog show a max the server does not actually enforce.
+		env := configuration.GetEnvironment()
+		maxFilesGuestUpload, ok := limits["maxFilesGuestUpload"].(float64)
+		if !ok {
+			t.Errorf("Missing or invalid maxFilesGuestUpload field in limits")
+		} else if int(maxFilesGuestUpload) != env.MaxFilesGuestUpload {
+			t.Errorf("Expected maxFilesGuestUpload %d, got %v", env.MaxFilesGuestUpload, maxFilesGuestUpload)
+		}
+		maxSizeGuestUploadMB, ok := limits["maxSizeGuestUploadMB"].(float64)
+		if !ok {
+			t.Errorf("Missing or invalid maxSizeGuestUploadMB field in limits")
+		} else if int(maxSizeGuestUploadMB) != env.MaxSizeGuestUploadMb {
+			t.Errorf("Expected maxSizeGuestUploadMB %d, got %v", env.MaxSizeGuestUploadMb, maxSizeGuestUploadMB)
 		}
 	}
 }

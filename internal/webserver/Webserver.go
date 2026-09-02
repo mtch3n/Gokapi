@@ -1519,6 +1519,23 @@ func pubApiFilePassword(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, "{\"ok\":false}")
 }
 
+// effectiveGuestMaxSizeMB returns the smallest of serverMaxSizeMB (the server's own
+// GOKAPI_MAX_FILESIZE), guestCapMB (GOKAPI_MAX_SIZE_GUESTUPLOAD, 0 meaning uncapped) applied only
+// when isOwnerAdmin is false, and requestMaxSizeMB (the file request's own cap, 0 meaning
+// uncapped) - a pure mirror of the three-way min apiChunkUploadRequestAdd (Api.go) actually
+// enforces per chunk, factored out so pubApiUploadRequest's advertised limit can be unit tested
+// without a running server.
+func effectiveGuestMaxSizeMB(serverMaxSizeMB, guestCapMB int, isOwnerAdmin bool, requestMaxSizeMB int) int {
+	result := serverMaxSizeMB
+	if !isOwnerAdmin && guestCapMB != 0 {
+		result = min(result, guestCapMB)
+	}
+	if requestMaxSizeMB != 0 {
+		result = min(result, requestMaxSizeMB)
+	}
+	return result
+}
+
 // Handling of /pubapi/uploadrequest
 // Public, unauthenticated endpoint that returns file request metadata as JSON.
 // These endpoints are intentionally public to enable standalone client SPAs to drive the UI.
@@ -1622,13 +1639,28 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate remaining files
-	remainingFiles := request.MaxFiles - request.UploadedFiles
+	// Calculate remaining files. FilesRemaining subtracts ReservedUploads (chunks a guest has
+	// started but not yet completed - see chunkreservation), which this inline calculation used
+	// to ignore, letting a guest who had already reserved uploads be told there was room for more
+	// than enforcement (checkFileRequestAndApiKey) would actually accept. The unlimited case is
+	// kept as its own -1 signal rather than routed through FilesRemaining, which would otherwise
+	// return 0 (MaxFiles - UploadedFiles - ReservedUploads, clamped) for a request that has no
+	// cap at all.
+	remainingFiles := request.FilesRemaining()
 	if request.IsUnlimitedFiles() {
 		remainingFiles = -1
 	}
 
 	config := configuration.Get()
+	env := configuration.GetEnvironment()
+
+	// Effective maxSizeMB: the smallest of the server's own cap, the guest cap that applies to
+	// this request's (non-admin) owner, and the request's own cap - the same three-way min
+	// apiChunkUploadRequestAdd actually enforces per chunk. Returning request.MaxSize alone (the
+	// request's raw, possibly-uncapped value) told a guest a limit the chunk path would silently
+	// override partway through the upload; this reports the number that will actually be honoured.
+	owner, _ := database.GetUser(request.UserId)
+	maxSizeMB := effectiveGuestMaxSizeMB(config.MaxFileSizeMB, env.MaxSizeGuestUploadMb, owner.IsAdmin(), request.MaxSize)
 
 	response := map[string]interface{}{
 		"valid":          true,
@@ -1636,7 +1668,7 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 		"notes":          request.Notes,
 		"maxFiles":       request.MaxFiles,
 		"remainingFiles": remainingFiles,
-		"maxSizeMB":      request.MaxSize,
+		"maxSizeMB":      maxSizeMB,
 		"chunkSize":      config.ChunkSize,
 		"expiry":         request.Expiry,
 		"receivedFiles":  receivedFiles,
@@ -2321,6 +2353,16 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 			// same "0 means uncapped" convention used throughout this API for expiry values.
 			"maxExpirySeconds":     int64(time.Duration(env.MaxExpiry).Seconds()),
 			"expiryOptionsSeconds": expiryOptionsSeconds(env.ExpiryOptions),
+			// maxFilesGuestUpload/maxSizeGuestUploadMB mirror GOKAPI_MAX_FILES_GUESTUPLOAD and
+			// GOKAPI_MAX_SIZE_GUESTUPLOAD, the caps isUserAllowedUnlimited (Api.go) enforces on a
+			// non-admin file request owner. 0 means uncapped, the same convention maxExpirySeconds
+			// above uses. Published so a non-admin client can show a max that matches what the
+			// server will actually accept, rather than letting the uploader pick a value the
+			// server silently overrides. An admin is exempt from both caps (isUserAllowedUnlimited
+			// returns true unconditionally for one), so these are advisory rather than binding for
+			// an admin caller.
+			"maxFilesGuestUpload":  env.MaxFilesGuestUpload,
+			"maxSizeGuestUploadMB": env.MaxSizeGuestUploadMb,
 		},
 	}
 

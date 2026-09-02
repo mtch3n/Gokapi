@@ -3148,6 +3148,35 @@ func getShareKey(apiKeyId, fileId string) (*httptest.ResponseRecorder, *http.Req
 	return getRecorder("/files/"+fileId+"/sharekey", apiKeyId, []test.Header{})
 }
 
+func getFolderShareKey(apiKeyId, bundleId string) (*httptest.ResponseRecorder, *http.Request) {
+	return getRecorder("/folder/"+bundleId+"/sharekey", apiKeyId, []test.Header{})
+}
+
+// chunkUploadToBundleWithPassword uploads a single-chunk file as a member of bundleId, mirroring
+// chunkUploadWithPassword above but attaching the upload to a bundle via the bundleid header - the
+// same header apiChunkComplete reads to look up and validate ownership of the bundle before
+// storeBundleShareKey ever runs.
+func chunkUploadToBundleWithPassword(t *testing.T, apiKeyId, uuid, bundleId, password string) string {
+	t.Helper()
+	err := os.WriteFile("test/data/chunk-"+uuid, []byte("testcontent"), 0600)
+	test.IsNil(t, err)
+	headers := []test.Header{
+		{Name: "apikey", Value: apiKeyId},
+		{Name: "uuid", Value: uuid},
+		{Name: "filename", Value: "test.upload"},
+		{Name: "filesize", Value: "11"},
+		{Name: "password", Value: password},
+		{Name: "bundleid", Value: bundleId},
+	}
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, headers, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result models.Result
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	return result.FileInfo.Id
+}
+
 // TestApiGetFeatures covers /api/features: it requires a session like any other authenticated
 // route, and storeShareKeys is only ever true when both the config flag is on and the master
 // key is actually available - the flag alone (with no master key loaded) must still report
@@ -3390,6 +3419,114 @@ func TestEditFileReplacesStoredShareKey(t *testing.T) {
 	stored, ok = storage.GetSharePassword(file)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, stored, "typedPassw0rd1!")
+}
+
+// TestStoreBundleShareKeyToggleOnAndOff is the failing-first test for storeBundleShareKey: a
+// bundle member uploaded with a password stores an encrypted share key on the BUNDLE (not just
+// the file) when StoreShareKeys is on, and stores nothing on the bundle when it is off - mirroring
+// TestApiGetShareKeyToggleOff/TestApiGetShareKeyToggleOnGeneratedVsManual for files exactly.
+func TestStoreBundleShareKeyToggleOnAndOff(t *testing.T) {
+	withMasterKey(t)
+
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermUpload)
+	database.SaveApiKey(apiKey)
+
+	// Toggle off: the member's own file still stores nothing either (existing behaviour), and
+	// the bundle must not either.
+	withStoreShareKeys(t, false)
+	bundleOff := filebundle.Create("TestStoreBundleShareKey_Off", idUser)
+	chunkUploadToBundleWithPassword(t, apiKey.Id, "bundlesharekeyoff1", bundleOff.Id, "folderPassw0rd!")
+	bundle, ok := database.GetFileBundle(bundleOff.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, len(bundle.EncryptedSharePassword), 0)
+
+	// Toggle on: the first member's password is stored on the bundle.
+	withStoreShareKeys(t, true)
+	bundleOn := filebundle.Create("TestStoreBundleShareKey_On", idUser)
+	chunkUploadToBundleWithPassword(t, apiKey.Id, "bundlesharekeyon1", bundleOn.Id, "folderPassw0rd!")
+	bundle, ok = database.GetFileBundle(bundleOn.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, len(bundle.EncryptedSharePassword) > 0, true)
+	stored, ok := storage.GetBundleSharePassword(bundle)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored, "folderPassw0rd!")
+
+	// A second member completing afterwards must not overwrite the key the first member
+	// established - see storeBundleShareKey's doc comment.
+	chunkUploadToBundleWithPassword(t, apiKey.Id, "bundlesharekeyon2", bundleOn.Id, "differentPassw0rd!")
+	bundle, ok = database.GetFileBundle(bundleOn.Id)
+	test.IsEqualBool(t, ok, true)
+	stored, ok = storage.GetBundleSharePassword(bundle)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored, "folderPassw0rd!")
+}
+
+// TestApiGetFolderShareKeyAuthorisation is the failing-first authz test for GET
+// /api/folder/{id}/sharekey: mirrors TestApiGetShareKeyAuthorisation for files exactly - the
+// owner (and a caller with the list-other-uploads permission) gets the stored key back, while an
+// unauthorised caller gets the same not-found response as an unknown bundle id.
+func TestApiGetFolderShareKeyAuthorisation(t *testing.T) {
+	withMasterKey(t)
+	withStoreShareKeys(t, true)
+
+	ownerKey := generateNewKey(false, idUser, "", "")
+	ownerKey.GrantPermission(models.ApiPermUpload)
+	ownerKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(ownerKey)
+
+	bundle := filebundle.Create("TestApiGetFolderShareKeyAuthorisation_Folder", idUser)
+	chunkUploadToBundleWithPassword(t, ownerKey.Id, "foldersharekeyauth1", bundle.Id, "folderAuthPassw0rd!")
+
+	// Owner can retrieve it.
+	w, r := getFolderShareKey(ownerKey.Id, bundle.Id)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	var result struct {
+		Key string `json:"key"`
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualString(t, result.Key, "folderAuthPassw0rd!")
+
+	// An unknown bundle id is refused identically.
+	w, r = getFolderShareKey(ownerKey.Id, "doesnotexist")
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+
+	// A plain, unprivileged stranger - deliberately not idAdmin, which already carries
+	// UserPermissionAll (including list-other-uploads).
+	const idStranger = 104
+	database.SaveUser(models.User{
+		Id:           idStranger,
+		Name:         "TestFolderShareKeyStranger",
+		Permissions:  models.UserPermissionNone,
+		UserLevel:    models.UserLevelUser,
+		AuthProvider: models.AuthProviderInternal,
+	}, false)
+	strangerKey := generateNewKey(false, idStranger, "", "")
+	strangerKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(strangerKey)
+
+	w, r = getFolderShareKey(strangerKey.Id, bundle.Id)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+
+	// Granting list-other-uploads gives the stranger access, matching apiFolderList's own
+	// authorisation check.
+	grantUserPermission(t, idStranger, models.UserPermListOtherUploads)
+	w, r = getFolderShareKey(strangerKey.Id, bundle.Id)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	err = json.Unmarshal(w.Body.Bytes(), &result)
+	test.IsNil(t, err)
+	test.IsEqualString(t, result.Key, "folderAuthPassw0rd!")
+	removeUserPermission(t, idStranger, models.UserPermListOtherUploads)
+
+	// No apikey / invalid apikey are refused the same way as any other authenticated route.
+	w, r = getFolderShareKey("", bundle.Id)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
 }
 
 func TestMinorFunctions(t *testing.T) {
