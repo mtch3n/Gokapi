@@ -238,6 +238,12 @@ func apiDeleteKey(w http.ResponseWriter, r requestParser, user models.User, _ mo
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
 		return
 	}
+	// UserPermManageApiKeys is grantable to a plain user, so without this the super admin's own
+	// key would be the one key such a user could still reach.
+	if apiKeyOwner.Id != user.Id && apiKeyOwner.IsSuperAdmin() {
+		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
+		return
+	}
 	database.DeleteApiKey(apiKey.Id)
 	logging.LogApiKeyDeleted(apiKey, user)
 }
@@ -259,41 +265,55 @@ func apiModifyApiKey(w http.ResponseWriter, r requestParser, user models.User, _
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
 		return
 	}
-
-	switch request.Permission {
-	case models.ApiPermReplace:
-		if !apiKeyOwner.HasPermissionReplace() {
-			sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
-			return
-		}
-	case models.ApiPermManageUsers:
-		if !apiKeyOwner.HasPermissionManageUsers() {
-			sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
-			return
-		}
-	case models.ApiPermManageLogs:
-		if !apiKeyOwner.HasPermissionManageLogs() {
-			sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
-			return
-		}
-	case models.ApiPermManageFileRequests:
-		if !apiKeyOwner.HasPermissionCreateFileRequests() {
-			sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
-			return
-		}
-	default:
-		// do nothing
-	}
-	if request.GrantPermission && !apiKey.HasPermission(request.Permission) {
-		apiKey.GrantPermission(request.Permission)
-		database.SaveApiKey(apiKey)
-		logging.LogApiKeyPermissionChanged(apiKey, user, fmt.Sprintf("%d", request.Permission), true)
+	// UserPermManageApiKeys is grantable to a plain user, so without this the super admin's own
+	// key would be the one key such a user could still reach.
+	if apiKeyOwner.Id != user.Id && apiKeyOwner.IsSuperAdmin() {
+		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
 		return
 	}
-	if !request.GrantPermission && apiKey.HasPermission(request.Permission) {
-		apiKey.RemovePermission(request.Permission)
-		database.SaveApiKey(apiKey)
-		logging.LogApiKeyPermissionChanged(apiKey, user, fmt.Sprintf("%d", request.Permission), false)
+
+	if request.IsPermissionSet {
+		switch request.Permission {
+		case models.ApiPermReplace:
+			if !apiKeyOwner.HasPermissionReplace() {
+				sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
+				return
+			}
+		case models.ApiPermManageUsers:
+			if !apiKeyOwner.HasPermissionManageUsers() {
+				sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
+				return
+			}
+		case models.ApiPermManageLogs:
+			if !apiKeyOwner.HasPermissionManageLogs() {
+				sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
+				return
+			}
+		case models.ApiPermManageFileRequests:
+			if !apiKeyOwner.HasPermissionCreateFileRequests() {
+				sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "Insufficient user permission for owner to set this API permission")
+				return
+			}
+		default:
+			// do nothing
+		}
+		if request.GrantPermission && !apiKey.HasPermission(request.Permission) {
+			apiKey.GrantPermission(request.Permission)
+			database.SaveApiKey(apiKey)
+			logging.LogApiKeyPermissionChanged(apiKey, user, fmt.Sprintf("%d", request.Permission), true)
+		} else if !request.GrantPermission && apiKey.HasPermission(request.Permission) {
+			apiKey.RemovePermission(request.Permission)
+			database.SaveApiKey(apiKey)
+			logging.LogApiKeyPermissionChanged(apiKey, user, fmt.Sprintf("%d", request.Permission), false)
+		}
+	}
+
+	if request.IsFriendlyNameSet {
+		err := setApiKeyFriendlyName(apiKey.Id, request.FriendlyName)
+		if err != nil {
+			sendError(w, http.StatusInternalServerError, errorcodes.InternalServer, err.Error())
+			return
+		}
 	}
 }
 
@@ -315,6 +335,22 @@ func isValidUserForEditing(w http.ResponseWriter, userId int) (models.User, bool
 		return models.User{}, false
 	}
 	return user, true
+}
+
+// canAdministerUser reports whether actor may mutate target's rank or permissions: never the
+// super admin, never yourself, and actor must outrank target. UserRank is lower for a higher
+// rank (super admin 0, admin 1, user 2), so outranking is a strict less-than - a rank-2 user
+// holding UserPermManageUsers can therefore never administer another rank-2 user, let alone an
+// admin, closing the gap where such a user could previously demote an admin or strip their
+// permissions one bit at a time.
+func canAdministerUser(actor, target models.User) bool {
+	if target.IsSuperAdmin() {
+		return false
+	}
+	if target.IsSameUser(actor.Id) {
+		return false
+	}
+	return actor.UserLevel < target.UserLevel
 }
 
 func apiCreateApiKey(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
@@ -653,35 +689,13 @@ func apiCreateUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	_, _ = w.Write([]byte(newUser.ToJson()))
 }
 
-func apiChangeFriendlyName(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
-	request, ok := r.(*paramAuthFriendlyName)
-	if !ok {
-		panic("invalid parameter passed")
-	}
-
-	ownerApiKey, apiKey, ok := isValidKeyForEditing(request.KeyId)
-	if !ok {
-		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid key ID provided.")
-		return
-	}
-	if ownerApiKey.Id != user.Id && !user.HasPermission(models.UserPermManageApiKeys) {
-		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to edit this API key")
-		return
-	}
-	err := renameApiKeyFriendlyName(apiKey.Id, request.FriendlyName)
-	if err != nil {
-		sendError(w, http.StatusInternalServerError, errorcodes.InternalServer, err.Error())
-		return
-	}
-}
-
-func renameApiKeyFriendlyName(id string, newName string) error {
+// setApiKeyFriendlyName renames the key. Callers must already hold apimutex.TypeApiKey for id -
+// apiModifyApiKey does, for the whole request, since a rename may be combined with a permission
+// change on the same key in one call.
+func setApiKeyFriendlyName(id string, newName string) error {
 	if newName == "" {
 		newName = "Unnamed key"
 	}
-
-	apimutex.Lock(apimutex.TypeApiKey, id)
-	defer apimutex.Unlock(apimutex.TypeApiKey, id)
 
 	key, ok := database.GetApiKey(id)
 	if !ok {
@@ -1704,6 +1718,10 @@ func outputFileJson(w http.ResponseWriter, file models.File) {
 	_, _ = io.WriteString(w, file.ToJsonResult(config.ServerUrl, config.IncludeFilename))
 }
 
+// apiModifyUser applies whichever of a rank change, a permission grant/revoke, and a password
+// reset the request carries - see paramUserModify. All three used to be separate endpoints, each
+// re-deriving its own copy of the same guard; canAdministerUser now covers all of them in one
+// place, so every mutation this handler can make is subject to it.
 func apiModifyUser(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramUserModify)
 	if !ok {
@@ -1717,75 +1735,75 @@ func apiModifyUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	if !ok {
 		return
 	}
-	if userEdit.IsSuperAdmin() {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify super admin")
+	if !canAdministerUser(user, userEdit) {
+		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify this user")
 		return
 	}
-	if userEdit.IsSameUser(user.Id) {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify yourself")
-		return
-	}
-	if request.GrantPermission && !user.HasPermission(request.Permission) {
-		sendError(w, http.StatusBadRequest, errorcodes.NoPermission, "Cannot grant rights the user does not have")
-		return
-	}
-	logging.LogUserEdit(userEdit, user)
-	if request.GrantPermission {
-		if !userEdit.HasPermission(request.Permission) {
-			userEdit.GrantPermission(request.Permission)
-			database.SaveUser(userEdit, false)
+	if request.IsPermissionSet {
+		if request.GrantPermission && !user.HasPermission(request.Permission) {
+			sendError(w, http.StatusBadRequest, errorcodes.NoPermission, "Cannot grant rights the user does not have")
+			return
 		}
-		return
+		// Symmetric with granting: revoking a bit the actor does not themselves hold would let a
+		// rank-2 user with only UserPermManageUsers strip an admin's capabilities one bit at a time.
+		if !request.GrantPermission && !user.HasPermission(request.Permission) {
+			sendError(w, http.StatusBadRequest, errorcodes.NoPermission, "Cannot revoke rights the user does not have")
+			return
+		}
 	}
-	if userEdit.HasPermission(request.Permission) {
-		userEdit.RemovePermission(request.Permission)
-		database.SaveUser(userEdit, false)
-		updateApiKeyPermsOnUserPermChange(userEdit.Id, request.Permission)
-	}
-}
-
-func apiChangeUserRank(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
-	request, ok := r.(*paramUserChangeRank)
-	if !ok {
-		panic("invalid parameter passed")
-	}
-	idStr := strconv.Itoa(request.Id)
-	apimutex.Lock(apimutex.TypeUser, idStr)
-	defer apimutex.Unlock(apimutex.TypeUser, idStr)
-
-	userEdit, ok := isValidUserForEditing(w, request.Id)
-	if !ok {
-		return
-	}
-	if userEdit.IsSameUser(user.Id) {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify yourself")
-		return
-	}
-	if userEdit.IsSuperAdmin() {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify super admin")
-		return
-	}
-	if request.NewRank == models.UserLevelAdmin && !user.IsAdmin() {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Only admins can promote users to admin")
+	if request.ResetPassword && userEdit.AuthProvider != models.AuthProviderInternal {
+		// Refuse to set or generate a password for a user not provisioned for internal auth. An
+		// admin minting a password for an SSO colleague's account would bypass the IdP entirely -
+		// its MFA and deprovisioning - the moment the row has a password hash, since a non-empty
+		// hash used to be the only gate IsCorrectUsernameAndPassword checked.
+		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot reset password of a user provisioned for external authentication")
 		return
 	}
 
-	userEdit.UserLevel = request.NewRank
-	switch request.NewRank {
-	case models.UserLevelAdmin:
-		userEdit.Permissions = models.UserPermissionAll
-	case models.UserLevelUser:
-		userEdit.Permissions = models.UserPermissionNone
-		updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermReplaceUploads)
-		updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermManageUsers)
-		updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermManageLogs)
-		updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermGuestUploads)
-	default:
-		sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "invalid rank sent")
-		return
+	if request.IsRankSet {
+		userEdit.UserLevel = request.NewRank
+		switch request.NewRank {
+		case models.UserLevelAdmin:
+			userEdit.Permissions = models.UserPermissionAll
+		case models.UserLevelUser:
+			userEdit.Permissions = models.UserPermissionNone
+			updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermReplaceUploads)
+			updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermManageUsers)
+			updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermManageLogs)
+			updateApiKeyPermsOnUserPermChange(userEdit.Id, models.UserPermGuestUploads)
+		}
 	}
+	if request.IsPermissionSet {
+		if request.GrantPermission {
+			if !userEdit.HasPermission(request.Permission) {
+				userEdit.GrantPermission(request.Permission)
+			}
+		} else if userEdit.HasPermission(request.Permission) {
+			userEdit.RemovePermission(request.Permission)
+			updateApiKeyPermsOnUserPermChange(userEdit.Id, request.Permission)
+		}
+	}
+	newPassword := ""
+	if request.ResetPassword {
+		userEdit.ResetPassword = true
+		if request.GenerateNewPassword {
+			newPassword = helper.GenerateRandomPassword(configuration.GetEnvironment().MinLengthPassword + 2)
+			userEdit.Password = configuration.HashPassword(newPassword, false, "")
+		}
+		database.DeleteAllSessionsByUser(userEdit.Id)
+	}
+
 	logging.LogUserEdit(userEdit, user)
 	database.SaveUser(userEdit, false)
+
+	if request.ResetPassword {
+		resultStruct := struct {
+			Result      string `json:"Result"`
+			NewPassword string `json:"password"`
+		}{Result: "OK", NewPassword: newPassword}
+		result, _ := json.Marshal(resultStruct)
+		_, _ = w.Write(result)
+	}
 }
 
 func updateApiKeyPermsOnUserPermChange(userId int, userPerm models.UserPermission) {
@@ -2226,47 +2244,6 @@ func shareExpiry(unlimitedTime bool, expireAt int64) int64 {
 	return expireAt
 }
 
-func apiResetPassword(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
-	request, ok := r.(*paramUserResetPw)
-	if !ok {
-		panic("invalid parameter passed")
-	}
-	userToEdit, ok := isValidUserForEditing(w, request.Id)
-	if !ok {
-		return
-	}
-	if userToEdit.IsSuperAdmin() {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot reset password of super admin")
-		return
-	}
-	if userToEdit.IsSameUser(user.Id) {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot reset password of yourself")
-		return
-	}
-	// Refuse to set or generate a password for a user not provisioned for internal auth. An
-	// admin minting a password for an SSO colleague's account would bypass the IdP entirely -
-	// its MFA and deprovisioning - the moment the row has a password hash, since a non-empty
-	// hash used to be the only gate IsCorrectUsernameAndPassword checked.
-	if userToEdit.AuthProvider != models.AuthProviderInternal {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot reset password of a user provisioned for external authentication")
-		return
-	}
-	userToEdit.ResetPassword = true
-	password := ""
-	if request.NewPassword {
-		password = helper.GenerateRandomPassword(configuration.GetEnvironment().MinLengthPassword + 2)
-		userToEdit.Password = configuration.HashPassword(password, false, "")
-	}
-	database.DeleteAllSessionsByUser(userToEdit.Id)
-	database.SaveUser(userToEdit, false)
-	resultStruct := struct {
-		Result      string `json:"Result"`
-		NewPassword string `json:"password"`
-	}{Result: "OK", NewPassword: password}
-	result, _ := json.Marshal(resultStruct)
-	_, _ = w.Write(result)
-}
-
 func apiDeleteUser(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
 	request, ok := r.(*paramUserDelete)
 	if !ok {
@@ -2318,7 +2295,10 @@ func apiDeleteUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	for _, file := range database.GetAllMetadata() {
 		if file.UserId == userToDelete.Id {
 			if request.DeleteFiles {
-				database.DeleteMetaData(file.Id)
+				// Routed through the normal dispose lifecycle rather than removing the metadata
+				// row directly: that skipped storage.DeleteFile's blob deletion, hotlink cleanup
+				// and share-token revocation entirely, and left the file's share grants behind.
+				storage.DeleteFile(file.Id, true)
 			} else {
 				file.UserId = user.Id
 				database.SaveMetaData(file)

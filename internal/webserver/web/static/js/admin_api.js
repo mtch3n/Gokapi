@@ -86,7 +86,7 @@ async function apiAuthModify(apiKey, permission, modifier) {
 
 
 async function apiAuthFriendlyName(apiKey, newName) {
-    const apiUrl = './api/auth/friendlyname';
+    const apiUrl = './api/auth/modify';
     const reqPerm = 'PERM_API_MOD';
 
     let token;
@@ -605,7 +605,7 @@ async function apiUserModify(userId, permission, modifier) {
 
 
 async function apiUserChangeRank(userId, newRank) {
-    const apiUrl = './api/user/changeRank';
+    const apiUrl = './api/user/modify';
     const reqPerm = 'PERM_MANAGE_USERS';
 
     let token;
@@ -676,7 +676,7 @@ async function apiUserDelete(id, deleteFiles) {
 
 
 async function apiUserResetPassword(id, generatePw) {
-    const apiUrl = './api/user/resetPassword';
+    const apiUrl = './api/user/modify';
     const reqPerm = 'PERM_MANAGE_USERS';
 
     let token;
@@ -694,6 +694,7 @@ async function apiUserResetPassword(id, generatePw) {
             'Content-Type': 'application/json',
             'apikey': token,
             'userid': id,
+            'resetPassword': true,
             'generateNewPassword': generatePw
         },
     };

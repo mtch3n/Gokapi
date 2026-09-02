@@ -208,12 +208,6 @@ var routes = []apiRoute{
 		RequestParser: &paramAuthCreate{},
 	},
 	{
-		Url:           "/auth/friendlyname",
-		ApiPerm:       models.ApiPermApiMod,
-		execution:     apiChangeFriendlyName,
-		RequestParser: &paramAuthFriendlyName{},
-	},
-	{
 		Url:           "/auth/modify",
 		ApiPerm:       models.ApiPermApiMod,
 		execution:     apiModifyApiKey,
@@ -265,12 +259,6 @@ var routes = []apiRoute{
 		RequestParser: &paramUserCreate{},
 	},
 	{
-		Url:           "/user/changeRank",
-		ApiPerm:       models.ApiPermManageUsers,
-		execution:     apiChangeUserRank,
-		RequestParser: &paramUserChangeRank{},
-	},
-	{
 		Url:           "/user/delete",
 		ApiPerm:       models.ApiPermManageUsers,
 		execution:     apiDeleteUser,
@@ -281,12 +269,6 @@ var routes = []apiRoute{
 		ApiPerm:       models.ApiPermManageUsers,
 		execution:     apiModifyUser,
 		RequestParser: &paramUserModify{},
-	},
-	{
-		Url:           "/user/resetPassword",
-		ApiPerm:       models.ApiPermManageUsers,
-		execution:     apiResetPassword,
-		RequestParser: &paramUserResetPw{},
 	},
 	{
 		Url:           "/uploadrequest/list",
@@ -651,36 +633,48 @@ type paramAuthCreate struct {
 
 func (p *paramAuthCreate) ProcessParameter(_ *http.Request) error { return nil }
 
-type paramAuthFriendlyName struct {
-	KeyId        string `header:"targetKey" required:"true"`
-	FriendlyName string `header:"friendlyName" required:"true" supportBase64:"true"`
-	foundHeaders map[string]bool
-}
-
-func (p *paramAuthFriendlyName) ProcessParameter(_ *http.Request) error { return nil }
-
+// paramAuthModify carries the merged /auth/modify payload: a permission grant/revoke and a
+// friendly-name rename used to each be their own endpoint (/auth/modify and
+// /auth/friendlyname), each rolling its own copy of the same ownership/permission guard - see
+// apiModifyApiKey. Either mutation, or both together, may be requested in one call; at least one
+// is required.
 type paramAuthModify struct {
-	KeyId              string `header:"targetKey" required:"true"`
-	permissionRaw      string `header:"permission" required:"true"`
-	permissionModifier string `header:"permissionModifier" required:"true"`
-	Permission         models.ApiPermission
-	GrantPermission    bool
-	foundHeaders       map[string]bool
+	KeyId                 string `header:"targetKey" required:"true"`
+	permissionRaw         string `header:"permission"`
+	permissionModifierRaw string `header:"permissionModifier"`
+	Permission            models.ApiPermission
+	GrantPermission       bool
+	IsPermissionSet       bool
+	FriendlyName          string `header:"friendlyName" supportBase64:"true"`
+	IsFriendlyNameSet     bool
+	foundHeaders          map[string]bool
 }
 
 func (p *paramAuthModify) ProcessParameter(_ *http.Request) error {
-	permission, err := models.ApiPermissionFromString(p.permissionRaw)
-	if err != nil {
-		return err
+	if p.foundHeaders["permission"] || p.foundHeaders["permissionModifier"] {
+		if !p.foundHeaders["permission"] || !p.foundHeaders["permissionModifier"] {
+			return errors.New("permission and permissionModifier must be provided together")
+		}
+		permission, err := models.ApiPermissionFromString(p.permissionRaw)
+		if err != nil {
+			return err
+		}
+		p.Permission = permission
+		switch strings.ToUpper(p.permissionModifierRaw) {
+		case "GRANT":
+			p.GrantPermission = true
+		case "REVOKE":
+			p.GrantPermission = false
+		default:
+			return errors.New("invalid permission modifier")
+		}
+		p.IsPermissionSet = true
 	}
-	p.Permission = permission
-	switch strings.ToUpper(p.permissionModifier) {
-	case "GRANT":
-		p.GrantPermission = true
-	case "REVOKE":
-		p.GrantPermission = false
-	default:
-		return errors.New("invalid permission modifier")
+	if p.foundHeaders["friendlyName"] {
+		p.IsFriendlyNameSet = true
+	}
+	if !p.IsPermissionSet && !p.IsFriendlyNameSet {
+		return errors.New("no mutation requested")
 	}
 	return nil
 }
@@ -734,25 +728,6 @@ func (p *paramUserCreate) ProcessParameter(_ *http.Request) error {
 	}
 }
 
-type paramUserChangeRank struct {
-	Id           int    `header:"userid" required:"true"`
-	newRankRaw   string `header:"newRank" required:"true"`
-	NewRank      models.UserRank
-	foundHeaders map[string]bool
-}
-
-func (p *paramUserChangeRank) ProcessParameter(_ *http.Request) error {
-	switch strings.ToLower(p.newRankRaw) {
-	case "admin":
-		p.NewRank = models.UserLevelAdmin
-	case "user":
-		p.NewRank = models.UserLevelUser
-	default:
-		return errors.New("invalid rank")
-	}
-	return nil
-}
-
 type paramUserDelete struct {
 	Id           int  `header:"userid" required:"true"`
 	DeleteFiles  bool `header:"deleteFiles"`
@@ -761,56 +736,80 @@ type paramUserDelete struct {
 
 func (p *paramUserDelete) ProcessParameter(_ *http.Request) error { return nil }
 
+// paramUserModify carries the merged /user/modify payload: a rank change, a permission
+// grant/revoke and a password reset used to each be their own endpoint (/user/changeRank,
+// /user/modify and /user/resetPassword), each rolling its own copy of the same
+// never-super-admin/never-yourself/must-outrank guard - see apiModifyUser and
+// canAdministerUser. Any one of the three mutations, or any combination of them, may be
+// requested in one call; at least one is required.
 type paramUserModify struct {
-	Id                 int `header:"userid" required:"true"`
-	Permission         models.UserPermission
-	permissionRaw      string `header:"userpermission" required:"true"`
-	permissionModifier string `header:"permissionModifier" required:"true"`
-	GrantPermission    bool
-	foundHeaders       map[string]bool
+	Id                    int    `header:"userid" required:"true"`
+	newRankRaw            string `header:"newRank"`
+	NewRank               models.UserRank
+	IsRankSet             bool
+	Permission            models.UserPermission
+	permissionRaw         string `header:"userpermission"`
+	permissionModifierRaw string `header:"permissionModifier"`
+	GrantPermission       bool
+	IsPermissionSet       bool
+	ResetPassword         bool `header:"resetPassword"`
+	GenerateNewPassword   bool `header:"generateNewPassword"`
+	foundHeaders          map[string]bool
 }
 
 func (p *paramUserModify) ProcessParameter(_ *http.Request) error {
-	switch strings.ToUpper(p.permissionRaw) {
-	case "PERM_REPLACE":
-		p.Permission = models.UserPermReplaceUploads
-	case "PERM_LIST":
-		p.Permission = models.UserPermListOtherUploads
-	case "PERM_EDIT":
-		p.Permission = models.UserPermEditOtherUploads
-	case "PERM_REPLACE_OTHER":
-		p.Permission = models.UserPermReplaceOtherUploads
-	case "PERM_DELETE":
-		p.Permission = models.UserPermDeleteOtherUploads
-	case "PERM_LOGS":
-		p.Permission = models.UserPermManageLogs
-	case "PERM_API":
-		p.Permission = models.UserPermManageApiKeys
-	case "PERM_USERS":
-		p.Permission = models.UserPermManageUsers
-	case "PERM_GUEST_UPLOAD":
-		p.Permission = models.UserPermGuestUploads
-	default:
-		return errors.New("invalid permission")
+	if p.foundHeaders["newRank"] {
+		switch strings.ToLower(p.newRankRaw) {
+		case "admin":
+			p.NewRank = models.UserLevelAdmin
+		case "user":
+			p.NewRank = models.UserLevelUser
+		default:
+			return errors.New("invalid rank")
+		}
+		p.IsRankSet = true
 	}
-	switch strings.ToUpper(p.permissionModifier) {
-	case "GRANT":
-		p.GrantPermission = true
-	case "REVOKE":
-		p.GrantPermission = false
-	default:
-		return errors.New("invalid permission modifier")
+	if p.foundHeaders["userpermission"] || p.foundHeaders["permissionModifier"] {
+		if !p.foundHeaders["userpermission"] || !p.foundHeaders["permissionModifier"] {
+			return errors.New("userpermission and permissionModifier must be provided together")
+		}
+		switch strings.ToUpper(p.permissionRaw) {
+		case "PERM_REPLACE":
+			p.Permission = models.UserPermReplaceUploads
+		case "PERM_LIST":
+			p.Permission = models.UserPermListOtherUploads
+		case "PERM_EDIT":
+			p.Permission = models.UserPermEditOtherUploads
+		case "PERM_REPLACE_OTHER":
+			p.Permission = models.UserPermReplaceOtherUploads
+		case "PERM_DELETE":
+			p.Permission = models.UserPermDeleteOtherUploads
+		case "PERM_LOGS":
+			p.Permission = models.UserPermManageLogs
+		case "PERM_API":
+			p.Permission = models.UserPermManageApiKeys
+		case "PERM_USERS":
+			p.Permission = models.UserPermManageUsers
+		case "PERM_GUEST_UPLOAD":
+			p.Permission = models.UserPermGuestUploads
+		default:
+			return errors.New("invalid permission")
+		}
+		switch strings.ToUpper(p.permissionModifierRaw) {
+		case "GRANT":
+			p.GrantPermission = true
+		case "REVOKE":
+			p.GrantPermission = false
+		default:
+			return errors.New("invalid permission modifier")
+		}
+		p.IsPermissionSet = true
+	}
+	if !p.IsRankSet && !p.IsPermissionSet && !p.ResetPassword {
+		return errors.New("no mutation requested")
 	}
 	return nil
 }
-
-type paramUserResetPw struct {
-	Id           int  `header:"userid"  required:"true"`
-	NewPassword  bool `header:"generateNewPassword"`
-	foundHeaders map[string]bool
-}
-
-func (p *paramUserResetPw) ProcessParameter(_ *http.Request) error { return nil }
 
 type paramE2eStore struct {
 	EncryptedInfo models.E2EInfoEncrypted
