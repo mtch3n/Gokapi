@@ -2174,10 +2174,12 @@
                         "type": "integer"
                       },
                       "membercount": {
-                        "type": "integer"
+                        "type": "integer",
+                        "description": "Number of files currently in this bundle that a recipient would actually receive. Excludes files pending deletion and files whose content has already been disposed of (expired or download allowance exhausted); those still appear in a file listing as history, but are not counted here."
                       },
                       "totalsizebytes": {
-                        "type": "integer"
+                        "type": "integer",
+                        "description": "Combined size in bytes of the files counted in membercount. Excludes pending-deletion and disposed members for the same reason membercount does."
                       }
                     }
                   }

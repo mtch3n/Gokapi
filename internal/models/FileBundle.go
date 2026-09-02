@@ -30,14 +30,17 @@ type FileBundle struct {
 	EncryptedSharePassword []byte `json:"-" redis:"EncryptedSharePassword"`
 }
 
-// Populate scans all files and returns those belonging to this bundle
+// Populate scans all files and returns those belonging to this bundle. The count and total size
+// it returns count only current members (see File.IsBundleMember) - a disposed member's bytes are
+// no longer stored, so counting it here would tell the owner the folder holds more than a
+// recipient can actually receive.
 func (b *FileBundle) Populate(files map[string]File) ([]File, int64, int) {
 	var memberFiles []File
 	var totalSize int64
 	count := 0
 
 	for _, file := range files {
-		if file.BundleId == b.Id && !file.IsPendingForDeletion() {
+		if file.IsBundleMember(b.Id) {
 			memberFiles = append(memberFiles, file)
 			totalSize += file.SizeBytes
 			count++
