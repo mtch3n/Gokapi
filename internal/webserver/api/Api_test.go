@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3258,6 +3260,120 @@ func TestChunkUploadRequestClosesOnLastFile(t *testing.T) {
 	saved2, ok := database.GetFileRequest(response2.FileRequest.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, saved2.Closed, false)
+}
+
+// newCappedFileRequest creates a file request with the given MaxFiles via apiURequestSave, the
+// same way an admin would create one, and returns its id and public api key.
+func newCappedFileRequest(t *testing.T, name string, maxFiles int) (id, apiKey string) {
+	admin := models.User{Id: idAdmin, UserLevel: models.UserLevelAdmin, Permissions: models.UserPermissionAll}
+	w := httptest.NewRecorder()
+	request := &paramURequestSave{
+		Name:          name,
+		MaxFiles:      maxFiles,
+		IsMaxFilesSet: true,
+		foundHeaders:  map[string]bool{},
+	}
+	apiURequestSave(w, request, admin, models.ApiKey{})
+	test.IsEqualInt(t, w.Code, 200)
+	var response struct {
+		FileRequest models.FileRequest
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	return response.FileRequest.Id, response.FileRequest.ApiKey
+}
+
+func reserveChunk(publicKey, frId string) *httptest.ResponseRecorder {
+	w, r := getRecorderWithBody("/uploadrequest/chunk/reserve", publicKey, "POST", []test.Header{
+		{Name: "id", Value: frId},
+	}, nil)
+	Process(w, r)
+	return w
+}
+
+// TestApiChunkReserveConcurrentReservesNeverExceedCap is an end-to-end check that hammering the
+// real apiChunkReserve handler concurrently for a capped file request never lets total successful
+// reservations exceed MaxFiles. It calls apiChunkReserve directly (not through
+// Process/getRecorderWithBody) so the concurrency lands on the handler itself rather than being
+// spread out by the per-request DB round trip in checkFileRequestAndApiKey.
+//
+// This complements, but does not replace,
+// chunkreservation.TestNewIfUnder_ConcurrentReservesNeverExceedLimit, which is the authoritative
+// failing-first regression test for bug 2: that test isolates NewIfUnder's count-check-and-insert
+// with no DB call in between, and reliably overshoots the limit once reverted to a separate
+// GetCount-then-New. Here, the DB read that precedes the count check adds enough jitter between
+// goroutines reaching the vulnerable window that this end-to-end version does not reliably
+// overshoot even against the pre-fix check-then-act code, so it is kept as a real-endpoint sanity
+// check rather than as fail-before-fix evidence.
+func TestApiChunkReserveConcurrentReservesNeverExceedCap(t *testing.T) {
+	const maxFiles = 5
+	const concurrency = 100
+	frId, apiKeyId := newCappedFileRequest(t, "concurrent-cap-request", maxFiles)
+	apiKey := models.ApiKey{Id: apiKeyId}
+
+	var wg sync.WaitGroup
+	var successCount int64
+	start := make(chan struct{})
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			w := httptest.NewRecorder()
+			apiChunkReserve(w, &paramChunkReserve{Id: frId}, models.User{}, apiKey)
+			if w.Code == http.StatusOK {
+				atomic.AddInt64(&successCount, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if successCount > maxFiles {
+		t.Fatalf("expected at most %d successful reservations out of %d concurrent attempts, got %d", maxFiles, concurrency, successCount)
+	}
+}
+
+// TestApiChunkReserveUnlimitedReservesFreely checks that a file request with no MaxFiles cap
+// (IsUnlimitedFiles) can still reserve as many chunks as needed - the negative-limit "no cap"
+// path passed to chunkreservation.NewIfUnder must not become accidentally restrictive.
+func TestApiChunkReserveUnlimitedReservesFreely(t *testing.T) {
+	frId, publicKey := newCappedFileRequest(t, "unlimited-reserve-request", 0)
+
+	for i := 0; i < 20; i++ {
+		w := reserveChunk(publicKey, frId)
+		test.IsEqualInt(t, w.Code, 200)
+	}
+}
+
+// TestApiChunkReserveRateLimitAppliesToCappedRequest is the failing-first regression test for bug
+// 1 in apiChunkReserve: the rate limit check used to sit inside the `IsUnlimitedFiles()` branch,
+// so a file request WITH a MaxFiles cap got no rate limiting on /uploadrequest/chunk/reserve at
+// all - the one case with a finite budget worth protecting went unthrottled, while the unlimited
+// case (nothing to exhaust) was the only one throttled. Real rate limiting is disabled for this
+// whole test binary (see TestMain), so it is switched on only for the duration of this test,
+// against a file request id no other test uses, so as not to disturb - or be disturbed by -
+// shared limiter state.
+func TestApiChunkReserveRateLimitAppliesToCappedRequest(t *testing.T) {
+	ratelimiter.SetUnitTestMode(false)
+	t.Cleanup(func() { ratelimiter.SetUnitTestMode(true) })
+
+	// MaxFiles is well above the rate limiter's burst of 4, so the file cap itself never
+	// triggers first and any 429 seen below can only come from the rate limiter.
+	frId, publicKey := newCappedFileRequest(t, "rate-limit-capped-request", 50)
+
+	sawRateLimited := false
+	for i := 0; i < 20; i++ {
+		w := reserveChunk(publicKey, frId)
+		if w.Code == http.StatusTooManyRequests {
+			sawRateLimited = true
+			break
+		}
+		test.IsEqualInt(t, w.Code, 200)
+	}
+
+	if !sawRateLimited {
+		t.Fatal("expected a burst of reserve calls against a capped file request to eventually be rate-limited with 429")
+	}
 }
 
 func TestFilesDuplicateSanitisation(t *testing.T) {

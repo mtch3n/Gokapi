@@ -863,15 +863,23 @@ func apiChunkReserve(w http.ResponseWriter, r requestParser, _ models.User, apik
 		sendError(w, status, errorCode, errorMsg)
 		return
 	}
-	if fileRequest.FilesRemaining() <= 0 && !fileRequest.IsUnlimitedFiles() {
-		sendError(w, http.StatusBadRequest, errorcodes.CannotUploadMoreFiles, "No more files can be uploaded for this file request")
-		return
-	}
-	if fileRequest.IsUnlimitedFiles() && !ratelimiter.IsAllowedNewUuid(fileRequest.Id) {
+	if !ratelimiter.IsAllowedNewUuid(fileRequest.Id) {
 		sendError(w, http.StatusTooManyRequests, errorcodes.RateLimited, "Too many reservations for this file request. Please wait a few seconds before reserving a new uuid.")
 		return
 	}
-	uuid := chunkreservation.New(fileRequest.Id)
+	limit := -1
+	if !fileRequest.IsUnlimitedFiles() {
+		// Reservations count against the cap before they turn into an uploaded file (see
+		// chunkreservation.SetUploading), so the budget for new reservations is the cap minus
+		// what has already been uploaded - not FilesRemaining, which also subtracts the
+		// reservation count NewIfUnder is about to recount atomically itself.
+		limit = fileRequest.MaxFiles - fileRequest.UploadedFiles
+	}
+	uuid, ok := chunkreservation.NewIfUnder(fileRequest.Id, limit)
+	if !ok {
+		sendError(w, http.StatusBadRequest, errorcodes.CannotUploadMoreFiles, "No more files can be uploaded for this file request")
+		return
+	}
 	result, err := json.Marshal(struct {
 		Result string `json:"Result"`
 		Uuid   string `json:"Uuid"`

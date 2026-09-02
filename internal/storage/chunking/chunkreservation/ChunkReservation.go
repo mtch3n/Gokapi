@@ -27,10 +27,19 @@ func GetCount(id string) int {
 	return length
 }
 
-// New creates a new chunk reservation
-func New(id string) string {
+// NewIfUnder creates a new chunk reservation for id, unless limit reservations are already held
+// for it. The count and the creation happen under a single lock acquisition, so concurrent
+// callers cannot all observe a count below limit before any of them commits - unlike a separate
+// GetCount then New, which race and can all succeed. A negative limit means no cap is enforced.
+// Returns the new reservation's uuid and true, or an empty string and false if id is already at
+// limit.
+func NewIfUnder(id string, limit int) (string, bool) {
 	reservationMutex.Lock()
 	defer reservationMutex.Unlock()
+
+	if limit >= 0 && len(reservedChunks[id]) >= limit {
+		return "", false
+	}
 
 	uuid := helper.GenerateRandomString(32)
 	if reservedChunks[id] == nil {
@@ -42,7 +51,7 @@ func New(id string) string {
 	}
 
 	runGcOnce.Do(func() { go cleanUp(true) })
-	return uuid
+	return uuid, true
 }
 
 // SetComplete marks a chunk as complete or cancelled
