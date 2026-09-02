@@ -230,14 +230,17 @@ func testInvalidUserId(t *testing.T, url, apiKey string, validHeaders []test.Hea
 		},
 		{
 			Value: strconv.Itoa(idUser),
-			ErrorMessages: []string{`{"Result":"error","ErrorMessage":"Cannot modify yourself","ErrorCode":19}`,
+			// "Cannot modify this user" covers apiChangeUserRank and apiModifyUser, which share
+			// canAdministerUser's single message for both the self and super-admin cases; the
+			// other two share nothing with it and keep their own distinct wording.
+			ErrorMessages: []string{`{"Result":"error","ErrorMessage":"Cannot modify this user","ErrorCode":19}`,
 				`{"Result":"error","ErrorMessage":"Cannot delete yourself","ErrorCode":19}`,
 				`{"Result":"error","ErrorMessage":"Cannot reset password of yourself","ErrorCode":19}`},
 			StatusCode: 400,
 		},
 		{
 			Value: strconv.Itoa(idSuperAdmin),
-			ErrorMessages: []string{`{"Result":"error","ErrorMessage":"Cannot modify super admin","ErrorCode":19}`,
+			ErrorMessages: []string{`{"Result":"error","ErrorMessage":"Cannot modify this user","ErrorCode":19}`,
 				`{"Result":"error","ErrorMessage":"Cannot delete super admin","ErrorCode":19}`,
 				`{"Result":"error","ErrorMessage":"Cannot reset password of super admin","ErrorCode":19}`},
 			StatusCode: 400,
@@ -627,10 +630,17 @@ func TestUserChangeRank(t *testing.T) {
 	}
 	testInvalidParameters(t, apiUrl, apiKey.Id, validHeaders, headerNewRank, invalidParameter)
 
+	// Demoting an admin requires outranking them, and only the super admin does - see
+	// canAdministerUser and TestAuthorisationCannotDemoteAdminWithoutRank for the rank-2 case
+	// being refused. The legitimate path below therefore acts as the super admin rather than as
+	// this apiKey's owner (idUser, a plain user).
+	setPermissionApikey(t, idApiKeySuperAdmin, models.ApiPermManageUsers)
+	defer removePermissionApikey(t, idApiKeySuperAdmin, models.ApiPermManageUsers)
+
 	user, ok := database.GetUser(idAdmin)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqual(t, user.UserLevel, models.UserLevelAdmin)
-	w, r := getRecorder(apiUrl, apiKey.Id, []test.Header{{
+	w, r := getRecorder(apiUrl, idApiKeySuperAdmin, []test.Header{{
 		Name:  headerUserId,
 		Value: strconv.Itoa(idAdmin),
 	}, {
@@ -677,6 +687,168 @@ func TestUserChangeRank(t *testing.T) {
 
 	defer test.ExpectPanic(t)
 	apiChangeUserRank(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
+}
+
+// TestAuthorisationCannotDemoteAdminWithoutRank verifies that a rank-2 user holding only
+// UserPermManageUsers cannot demote an admin: canAdministerUser requires the actor to outrank
+// the target, and a rank-2 actor never outranks a rank-1 admin. Before canAdministerUser,
+// apiChangeUserRank guarded promotion but not demotion, so this exact call succeeded and also
+// reset the admin's permissions to UserPermissionNone.
+func TestAuthorisationCannotDemoteAdminWithoutRank(t *testing.T) {
+	actorKey := generateNewKey(false, idUser, "", "")
+	setPermissionApikey(t, actorKey.Id, models.ApiPermManageUsers)
+	grantUserPermission(t, idUser, models.UserPermManageUsers)
+	defer removeUserPermission(t, idUser, models.UserPermManageUsers)
+
+	admin, ok := database.GetUser(idAdmin)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, admin.UserLevel, models.UserLevelAdmin)
+
+	w, r := getRecorder("/user/changeRank", actorKey.Id, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(idAdmin),
+	}, {
+		Name:  "newRank",
+		Value: "USER",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"Cannot modify this user","ErrorCode":19}`)
+
+	admin, ok = database.GetUser(idAdmin)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, admin.UserLevel, models.UserLevelAdmin)
+	test.IsEqual(t, admin.Permissions, models.UserPermissionAll)
+}
+
+// TestAuthorisationCannotRevokeUnheldPermission verifies that revoking a permission requires the
+// actor to hold it themselves, symmetric with granting one. The actor here (idAdmin) outranks the
+// target (idUser), so canAdministerUser lets the call through - the block has to come from the
+// revoke-side check. Before this fix, apiModifyUser's revoke branch had no caller check at all,
+// so any caller with UserPermManageUsers could strip bits an admin themselves did not hold.
+func TestAuthorisationCannotRevokeUnheldPermission(t *testing.T) {
+	setPermissionApikey(t, idApiKeyAdmin, models.ApiPermManageUsers)
+	defer removePermissionApikey(t, idApiKeyAdmin, models.ApiPermManageUsers)
+
+	removeUserPermission(t, idAdmin, models.UserPermGuestUploads)
+	defer grantUserPermission(t, idAdmin, models.UserPermGuestUploads)
+	grantUserPermission(t, idUser, models.UserPermGuestUploads)
+	defer removeUserPermission(t, idUser, models.UserPermGuestUploads)
+
+	w, r := getRecorder("/user/modify", idApiKeyAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(idUser),
+	}, {
+		Name:  "userpermission",
+		Value: "PERM_GUEST_UPLOAD",
+	}, {
+		Name:  "permissionModifier",
+		Value: "REVOKE",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"Cannot revoke rights the user does not have","ErrorCode":6}`)
+
+	target, ok := database.GetUser(idUser)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, target.HasPermission(models.UserPermGuestUploads), true)
+}
+
+// TestAuthorisationCannotTouchSuperAdminApiKey verifies that UserPermManageApiKeys does not let a
+// caller reach the super admin's own API key, for both deletion and modification. Before this
+// fix, apiDeleteKey and apiModifyApiKey were the only user-editing endpoints in this file that
+// never checked IsSuperAdmin, so a rank-2 user granted only UserPermManageApiKeys could delete or
+// reconfigure the super admin's key.
+func TestAuthorisationCannotTouchSuperAdminApiKey(t *testing.T) {
+	actorKey := generateNewKey(false, idUser, "", "")
+	setPermissionApikey(t, actorKey.Id, models.ApiPermApiMod)
+	grantUserPermission(t, idUser, models.UserPermManageApiKeys)
+	defer removeUserPermission(t, idUser, models.UserPermManageApiKeys)
+
+	w, r := getRecorder("/auth/delete", actorKey.Id, []test.Header{{
+		Name:  "targetKey",
+		Value: idApiKeySuperAdmin,
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+	_, ok := database.GetApiKey(idApiKeySuperAdmin)
+	test.IsEqualBool(t, ok, true)
+
+	w, r = getRecorder("/auth/modify", actorKey.Id, []test.Header{{
+		Name:  "targetKey",
+		Value: idApiKeySuperAdmin,
+	}, {
+		Name:  "permission",
+		Value: "PERM_VIEW",
+	}, {
+		Name:  "permissionModifier",
+		Value: "GRANT",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+	key, ok := database.GetApiKey(idApiKeySuperAdmin)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, key.HasPermission(models.ApiPermView), false)
+}
+
+// TestAuthorisationAdminCanAdministerUser is the no-over-tightening counterpart to the three
+// tests above: an admin acting on a plain user must still be able to grant and revoke a
+// permission and to promote them, none of which canAdministerUser's stricter rank check affects,
+// since an admin always outranks a plain user.
+func TestAuthorisationAdminCanAdministerUser(t *testing.T) {
+	setPermissionApikey(t, idApiKeyAdmin, models.ApiPermManageUsers)
+	defer removePermissionApikey(t, idApiKeyAdmin, models.ApiPermManageUsers)
+
+	w, r := getRecorder("/user/modify", idApiKeyAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(idUser),
+	}, {
+		Name:  "userpermission",
+		Value: "PERM_REPLACE",
+	}, {
+		Name:  "permissionModifier",
+		Value: "GRANT",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	user, ok := database.GetUser(idUser)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, user.HasPermission(models.UserPermReplaceUploads), true)
+
+	w, r = getRecorder("/user/modify", idApiKeyAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(idUser),
+	}, {
+		Name:  "userpermission",
+		Value: "PERM_REPLACE",
+	}, {
+		Name:  "permissionModifier",
+		Value: "REVOKE",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	user, ok = database.GetUser(idUser)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, user.HasPermission(models.UserPermReplaceUploads), false)
+
+	w, r = getRecorder("/user/changeRank", idApiKeyAdmin, []test.Header{{
+		Name:  "userid",
+		Value: strconv.Itoa(idUser),
+	}, {
+		Name:  "newRank",
+		Value: "ADMIN",
+	}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	user, ok = database.GetUser(idUser)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqual(t, user.UserLevel, models.UserLevelAdmin)
+
+	// Restore the fixture directly: an admin no longer outranks the peer admin it just created
+	// (only the super admin does), so demoting it back is not exercised here.
+	user.UserLevel = models.UserLevelUser
+	user.Permissions = models.UserPermissionNone
+	database.SaveUser(user, false)
 }
 
 func TestUserDelete(t *testing.T) {

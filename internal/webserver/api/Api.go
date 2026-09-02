@@ -238,6 +238,12 @@ func apiDeleteKey(w http.ResponseWriter, r requestParser, user models.User, _ mo
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
 		return
 	}
+	// UserPermManageApiKeys is grantable to a plain user, so without this the super admin's own
+	// key would be the one key such a user could still reach.
+	if apiKeyOwner.Id != user.Id && apiKeyOwner.IsSuperAdmin() {
+		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
+		return
+	}
 	database.DeleteApiKey(apiKey.Id)
 	logging.LogApiKeyDeleted(apiKey, user)
 }
@@ -256,6 +262,12 @@ func apiModifyApiKey(w http.ResponseWriter, r requestParser, user models.User, _
 		return
 	}
 	if apiKeyOwner.Id != user.Id && !user.HasPermission(models.UserPermManageApiKeys) {
+		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
+		return
+	}
+	// UserPermManageApiKeys is grantable to a plain user, so without this the super admin's own
+	// key would be the one key such a user could still reach.
+	if apiKeyOwner.Id != user.Id && apiKeyOwner.IsSuperAdmin() {
 		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to delete this API key")
 		return
 	}
@@ -315,6 +327,22 @@ func isValidUserForEditing(w http.ResponseWriter, userId int) (models.User, bool
 		return models.User{}, false
 	}
 	return user, true
+}
+
+// canAdministerUser reports whether actor may mutate target's rank or permissions: never the
+// super admin, never yourself, and actor must outrank target. UserRank is lower for a higher
+// rank (super admin 0, admin 1, user 2), so outranking is a strict less-than - a rank-2 user
+// holding UserPermManageUsers can therefore never administer another rank-2 user, let alone an
+// admin, closing the gap where such a user could previously demote an admin or strip their
+// permissions one bit at a time.
+func canAdministerUser(actor, target models.User) bool {
+	if target.IsSuperAdmin() {
+		return false
+	}
+	if target.IsSameUser(actor.Id) {
+		return false
+	}
+	return actor.UserLevel < target.UserLevel
 }
 
 func apiCreateApiKey(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
@@ -1495,16 +1523,18 @@ func apiModifyUser(w http.ResponseWriter, r requestParser, user models.User, _ m
 	if !ok {
 		return
 	}
-	if userEdit.IsSuperAdmin() {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify super admin")
-		return
-	}
-	if userEdit.IsSameUser(user.Id) {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify yourself")
+	if !canAdministerUser(user, userEdit) {
+		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify this user")
 		return
 	}
 	if request.GrantPermission && !user.HasPermission(request.Permission) {
 		sendError(w, http.StatusBadRequest, errorcodes.NoPermission, "Cannot grant rights the user does not have")
+		return
+	}
+	// Symmetric with granting: revoking a bit the actor does not themselves hold would let a
+	// rank-2 user with only UserPermManageUsers strip an admin's capabilities one bit at a time.
+	if !request.GrantPermission && !user.HasPermission(request.Permission) {
+		sendError(w, http.StatusBadRequest, errorcodes.NoPermission, "Cannot revoke rights the user does not have")
 		return
 	}
 	logging.LogUserEdit(userEdit, user)
@@ -1535,16 +1565,8 @@ func apiChangeUserRank(w http.ResponseWriter, r requestParser, user models.User,
 	if !ok {
 		return
 	}
-	if userEdit.IsSameUser(user.Id) {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify yourself")
-		return
-	}
-	if userEdit.IsSuperAdmin() {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify super admin")
-		return
-	}
-	if request.NewRank == models.UserLevelAdmin && !user.IsAdmin() {
-		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Only admins can promote users to admin")
+	if !canAdministerUser(user, userEdit) {
+		sendError(w, http.StatusBadRequest, errorcodes.ResourceCanNotBeEdited, "Cannot modify this user")
 		return
 	}
 
