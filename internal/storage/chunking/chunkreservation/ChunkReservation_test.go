@@ -1,6 +1,8 @@
 package chunkreservation
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -11,43 +13,50 @@ func resetStateBlockCleanup() {
 	reservationMutex.Lock()
 	reservedChunks = make(map[string]map[string]reservation)
 	runGcOnce.Do(func() {
-		//prevent New from spawning the cleanup goroutine
+		//prevent NewIfUnder from spawning the cleanup goroutine
 	})
 	reservationMutex.Unlock()
 }
 
-// TestNew_ReturnsNonEmptyUuid checks that New returns a non-empty uuid string.
-func TestNew_ReturnsNonEmptyUuid(t *testing.T) {
+// newUnlimited creates a reservation with no cap, for tests that only care about reservation
+// bookkeeping and not about NewIfUnder's limit behaviour (covered separately below).
+func newUnlimited(id string) string {
+	uuid, _ := NewIfUnder(id, -1)
+	return uuid
+}
+
+// TestNewIfUnder_ReturnsNonEmptyUuid checks that newUnlimited (backed by NewIfUnder) returns a non-empty uuid string.
+func TestNewIfUnder_ReturnsNonEmptyUuid(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	if uuid == "" {
 		t.Error("expected non-empty uuid, got empty string")
 	}
 }
 
-// TestNew_UuidLength checks that the generated uuid has the expected length (32 chars).
-func TestNew_UuidLength(t *testing.T) {
+// TestNewIfUnder_UuidLength checks that the generated uuid has the expected length (32 chars).
+func TestNewIfUnder_UuidLength(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	if len(uuid) != 32 {
 		t.Errorf("expected uuid length 32, got %d", len(uuid))
 	}
 }
 
-// TestNew_UniqueUuids checks that two calls produce different uuids.
-func TestNew_UniqueUuids(t *testing.T) {
+// TestNewIfUnder_UniqueUuids checks that two calls produce different uuids.
+func TestNewIfUnder_UniqueUuids(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid1 := New("file1")
-	uuid2 := New("file1")
+	uuid1 := newUnlimited("file1")
+	uuid2 := newUnlimited("file1")
 	if uuid1 == uuid2 {
 		t.Error("expected unique uuids, got identical values")
 	}
 }
 
-// TestNew_StoresReservation checks that New stores the reservation in the map.
-func TestNew_StoresReservation(t *testing.T) {
+// TestNewIfUnder_StoresReservation checks that newUnlimited (backed by NewIfUnder) stores the reservation in the map.
+func TestNewIfUnder_StoresReservation(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	reservationMutex.RLock()
 	_, ok := reservedChunks["file1"][uuid]
 	reservationMutex.RUnlock()
@@ -56,11 +65,11 @@ func TestNew_StoresReservation(t *testing.T) {
 	}
 }
 
-// TestNew_ExpiryIsInFuture checks that the reservation expiry is in the future.
-func TestNew_ExpiryIsInFuture(t *testing.T) {
+// TestNewIfUnder_ExpiryIsInFuture checks that the reservation expiry is in the future.
+func TestNewIfUnder_ExpiryIsInFuture(t *testing.T) {
 	resetStateBlockCleanup()
 	now := time.Now().Unix()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	reservationMutex.RLock()
 	expiry := reservedChunks["file1"][uuid].Expiry
 	reservationMutex.RUnlock()
@@ -69,11 +78,11 @@ func TestNew_ExpiryIsInFuture(t *testing.T) {
 	}
 }
 
-// TestNew_ExpiryMatchesConstant checks that the expiry is set to now + timeReservationWithoutUpload.
-func TestNew_ExpiryMatchesConstant(t *testing.T) {
+// TestNewIfUnder_ExpiryMatchesConstant checks that the expiry is set to now + timeReservationWithoutUpload.
+func TestNewIfUnder_ExpiryMatchesConstant(t *testing.T) {
 	resetStateBlockCleanup()
 	now := time.Now().Unix()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	reservationMutex.RLock()
 	expiry := reservedChunks["file1"][uuid].Expiry
 	reservationMutex.RUnlock()
@@ -84,10 +93,10 @@ func TestNew_ExpiryMatchesConstant(t *testing.T) {
 	}
 }
 
-// TestNew_UuidStoredOnReservation checks that the uuid field on the reservation matches the returned uuid.
-func TestNew_UuidStoredOnReservation(t *testing.T) {
+// TestNewIfUnder_UuidStoredOnReservation checks that the uuid field on the reservation matches the returned uuid.
+func TestNewIfUnder_UuidStoredOnReservation(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	reservationMutex.RLock()
 	r := reservedChunks["file1"][uuid]
 	reservationMutex.RUnlock()
@@ -96,10 +105,10 @@ func TestNew_UuidStoredOnReservation(t *testing.T) {
 	}
 }
 
-// TestNew_InitialisesMapForNewId checks that New creates the inner map for a new file id.
-func TestNew_InitialisesMapForNewId(t *testing.T) {
+// TestNewIfUnder_InitialisesMapForNewId checks that newUnlimited (backed by NewIfUnder) creates the inner map for a new file id.
+func TestNewIfUnder_InitialisesMapForNewId(t *testing.T) {
 	resetStateBlockCleanup()
-	New("newfile")
+	newUnlimited("newfile")
 	reservationMutex.RLock()
 	_, ok := reservedChunks["newfile"]
 	reservationMutex.RUnlock()
@@ -108,12 +117,12 @@ func TestNew_InitialisesMapForNewId(t *testing.T) {
 	}
 }
 
-// TestNew_MultipleIdsAreIndependent checks that reservations for different ids don't interfere.
-func TestNew_MultipleIdsAreIndependent(t *testing.T) {
+// TestNewIfUnder_MultipleIdsAreIndependent checks that reservations for different ids don't interfere.
+func TestNewIfUnder_MultipleIdsAreIndependent(t *testing.T) {
 	resetStateBlockCleanup()
-	New("fileA")
-	New("fileB")
-	New("fileB")
+	newUnlimited("fileA")
+	newUnlimited("fileB")
+	newUnlimited("fileB")
 	if GetCount("fileA") != 1 {
 		t.Errorf("expected 1 reservation for fileA, got %d", GetCount("fileA"))
 	}
@@ -133,9 +142,9 @@ func TestGetCount_ReturnsZeroForUnknownId(t *testing.T) {
 // TestGetCount_ReturnsCorrectCount checks that GetCount reflects the number of active reservations.
 func TestGetCount_ReturnsCorrectCount(t *testing.T) {
 	resetStateBlockCleanup()
-	New("file1")
-	New("file1")
-	New("file1")
+	newUnlimited("file1")
+	newUnlimited("file1")
+	newUnlimited("file1")
 	if count := GetCount("file1"); count != 3 {
 		t.Errorf("expected 3, got %d", count)
 	}
@@ -144,7 +153,7 @@ func TestGetCount_ReturnsCorrectCount(t *testing.T) {
 // TestSetComplete_RemovesReservation checks that SetComplete deletes the reservation.
 func TestSetComplete_RemovesReservation(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	SetComplete("file1", uuid)
 	reservationMutex.RLock()
 	_, ok := reservedChunks["file1"][uuid]
@@ -157,8 +166,8 @@ func TestSetComplete_RemovesReservation(t *testing.T) {
 // TestSetComplete_DecreasesCount checks that GetCount decreases after SetComplete.
 func TestSetComplete_DecreasesCount(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid := New("file1")
-	New("file1")
+	uuid := newUnlimited("file1")
+	newUnlimited("file1")
 	SetComplete("file1", uuid)
 	if count := GetCount("file1"); count != 1 {
 		t.Errorf("expected count 1 after SetComplete, got %d", count)
@@ -179,7 +188,7 @@ func TestSetComplete_UnknownIdDoesNotPanic(t *testing.T) {
 // TestSetUploading_ReturnsTrueForValidReservation checks the happy path.
 func TestSetUploading_ReturnsTrueForValidReservation(t *testing.T) {
 	resetStateBlockCleanup()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	if !SetUploading("file1", uuid) {
 		t.Error("expected SetUploading to return true for a valid reservation")
 	}
@@ -189,7 +198,7 @@ func TestSetUploading_ReturnsTrueForValidReservation(t *testing.T) {
 func TestSetUploading_ExtendsExpiry(t *testing.T) {
 	resetStateBlockCleanup()
 	now := time.Now().Unix()
-	uuid := New("file1")
+	uuid := newUnlimited("file1")
 	SetUploading("file1", uuid)
 	reservationMutex.RLock()
 	expiry := reservedChunks["file1"][uuid].Expiry
@@ -211,7 +220,7 @@ func TestSetUploading_ReturnsFalseForUnknownId(t *testing.T) {
 // TestSetUploading_ReturnsFalseForUnknownUuid checks that SetUploading returns false for unknown uuid.
 func TestSetUploading_ReturnsFalseForUnknownUuid(t *testing.T) {
 	resetStateBlockCleanup()
-	New("file1")
+	newUnlimited("file1")
 	if SetUploading("file1", "not-a-real-uuid") {
 		t.Error("expected SetUploading to return false for unknown uuid")
 	}
@@ -303,4 +312,65 @@ func TestCleanup_PeriodicRunsAfterFiveMinutes(t *testing.T) {
 			t.Error("expected reservation to be removed after periodic cleanup ran")
 		}
 	})
+}
+
+// TestNewIfUnder_RejectsAtLimit checks that a call past the limit is rejected and returns an
+// empty uuid, once existing reservations have reached it.
+func TestNewIfUnder_RejectsAtLimit(t *testing.T) {
+	resetStateBlockCleanup()
+	uuid, ok := NewIfUnder("file1", 1)
+	if !ok || uuid == "" {
+		t.Fatalf("expected first reservation to succeed, got ok=%v uuid=%q", ok, uuid)
+	}
+	uuid2, ok2 := NewIfUnder("file1", 1)
+	if ok2 || uuid2 != "" {
+		t.Errorf("expected second reservation to be rejected at limit 1, got ok=%v uuid=%q", ok2, uuid2)
+	}
+}
+
+// TestNewIfUnder_NegativeLimitIsUnlimited checks that a negative limit never rejects, the
+// behaviour apiChunkReserve relies on for a file request with no MaxFiles cap.
+func TestNewIfUnder_NegativeLimitIsUnlimited(t *testing.T) {
+	resetStateBlockCleanup()
+	for i := 0; i < 50; i++ {
+		uuid, ok := NewIfUnder("file1", -1)
+		if !ok || uuid == "" {
+			t.Fatalf("attempt %d: expected unlimited reservation to succeed, got ok=%v uuid=%q", i, ok, uuid)
+		}
+	}
+	if count := GetCount("file1"); count != 50 {
+		t.Errorf("expected 50 reservations, got %d", count)
+	}
+}
+
+// TestNewIfUnder_ConcurrentReservesNeverExceedLimit is the failing-first regression test for the
+// check-then-act race this function replaces: a separate GetCount then New let concurrent callers
+// all read the count below the limit before any of them had committed a reservation, so all of
+// them could succeed regardless of the limit. NewIfUnder holds the mutex across both the count
+// check and the insert, so no matter how much concurrency is thrown at it, at most `limit`
+// reservations must ever be created for the same id.
+func TestNewIfUnder_ConcurrentReservesNeverExceedLimit(t *testing.T) {
+	resetStateBlockCleanup()
+	const limit = 5
+	const concurrency = 100
+
+	var wg sync.WaitGroup
+	var succeeded int64
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			if _, ok := NewIfUnder("capped-file", limit); ok {
+				atomic.AddInt64(&succeeded, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if succeeded > limit {
+		t.Errorf("expected at most %d successful reservations out of %d concurrent attempts, got %d", limit, concurrency, succeeded)
+	}
+	if count := GetCount("capped-file"); count != int(succeeded) {
+		t.Errorf("expected stored reservation count %d to match successful count %d", count, succeeded)
+	}
 }

@@ -610,7 +610,7 @@
             "description": "Invalid API key provided for authentication or API key does not have the required permission"
           },
           "429": {
-            "description": "If too many chunks are currently requested, the caller has to wait a couple of seconds and try again. The rate limit is only for file requests that are not limited in file count"
+            "description": "If too many chunks are currently requested, the caller has to wait a couple of seconds and try again. The rate limit now also applies to file requests with a MaxFiles cap, not only to unlimited ones."
           }
         }
       }
