@@ -1977,15 +1977,6 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The bundle download as a whole is metered once per request, not once per member,
-	// since the restriction and the allowance are on the bundle. Checked and consumed
-	// first, before any member's own counter is touched, so an exhausted bundle allowance
-	// never burns a member's own allowance for a file that is never delivered.
-	if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
-		respondPubApiNotFound(w, r)
-		return
-	}
-
 	// Serve single file raw, or multiple files as zip. Every member of requestedMembers is
 	// guaranteed servable at this point (checked above), so reaching this branch with
 	// exactly one never means filtering silently narrowed a larger set down to one - it
@@ -1996,6 +1987,15 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		// A member that is itself identity-restricted spends its own recipient
 		// allowance, same as a direct single-file download would.
 		if !consumeShareDownload(r, models.ShareResourceFile, file.Id) {
+			respondPubApiNotFound(w, r)
+			return
+		}
+		// The bundle download as a whole is metered once per request, not once per member,
+		// since the restriction and the allowance are on the bundle. Consumed last, after the
+		// member's own allowance above, and immediately before serveBundleFile can start
+		// writing bytes - so a failure in anything above (the member's own allowance
+		// exhausted) never burns the bundle allowance for a download that is never delivered.
+		if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
 			respondPubApiNotFound(w, r)
 			return
 		}
@@ -2053,6 +2053,21 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filesToServeInZip = append(filesToServeInZip, file)
+	}
+
+	// The bundle download as a whole is metered once per request, not once per member, since
+	// the restriction and the allowance are on the bundle. Consumed last, after every member
+	// above has been rechecked and metered successfully, and immediately before
+	// ServeFilesAsZip can start writing bytes - so a mid-loop failure (a member's own
+	// allowance exhausted by a parallel download) never burns the bundle allowance for an
+	// archive that is never delivered. This does not cover a failure once the zip stream
+	// itself has started: ServeFilesAsZip writes the response header before its first entry,
+	// so a failure partway through streaming (a storage read error, an aborted connection)
+	// happens after the bundle allowance below is already spent, with no refund primitive to
+	// undo it.
+	if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
+		respondPubApiNotFound(w, r)
+		return
 	}
 
 	// Serve as zip - keep the audit logging that ServeFilesAsZip already performs per entry

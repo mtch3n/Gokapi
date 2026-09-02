@@ -5277,6 +5277,59 @@ func TestCollaboratorCanSeeReceivedFiles(t *testing.T) {
 	test.IsEqualInt(t, code, 401)
 }
 
+// TestResolveShareResourceRefusesReceivedFile is a regression test for a gap in
+// resolveShareResource's doc comment claim of applying "the same liveness check" as the public
+// download path: liveness (expired/exhausted/pending deletion) was checked, but not whether the
+// file was ever received through a file request in the first place, rather than uploaded
+// directly by its owner.
+//
+// A file received through a file request carries UploadRequestId and belongs to the request
+// OWNER (see collaboratorFixture and models.File.IsFileRequest), so ownership alone passes
+// cleanly and ownership was, before this fix, the only thing resolveShareResource checked beyond
+// liveness. Every public consumption route - showDownload, showHotlink, serveFile, and the two
+// pubApi JSON handlers - refuses such a file outright via the same `!ok || file.IsFileRequest()`
+// guard that storage.GetFile's own contract documents. Before the fix, an owner could still grant
+// a recipient access to a received file: mail would go out, and the recipient would land on a
+// dead link that the public route had already 404'd on its own terms.
+//
+// This asserts the file the fixture builds is exactly such a file (so the "public route 404s"
+// half of the claim is verified directly against the same predicate every public route uses),
+// then asserts resolveShareResource itself now refuses it the same not-found way - rather than
+// resolving it and letting shareaccess.GrantAccess mail out a share that can never be opened.
+func TestResolveShareResourceRefusesReceivedFile(t *testing.T) {
+	uniqueSuffix := "_" + helper.GenerateRandomString(8)
+	owner := models.User{
+		Id: idAdmin, Name: "TestAdmin", Permissions: models.UserPermissionAll,
+		UserLevel: models.UserLevelAdmin, AuthProvider: models.AuthProviderInternal,
+	}
+	fr := models.FileRequest{
+		Id: "resolveShareResourceRequest" + uniqueSuffix, Name: "Received file request", UserId: owner.Id,
+		ApiKey: "resolveShareResourceRequestKey" + uniqueSuffix, CreationDate: time.Now().Unix(),
+	}
+	database.SaveFileRequest(fr)
+	fileId := "resolveShareResourceReceivedFile" + uniqueSuffix
+	receivedFile := models.File{
+		Id: fileId, Name: "received.txt", SHA1: "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: owner.Id, UploadRequestId: fr.Id,
+	}
+	database.SaveMetaData(receivedFile)
+	t.Cleanup(func() {
+		database.DeleteMetaData(fileId)
+		database.DeleteFileRequest(fr)
+	})
+
+	// The exact predicate every public consumption route guards on. If this is not true, the
+	// fixture is not actually building a received file and the rest of this test proves nothing.
+	storedFile, ok := storage.GetFile(fileId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, storedFile.IsFileRequest(), true)
+
+	w := httptest.NewRecorder()
+	_, resolvedOk := resolveShareResource(w, models.ShareResourceFile, fileId, owner)
+	test.IsEqualBool(t, resolvedOk, false)
+	test.IsEqualInt(t, w.Code, http.StatusNotFound)
+}
+
 func TestCollaboratorCannotWrite(t *testing.T) {
 	fr, file, collaboratorKey, _ := collaboratorFixture(t)
 
