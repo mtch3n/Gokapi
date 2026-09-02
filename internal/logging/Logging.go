@@ -402,19 +402,31 @@ func downloadFileConfig(file models.File) *AuditFileConfig {
 	}
 }
 
+// recipientLogSuffix renders the recipient attached to r via WithRecipient, if any, for
+// appending to a human-readable log.txt line - mirrors how an upload line already prints
+// "owned by <name> (user #id)" for a staff actor.
+func recipientLogSuffix(r *http.Request) string {
+	if recipient, ok := recipientFromRequest(r); ok {
+		return fmt.Sprintf(", recipient #%d %s", recipient.Id, recipient.Email)
+	}
+	return ""
+}
+
 // LogDownload records that a file was served to a client. This is a guarded, fail-closed
 // event: the audit entry is fsync'd to the local chain before this function returns, and the
 // caller must not write any file bytes to the response if it returns a non-nil error - refuse
 // the request instead. The identity of the requester is read from r if it was attached with
-// WithActor (admin/API downloads); public share/hotlink downloads carry no identity by design
-// and are recorded as anonymous.
+// WithActor (admin/API downloads) or WithRecipient (a share recipient downloading a restricted
+// resource); public, unrestricted share/hotlink downloads carry no identity by design and are
+// recorded as anonymous.
 func LogDownload(file models.File, r *http.Request, saveIp bool) error {
 	ip := ""
+	recipientSuffix := recipientLogSuffix(r)
 	if saveIp {
 		ip = GetIpAddress(r)
-		createLogEntry(categoryDownload, fmt.Sprintf("IP %s, ID %s, Useragent %s", ip, file.Id, sanitiseUserAgent(r)), false)
+		createLogEntry(categoryDownload, fmt.Sprintf("IP %s, ID %s, Useragent %s%s", ip, file.Id, sanitiseUserAgent(r), recipientSuffix), false)
 	} else {
-		createLogEntry(categoryDownload, fmt.Sprintf("ID %s, Useragent %s", file.Id, sanitiseUserAgent(r)), false)
+		createLogEntry(categoryDownload, fmt.Sprintf("ID %s, Useragent %s%s", file.Id, sanitiseUserAgent(r), recipientSuffix), false)
 	}
 	return appendAuditEntry(AuditEntry{
 		Category:   categoryDownload,
@@ -448,7 +460,7 @@ func LogDownloadDenied(file models.File, r *http.Request, saveIp bool, reason st
 	if saveIp {
 		ip = GetIpAddress(r)
 	}
-	createLogEntry(categoryDenied, fmt.Sprintf("ID %s, IP %s, download denied: %s", file.Id, ip, reason), false)
+	createLogEntry(categoryDenied, fmt.Sprintf("ID %s, IP %s, download denied: %s%s", file.Id, ip, reason, recipientLogSuffix(r)), false)
 	return appendAuditEntry(AuditEntry{
 		Category:   categoryDenied,
 		Action:     "download",
@@ -471,15 +483,29 @@ func sanitiseUserAgent(r *http.Request) string {
 // entry is fsync'd to the local chain before this function returns, and the caller must not
 // confirm success to the client if it returns a non-nil error - the uploaded file should be
 // removed again and the request refused instead.
+//
+// A file uploaded into a restricted file request whose cookie was attached to r via
+// WithRecipient is attributed to that recipient - the person who actually uploaded it - rather
+// than to the request's owner; the owner moves into Detail instead. An unrestricted request (no
+// recipient attached) keeps attributing the upload to the owner, unchanged.
 func LogUpload(file models.File, user models.User, fr models.FileRequest, r *http.Request, saveIp bool) error {
 	ip := ""
 	if saveIp {
 		ip = GetIpAddress(r)
 	}
 	action := "upload"
+	actor := AuditActor{UserId: user.Id, Email: user.Name}
+	detail := ""
 	if fr.Id != "" {
-		createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded to file request %s, owned by %s (user #%d) ", file.Id, ip, fr.Id, user.Name, user.Id), false)
 		action = "upload.filerequest"
+		if recipient, ok := recipientFromRequest(r); ok {
+			actor = AuditActor{RecipientId: recipient.Id, RecipientEmail: recipient.Email}
+			detail = fmt.Sprintf("request owned by %s (user #%d)", user.Name, user.Id)
+			createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded to file request %s by recipient #%d %s, owned by %s (user #%d)",
+				file.Id, ip, fr.Id, recipient.Id, recipient.Email, user.Name, user.Id), false)
+		} else {
+			createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded to file request %s, owned by %s (user #%d) ", file.Id, ip, fr.Id, user.Name, user.Id), false)
+		}
 	} else {
 		createLogEntry(categoryUpload, fmt.Sprintf("ID %s, IP %s, uploaded by %s (user #%d)", file.Id, ip, user.Name, user.Id), false)
 	}
@@ -490,7 +516,8 @@ func LogUpload(file models.File, user models.User, fr models.FileRequest, r *htt
 		Ip:         ip,
 		FileId:     file.Id,
 		RequestId:  fr.Id,
-		Actor:      AuditActor{UserId: user.Id, Email: user.Name},
+		Actor:      actor,
+		Detail:     detail,
 		FileConfig: downloadFileConfig(file),
 	})
 }
@@ -978,6 +1005,52 @@ func LogShareLinkMailed(resourceType int, resourceId string, recipientEmail stri
 	if sendErr != nil {
 		entry.Outcome = OutcomeFailure
 		entry.Error = sendErr.Error()
+	}
+	appendAuditEntryAsync(entry)
+}
+
+// LogShareRecipientCreated records that a share grant introduced a brand-new external contact -
+// an email address never shared with before, as opposed to a grant that reused an existing
+// recipient row. Category auth, non-blocking.
+func LogShareRecipientCreated(recipient models.ShareRecipient, actor models.User) {
+	createLogEntry(categoryAuth, fmt.Sprintf("New share recipient %s (#%d) created by %s (user #%d)",
+		recipient.Email, recipient.Id, actor.Name, actor.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryAuth,
+		Action:   "share.recipient.created",
+		Outcome:  OutcomeSuccess,
+		Actor:    AuditActor{UserId: actor.Id, Email: actor.Name},
+		Detail:   recipient.Email,
+	})
+}
+
+// LogShareLinkRedeemed records the first time a mailed access link is opened for a resource, so
+// "was this link ever used" has an answer distinct from "was it mailed" (LogShareLinkMailed).
+// Raised by shareaccess.recipientFor exactly once per recipient/resource pair, on the visit
+// where ValidateToken reports first use.
+//
+// The IP is always recorded here, regardless of the SaveIp setting - the single deliberate
+// exception to that convention in this package. A link redemption is an authentication event
+// in its own right, not a routine content access, so the source of it is worth keeping even on
+// an instance configured not to retain download IPs. Category auth, non-blocking.
+func LogShareLinkRedeemed(resourceType int, resourceId string, recipient models.ShareRecipient, r *http.Request) {
+	ip := GetIpAddress(r)
+	createLogEntry(categoryAuth, fmt.Sprintf("Share link for %s %s redeemed for the first time by recipient #%d %s, IP %s",
+		shareResourceLabel(resourceType), resourceId, recipient.Id, recipient.Email, ip), false)
+	entry := AuditEntry{
+		Category: categoryAuth,
+		Action:   "share.link.redeemed",
+		Outcome:  OutcomeSuccess,
+		Ip:       ip,
+		Actor:    AuditActor{RecipientId: recipient.Id, RecipientEmail: recipient.Email},
+	}
+	switch resourceType {
+	case models.ShareResourceBundle:
+		entry.BundleId = resourceId
+	case models.ShareResourceFileRequest:
+		entry.RequestId = resourceId
+	default:
+		entry.FileId = resourceId
 	}
 	appendAuditEntryAsync(entry)
 }

@@ -85,7 +85,7 @@ func TestAddDownload(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(string(content), "2.2.2.2"), false)
 }
 
-// TestLogUserCreationIncludesAuthProvider verifies MINOR-3: the audit detail for user.created
+// TestLogUserCreationIncludesAuthProvider verifies that the audit detail for user.created
 // must include AuthProvider, so that provisioning a user for OAuth/OIDC (e.g. authprovider:
 // google via user/create) is distinguishable in the audit log from an ordinary internal-auth user
 // creation. Before this fix, the detail only carried the target user's name and id, so an
@@ -229,6 +229,68 @@ func TestLogShareLinkMailed(t *testing.T) {
 	})
 }
 
+// TestLogUploadAttributesRecipientWhenAttached covers the Part F fix: an upload into a file
+// request carries a recipient attached via WithRecipient (the cookie of the person who actually
+// uploaded) and must be audited under that recipient rather than the request's owner, with the
+// owner moved into Detail instead. A request with no recipient attached - the unrestricted case -
+// keeps attributing the upload to the owner, unchanged.
+func TestLogUploadAttributesRecipientWhenAttached(t *testing.T) {
+	dir := t.TempDir()
+	Init(dir)
+
+	file := models.File{Id: "uploadAttribId", Name: "uploadAttribName"}
+	owner := models.User{Id: 5, Name: "owner@example.com"}
+	fr := models.FileRequest{Id: "uploadAttribRequest"}
+	recipient := models.ShareRecipient{Id: 77, Email: "uploader@example.com"}
+
+	t.Run("recipient attached", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/test", nil)
+		r = WithRecipient(r, recipient)
+		err := LogUpload(file, owner, fr, r, false)
+		test.IsNil(t, err)
+
+		time.Sleep(300 * time.Millisecond)
+		entries, _ := GetAuditEntriesSince(0, 100)
+		found := false
+		for _, entry := range entries {
+			if entry.Action != "upload.filerequest" || entry.FileId != file.Id {
+				continue
+			}
+			found = true
+			test.IsEqualInt(t, entry.Actor.RecipientId, 77)
+			test.IsEqualString(t, entry.Actor.RecipientEmail, "uploader@example.com")
+			test.IsEqualInt(t, entry.Actor.UserId, 0)
+			test.IsEqualBool(t, entry.Actor.Anonymous, false)
+			test.IsEqualBool(t, strings.Contains(entry.Detail, "request owned by owner@example.com (user #5)"), true)
+		}
+		test.IsEqualBool(t, found, true)
+
+		content, _ := os.ReadFile(dir + "/log.txt")
+		test.IsEqualBool(t, strings.Contains(string(content), "uploaded to file request uploadAttribRequest by recipient #77 uploader@example.com, owned by owner@example.com (user #5)"), true)
+	})
+
+	t.Run("no recipient attached keeps the owner as actor", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/test", nil)
+		unrestrictedFile := models.File{Id: "uploadAttribIdUnrestricted"}
+		err := LogUpload(unrestrictedFile, owner, fr, r, false)
+		test.IsNil(t, err)
+
+		time.Sleep(300 * time.Millisecond)
+		entries, _ := GetAuditEntriesSince(0, 100)
+		found := false
+		for _, entry := range entries {
+			if entry.Action != "upload.filerequest" || entry.FileId != unrestrictedFile.Id {
+				continue
+			}
+			found = true
+			test.IsEqualInt(t, entry.Actor.UserId, 5)
+			test.IsEqualInt(t, entry.Actor.RecipientId, 0)
+			test.IsEqualString(t, entry.Detail, "")
+		}
+		test.IsEqualBool(t, found, true)
+	})
+}
+
 func TestLogDownloadDenied(t *testing.T) {
 	Init("test")
 	file := models.File{Id: "deniedTestId", Name: "deniedTestName"}
@@ -242,7 +304,7 @@ func TestLogDownloadDenied(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(string(content), "[denied] ID deniedTestId, IP 9.9.9.9, download denied: incorrect password"), true)
 }
 
-// TestLogDownloadFailClosed verifies the W7 fail-closed contract at the logging package level:
+// TestLogDownloadFailClosed verifies the fail-closed contract at the logging package level:
 // if the durable local audit write fails, LogDownload (and LogDownloadDenied, which is on the
 // same guarded path) must report it via a non-nil error rather than silently succeeding, so
 // that a caller serving file content knows to refuse the request instead.

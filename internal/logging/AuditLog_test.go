@@ -146,8 +146,8 @@ func TestAuditChainUnusableWhenFullyCorrupted(t *testing.T) {
 	test.IsEqualString(t, string(content), "not json at all\nneither is this\n")
 }
 
-// TestNoSecretMaterialInAuditEntries is a grep-style assertion (PLAN.md W7 acceptance
-// criterion): the audit chain must never contain file content, decryption keys, passwords,
+// TestNoSecretMaterialInAuditEntries is a grep-style assertion that the audit chain must never
+// contain file content, decryption keys, passwords,
 // session cookies or API key secrets. Real secret-shaped values are fed through every object
 // the logging path touches (file password hash, encryption key/nonce, API key secret) so that
 // this actually exercises the redaction rather than asserting the absence of strings that were
@@ -346,7 +346,7 @@ func TestAuditChainVerificationWithCursor(t *testing.T) {
 	test.IsEqualBool(t, *entries[1].Verified, true)
 }
 
-// TestAuditChainBatchedFolderDeleteSingleWrite verifies MAJOR-2: a folder delete with several
+// TestAuditChainBatchedFolderDeleteSingleWrite verifies that a folder delete with several
 // member files produces one correctly hash-chained batch (one entry per member plus one for the
 // folder itself) via a single call to appendAuditEntries, rather than the N+1 separate
 // appendAuditEntry calls (each its own mutex acquisition, file open and fsync) that a folder
@@ -374,7 +374,7 @@ func TestAuditChainBatchedFolderDeleteSingleWrite(t *testing.T) {
 	test.IsEqualString(t, stored[3].BundleId, "batchBundleId")
 }
 
-// TestAuditChainBatchedWriteAllOrNothingOnFailure verifies MAJOR-2/MINOR-2: appendAuditEntries
+// TestAuditChainBatchedWriteAllOrNothingOnFailure verifies that appendAuditEntries
 // (used by LogFolderDeleteBatch for a folder delete) writes every entry in a batch as a single
 // all-or-nothing unit. It uses a small RLIMIT_FSIZE so the combined write fails partway through
 // writing the batch, rather than failing outright on the very first byte - a fault that fails
@@ -426,7 +426,7 @@ func TestAuditChainBatchedWriteAllOrNothingOnFailure(t *testing.T) {
 	}
 }
 
-// TestAuditTruncateFailureFailsClosed verifies MINOR-8: if undoing a partial write by truncating
+// TestAuditTruncateFailureFailsClosed verifies that if undoing a partial write by truncating
 // the audit log back to its pre-batch size itself fails, the chain must be marked unusable so no
 // further entries can be appended - failing closed - rather than silently leaving a complete,
 // validly hash-chained line on disk for a batch that appendAuditEntries is about to report as an

@@ -77,13 +77,19 @@ const (
 // auth it is the account username. OidcSubject is only ever populated on the login event
 // itself, as it is the only point in the request lifecycle where Gokapi still has it -
 // sessions created afterwards do not carry the OIDC subject, so later actions by the same
-// user cannot be tied back to it. Anonymous is true for public, unauthenticated access such
-// as a share link download, where by design no identity exists to record.
+// user cannot be tied back to it. RecipientId/RecipientEmail identify an external share
+// recipient (see models.ShareRecipient) rather than a models.User - a download or a
+// file-request upload made by the holder of a mailed access link is attributed here instead
+// of to whichever staff account owns the resource. A request never carries both a user and a
+// recipient. Anonymous is true only when neither a user nor a recipient could be attached,
+// e.g. an unrestricted share link download, where by design no identity exists to record.
 type AuditActor struct {
-	UserId      int    `json:"userId,omitempty"`
-	Email       string `json:"email,omitempty"`
-	OidcSubject string `json:"oidcSubject,omitempty"`
-	Anonymous   bool   `json:"anonymous,omitempty"`
+	UserId         int    `json:"userId,omitempty"`
+	Email          string `json:"email,omitempty"`
+	OidcSubject    string `json:"oidcSubject,omitempty"`
+	RecipientId    int    `json:"recipientId,omitempty"`
+	RecipientEmail string `json:"recipientEmail,omitempty"`
+	Anonymous      bool   `json:"anonymous,omitempty"`
 }
 
 // AuditFileConfig captures the configuration of a file/share at the time of the event, so a
@@ -427,6 +433,7 @@ func appendAuditEntryAsync(entry AuditEntry) {
 type actorContextKey int
 
 const requestActorContextKey actorContextKey = 0
+const requestRecipientContextKey actorContextKey = 1
 
 // WithActor returns a shallow copy of r with user attached, so that a download served through
 // r can be attributed to an authenticated admin/API user instead of being recorded as an
@@ -445,12 +452,34 @@ func actorFromRequest(r *http.Request) (models.User, bool) {
 	return user, ok
 }
 
-// buildActorFromRequest builds an AuditActor from a request that may or may not have gone
-// through WithActor: authenticated when an actor was attached, anonymous otherwise (the
-// expected case for public share/hotlink downloads).
+// WithRecipient returns a shallow copy of r with a share recipient attached, so that a
+// download or file-request upload served through r can be attributed to the external
+// recipient who holds the access link instead of being recorded as anonymous (a download) or
+// mis-attributed to the resource's owner (a file-request upload). Sibling of WithActor; a
+// request is never given both.
+func WithRecipient(r *http.Request, recipient models.ShareRecipient) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), requestRecipientContextKey, recipient))
+}
+
+// recipientFromRequest returns the recipient attached via WithRecipient, if any.
+func recipientFromRequest(r *http.Request) (models.ShareRecipient, bool) {
+	if r == nil {
+		return models.ShareRecipient{}, false
+	}
+	recipient, ok := r.Context().Value(requestRecipientContextKey).(models.ShareRecipient)
+	return recipient, ok
+}
+
+// buildActorFromRequest builds an AuditActor from a request that may have gone through
+// WithActor or WithRecipient: an authenticated user takes priority, then an attached share
+// recipient, anonymous otherwise (the expected case for an unrestricted public share/hotlink
+// download).
 func buildActorFromRequest(r *http.Request) AuditActor {
 	if user, ok := actorFromRequest(r); ok {
 		return AuditActor{UserId: user.Id, Email: user.Name}
+	}
+	if recipient, ok := recipientFromRequest(r); ok {
+		return AuditActor{RecipientId: recipient.Id, RecipientEmail: recipient.Email}
 	}
 	return AuditActor{Anonymous: true}
 }
