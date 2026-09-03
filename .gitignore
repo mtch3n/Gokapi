@@ -22,3 +22,14 @@ gokapi-cli.json
 internal/webserver/api/test/
 internal/webserver/test/
 internal/storage/filebundle/test/
+
+# Internal planning and analysis documents. This is a public fork - these live in
+# the private workspace instead, never here.
+PLAN.md
+SECURITY-ANALYSIS.md
+PLAN-RECONCILIATION.md
+HANDOFF.md
+
+# Agent tooling, never committed
+.serena/
+.claude/

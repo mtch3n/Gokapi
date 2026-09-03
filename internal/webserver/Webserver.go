@@ -310,7 +310,7 @@ func redirectFromFilename(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
 		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
-		// recording on their own (PLAN.md), not just outright denials against a real file.
+		// recording on their own, not just outright denials against a real file.
 		if err := logging.LogDownloadDenied(models.File{Id: id}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
 			respondAuditWriteFailed(w)
 			return
@@ -649,7 +649,7 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 	if !ok || file.IsFileRequest() {
 		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
 		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
-		// recording on their own (PLAN.md), not just outright denials against a real file.
+		// recording on their own, not just outright denials against a real file.
 		if err := logging.LogDownloadDenied(models.File{Id: keyId}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
 			respondAuditWriteFailed(w)
 			return
@@ -751,7 +751,7 @@ func showHotlink(w http.ResponseWriter, r *http.Request) {
 	if !ok || file.IsFileRequest() {
 		// Covers an unknown hotlink id, an expired file and a file pending deletion alike:
 		// GetFileByHotlink does not distinguish the reason. Unknown-id probes are an
-		// enumeration signal worth recording on their own (PLAN.md).
+		// enumeration signal worth recording on their own.
 		if err := logging.LogDownloadDenied(models.File{Id: hotlinkId}, r, configuration.Get().SaveIp, "unknown, expired, or invalid hotlink id"); err != nil {
 			respondAuditWriteFailed(w)
 			return
@@ -864,12 +864,12 @@ func showE2ESetup(w http.ResponseWriter, r *http.Request) {
 }
 
 // privacyNoticeText discloses that access details are recorded, as required on the public
-// download, download-password and file-request upload pages (PLAN.md W7: the audit log this
-// item introduces is a PI repository, and PIPEDA disclosure is part of this item, not
-// optional). The final wording, and a defined retention period, belong to a separate item
-// (PLAN.md notes "W12 owns the wording"); this is a minimal, honest placeholder so the
-// disclosure obligation itself is not silently dropped while that wording is pending - it is
-// deliberately renderable as a single template value so W12 only has to replace this constant.
+// download, download-password and file-request upload pages: the audit log is a repository of
+// personal information, so disclosing it is part of shipping that log rather than optional.
+// The final wording, and a defined retention period, are still to be decided; this is a
+// minimal, honest placeholder so the disclosure obligation itself is not silently dropped
+// while that wording is pending, and it is deliberately a single template value so settling
+// the wording only has to replace this constant.
 const privacyNoticeText = "For security purposes, this server records the IP address, timestamp and file " +
 	"identifier associated with this action. Retention period: not yet defined by this instance's operator."
 
@@ -1259,7 +1259,7 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	if !ok || savedFile.IsFileRequest() {
 		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
 		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
-		// recording on their own (PLAN.md), not just outright denials against a real file.
+		// recording on their own, not just outright denials against a real file.
 		//
 		// A share whose recipients have every one of them spent their allowance is over, and is
 		// refused here rather than at the per-recipient check below, exactly as an expired one
