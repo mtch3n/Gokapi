@@ -22,7 +22,7 @@ var configSqlite = models.DbConnection{
 
 var configRedis = models.DbConnection{
 	RedisPrefix: "test_",
-	HostUrl:     "127.0.0.1:26379",
+	HostUrl:     test.PortRedisDatabase,
 	Type:        1, // dbabstraction.TypeRedis
 }
 
@@ -33,7 +33,7 @@ var availableDatabases []dbabstraction.Database
 func TestMain(m *testing.M) {
 
 	mRedis = miniredis.NewMiniRedis()
-	err := mRedis.StartAddr("127.0.0.1:26379")
+	err := mRedis.StartAddr(test.PortRedisDatabase)
 	if err != nil {
 		log.Fatal("Could not start miniredis")
 	}
@@ -1205,7 +1205,7 @@ func TestParseUrl(t *testing.T) {
 func TestMigration(t *testing.T) {
 	configNew := models.DbConnection{
 		RedisPrefix: "testmigrate_",
-		HostUrl:     "127.0.0.1:26379",
+		HostUrl:     test.PortRedisDatabase,
 		Type:        1, // dbabstraction.TypeRedis
 	}
 	dbOld, err := dbabstraction.GetNew(configSqlite)
@@ -1243,7 +1243,7 @@ func TestMigrationNormalizesEmptyAuthProvider(t *testing.T) {
 	}
 	configNew := models.DbConnection{
 		RedisPrefix: "testmigrateauthprovider_",
-		HostUrl:     "127.0.0.1:26379",
+		HostUrl:     test.PortRedisDatabase,
 		Type:        1, // dbabstraction.TypeRedis
 	}
 	dbOld, err := dbabstraction.GetNew(configOld)
@@ -1285,7 +1285,7 @@ func TestMigratePreservesEncryptedFileName(t *testing.T) {
 	}
 	configNew := models.DbConnection{
 		RedisPrefix: "testmigrateencname_",
-		HostUrl:     "127.0.0.1:26379",
+		HostUrl:     test.PortRedisDatabase,
 		Type:        1, // dbabstraction.TypeRedis
 	}
 
@@ -1334,7 +1334,7 @@ func TestDisposedMetaDataRoundTripsThroughRedis(t *testing.T) {
 
 	dbRedis, err := dbabstraction.GetNew(models.DbConnection{
 		RedisPrefix: "testdisposedredis_",
-		HostUrl:     "127.0.0.1:26379",
+		HostUrl:     test.PortRedisDatabase,
 		Type:        1, // dbabstraction.TypeRedis
 	})
 	test.IsNil(t, err)

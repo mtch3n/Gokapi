@@ -141,49 +141,49 @@ func TestRetentionInvariant(t *testing.T) {
 		{
 			name: "download page",
 			req: invariantRequest{method: "GET", url: func(r invariantResource) string {
-				return "http://127.0.0.1:53843/d?id=" + r.FileId
+				return urlIp + "/d?id=" + r.FileId
 			}},
 		},
 		{
 			name: "download action",
 			req: invariantRequest{method: "GET", url: func(r invariantResource) string {
-				return "http://127.0.0.1:53843/downloadFile?id=" + r.FileId
+				return urlIp + "/downloadFile?id=" + r.FileId
 			}},
 		},
 		{
 			name: "hotlink long form",
 			req: invariantRequest{method: "GET", url: func(r invariantResource) string {
-				return "http://127.0.0.1:53843/hotlink/" + r.HotlinkId
+				return urlIp + "/hotlink/" + r.HotlinkId
 			}},
 		},
 		{
 			name: "hotlink short form",
 			req: invariantRequest{method: "GET", url: func(r invariantResource) string {
-				return "http://127.0.0.1:53843/h/" + r.HotlinkId
+				return urlIp + "/h/" + r.HotlinkId
 			}},
 		},
 		{
 			name: "pubApiFileMetadata",
 			req: invariantRequest{method: "GET", url: func(r invariantResource) string {
-				return "http://127.0.0.1:53843/pubapi/file?id=" + r.FileId
+				return urlIp + "/pubapi/file?id=" + r.FileId
 			}},
 		},
 		{
 			name: "pubApiFilePassword",
 			req: invariantRequest{method: "POST", url: func(r invariantResource) string {
-				return "http://127.0.0.1:53843/pubapi/filepassword?id=" + r.FileId
+				return urlIp + "/pubapi/filepassword?id=" + r.FileId
 			}, body: filePasswordBody, contentType: "application/json"},
 		},
 		{
 			name: "folder page",
 			req: invariantRequest{method: "GET", url: func(r invariantResource) string {
-				return "http://127.0.0.1:53843/pubapi/folder?id=" + r.BundleId
+				return urlIp + "/pubapi/folder?id=" + r.BundleId
 			}},
 		},
 		{
 			name: "pubApiShareResend",
 			req: invariantRequest{method: "POST", url: func(invariantResource) string {
-				return "http://127.0.0.1:53843/pubapi/share/resend"
+				return urlIp + "/pubapi/share/resend"
 			}, body: shareResendBody, contentType: "application/json"},
 		},
 	}
@@ -257,7 +257,7 @@ func TestRetentionInvariantShareResendMailsNothingEitherWay(t *testing.T) {
 			database.SetShareGrants(models.ShareResourceFile, res.FileId, []int{recipientId}, 999, 0)
 
 			req := invariantRequest{method: "POST", url: func(invariantResource) string {
-				return "http://127.0.0.1:53843/pubapi/share/resend"
+				return urlIp + "/pubapi/share/resend"
 			}, body: func(invariantResource) []byte {
 				payload, _ := json.Marshal(map[string]interface{}{
 					"resourceType": models.ShareResourceFile,

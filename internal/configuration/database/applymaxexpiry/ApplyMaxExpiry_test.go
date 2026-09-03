@@ -14,7 +14,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	testconfiguration.CreateWithPort(false, testconfiguration.PortApplyMaxExpiry)
+	testconfiguration.CreateWithPort(false, test.PortApplyMaxExpiry)
 	// testconfiguration.Create leaves the database closed (it opens its own connection to seed
 	// fixtures, then closes it) - reopen it the same way Do() itself does, so seedFiles below and
 	// the assertions after each Do() call can use the database package directly. Do() reconnects

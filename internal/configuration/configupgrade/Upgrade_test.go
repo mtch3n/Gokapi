@@ -18,7 +18,7 @@ func TestMain(m *testing.M) {
 
 var oldConfigFile = models.Configuration{
 	Authentication: models.AuthenticationConfig{},
-	Port:           "127.0.0.1:53844",
+	Port:           test.PortDefault,
 	ServerUrl:      "https://gokapi.url/",
 	RedirectUrl:    "https://github.com/Forceu/Gokapi/",
 }

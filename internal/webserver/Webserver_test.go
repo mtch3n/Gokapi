@@ -38,6 +38,14 @@ import (
 	"github.com/forceu/gokapi/internal/webserver/ratelimiter"
 )
 
+// The test webserver of this package binds test.PortDefault, which moves with
+// GOKAPI_TEST_PORT_OFFSET. Every URL below is built from the very port the listener binds, so the
+// two can never drift apart.
+var (
+	urlIp        = test.Url(test.PortDefault)
+	urlLocalhost = test.UrlLocalhost(test.PortDefault)
+)
+
 func TestMain(m *testing.M) {
 	testconfiguration.Create(true)
 	configuration.Load()
@@ -68,7 +76,7 @@ func TestEmbedFs(t *testing.T) {
 func TestIndexRedirect(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/",
+		Url:             urlLocalhost + "/",
 		RequiredContent: []string{"<html><head><meta http-equiv=\"Refresh\" content=\"0; URL=./index\"></head></html>"},
 		IsHtml:          true,
 	})
@@ -76,7 +84,7 @@ func TestIndexRedirect(t *testing.T) {
 func TestIndexFile(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/index",
+		Url:             urlLocalhost + "/index",
 		RequiredContent: []string{configuration.Get().RedirectUrl},
 		IsHtml:          true,
 	})
@@ -84,7 +92,7 @@ func TestIndexFile(t *testing.T) {
 func TestStaticDirs(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/css/cover.css",
+		Url:             urlLocalhost + "/css/cover.css",
 		RequiredContent: []string{".btn-secondary:hover"},
 	})
 }
@@ -107,7 +115,7 @@ func cookieValue(cookies []*http.Cookie, name string) string {
 }
 
 func TestLogin(t *testing.T) {
-	const loginUrl = "http://localhost:53843/login"
+	loginUrl := urlLocalhost + "/login"
 
 	// GET /login shows the login form
 	test.HttpPageResult(t, test.HttpTestConfig{
@@ -259,7 +267,7 @@ func TestAdminHybridResetPasswordGate(t *testing.T) {
 
 	// A Google-provisioned user must not be forced into changePassword in hybrid mode.
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/admin",
+		Url:             urlLocalhost + "/admin",
 		RequiredContent: []string{"Downloads remaining"},
 		ExcludedContent: []string{"Change Password"},
 		IsHtml:          true,
@@ -271,7 +279,7 @@ func TestAdminHybridResetPasswordGate(t *testing.T) {
 
 	// An internal user with ResetPassword must still be redirected in the same hybrid config.
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/admin",
+		Url:         urlLocalhost + "/admin",
 		RedirectUrl: "changePassword",
 		Cookies: []test.Cookie{{
 			Name:  "session_token",
@@ -287,14 +295,14 @@ func TestAdminHybridResetPasswordGate(t *testing.T) {
 func TestAdminNoAuth(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/admin",
+		Url:         urlLocalhost + "/admin",
 		RedirectUrl: "login",
 	})
 }
 func TestAdminAuth(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/admin",
+		Url:             urlLocalhost + "/admin",
 		RequiredContent: []string{"Downloads remaining"},
 		IsHtml:          true,
 		Cookies: []test.Cookie{{
@@ -306,7 +314,7 @@ func TestAdminAuth(t *testing.T) {
 func TestAdminExpiredAuth(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/admin",
+		Url:         urlLocalhost + "/admin",
 		RedirectUrl: "login",
 		Cookies: []test.Cookie{{
 			Name:  "session_token",
@@ -318,7 +326,7 @@ func TestAdminExpiredAuth(t *testing.T) {
 func TestAdminRenewalAuth(t *testing.T) {
 	t.Parallel()
 	cookies := test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/admin",
+		Url:             urlLocalhost + "/admin",
 		RequiredContent: []string{"Downloads remaining"},
 		IsHtml:          true,
 		Cookies: []test.Cookie{{
@@ -337,7 +345,7 @@ func TestAdminRenewalAuth(t *testing.T) {
 		t.Error("Session not renewed")
 	}
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/admin",
+		Url:             urlLocalhost + "/admin",
 		RequiredContent: []string{"Downloads remaining"},
 		IsHtml:          true,
 		Cookies: []test.Cookie{{
@@ -350,7 +358,7 @@ func TestAdminRenewalAuth(t *testing.T) {
 func TestAdminInvalidAuth(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/admin",
+		Url:         urlLocalhost + "/admin",
 		RedirectUrl: "login",
 		Cookies: []test.Cookie{{
 			Name:  "session_token",
@@ -362,7 +370,7 @@ func TestAdminInvalidAuth(t *testing.T) {
 func TestInvalidLink(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:                "http://localhost:53843/d?id=123",
+		Url:                urlLocalhost + "/d?id=123",
 		IgnoreRedirectParm: true,
 		RedirectUrl:        "error",
 	})
@@ -375,7 +383,7 @@ func TestInvalidLinkIsAudited(t *testing.T) {
 	t.Parallel()
 	const unknownId = "doesNotExistW7auditCoverageTest"
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:                "http://localhost:53843/d?id=" + unknownId,
+		Url:                urlLocalhost + "/d?id=" + unknownId,
 		IgnoreRedirectParm: true,
 		RedirectUrl:        "error",
 	})
@@ -390,12 +398,12 @@ func TestInvalidLinkIsAudited(t *testing.T) {
 func TestError(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/error",
+		Url:             urlLocalhost + "/error",
 		RequiredContent: []string{"The link may have expired or the file has been downloaded too many times"},
 		IsHtml:          true,
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/error?e2e",
+		Url:             urlLocalhost + "/error?e2e",
 		RequiredContent: []string{"This file is encrypted, but no key was provided"},
 		IsHtml:          true,
 	})
@@ -404,7 +412,7 @@ func TestError(t *testing.T) {
 func TestForgotPw(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/forgotpw",
+		Url:             urlLocalhost + "/forgotpw",
 		RequiredContent: []string{"--reconfigure"},
 		IsHtml:          true,
 	})
@@ -413,7 +421,7 @@ func TestForgotPw(t *testing.T) {
 func TestLoginCorrect(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/login",
+		Url:         urlLocalhost + "/login",
 		RedirectUrl: "admin",
 		Method:      "POST",
 		PostValues:  []test.PostBody{{"username", "test"}, {"password", "adminadmin"}, {"csrf-token", csrftoken.Generate(csrftoken.TypeLogin)}},
@@ -423,14 +431,14 @@ func TestLoginCorrect(t *testing.T) {
 func TestLoginIncorrectPassword(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/login",
+		Url:             urlLocalhost + "/login",
 		RequiredContent: []string{"Incorrect username or password"},
 		IsHtml:          true,
 		Method:          "POST",
 		PostValues:      []test.PostBody{{"username", "test"}, {"password", "incorrect"}, {"csrf-token", csrftoken.Generate(csrftoken.TypeLogin)}},
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/login",
+		Url:             urlLocalhost + "/login",
 		RequiredContent: []string{"The login page was open too long and expired. Please try again."},
 		IsHtml:          true,
 		Method:          "POST",
@@ -440,14 +448,14 @@ func TestLoginIncorrectPassword(t *testing.T) {
 func TestLoginIncorrectUsername(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/login",
+		Url:             urlLocalhost + "/login",
 		RequiredContent: []string{"Incorrect username or password"},
 		IsHtml:          true,
 		Method:          "POST",
 		PostValues:      []test.PostBody{{"username", "incorrect"}, {"password", "incorrect"}, {"csrf-token", csrftoken.Generate(csrftoken.TypeLogin)}},
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/login",
+		Url:             urlLocalhost + "/login",
 		RequiredContent: []string{"The login page was open too long and expired. Please try again."},
 		IsHtml:          true,
 		Method:          "POST",
@@ -458,7 +466,7 @@ func TestLoginIncorrectUsername(t *testing.T) {
 func TestLogout(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/admin",
+		Url:             urlLocalhost + "/admin",
 		RequiredContent: []string{"Downloads remaining"},
 		IsHtml:          true,
 		Cookies: []test.Cookie{{
@@ -468,7 +476,7 @@ func TestLogout(t *testing.T) {
 	})
 	// Logout
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/logout",
+		Url:         urlLocalhost + "/logout",
 		RedirectUrl: "login",
 		Cookies: []test.Cookie{{
 			Name:  "session_token",
@@ -477,7 +485,7 @@ func TestLogout(t *testing.T) {
 	})
 	// Admin after logout
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/admin",
+		Url:         urlLocalhost + "/admin",
 		RedirectUrl: "login",
 		Cookies: []test.Cookie{{
 			Name:  "session_token",
@@ -489,20 +497,20 @@ func TestLogout(t *testing.T) {
 func TestDownloadHotlink(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/hotlink/PhSs6mFtf8O5YGlLMfNw9rYXx9XRNkzCnJZpQBi7inunv3Z4A.jpg",
+		Url:             urlIp + "/hotlink/PhSs6mFtf8O5YGlLMfNw9rYXx9XRNkzCnJZpQBi7inunv3Z4A.jpg",
 		RequiredContent: []string{"123"},
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/h/wjqlzpq2.jpg",
+		Url:             urlIp + "/h/wjqlzpq2.jpg",
 		RequiredContent: []string{"123"},
 	})
 	// Download expired hotlink
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/hotlink/PhSs6mFtf8O5YGlLMfNw9rYXx9XRNkzCnJZpQBi7inunv3Z4A.jpg",
+		Url:             urlIp + "/hotlink/PhSs6mFtf8O5YGlLMfNw9rYXx9XRNkzCnJZpQBi7inunv3Z4A.jpg",
 		RequiredContent: []string{"The requested file has expired"},
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/h/wjqlzpq2.jpg",
+		Url:             urlIp + "/h/wjqlzpq2.jpg",
 		RequiredContent: []string{"The requested file has expired"},
 	})
 }
@@ -511,24 +519,24 @@ func TestDownloadNoPassword(t *testing.T) {
 	t.Parallel()
 	// Show download page
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/d?id=Wzol7LyY2QVczXynJtVo",
+		Url:             urlIp + "/d?id=Wzol7LyY2QVczXynJtVo",
 		IsHtml:          true,
 		RequiredContent: []string{"smallfile2", "Retention period"}, // checks the retention-period notice is shown
 	})
 	// Download
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=Wzol7LyY2QVczXynJtVo",
+		Url:             urlIp + "/downloadFile?id=Wzol7LyY2QVczXynJtVo",
 		RequiredContent: []string{"789"},
 	})
 	// Show download page expired file
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:                "http://127.0.0.1:53843/d?id=Wzol7LyY2QVczXynJtVo",
+		Url:                urlIp + "/d?id=Wzol7LyY2QVczXynJtVo",
 		IgnoreRedirectParm: true,
 		RedirectUrl:        "error",
 	})
 	// Download expired file
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:                "http://127.0.0.1:53843/downloadFile?id=Wzol7LyY2QVczXynJtVo",
+		Url:                urlIp + "/downloadFile?id=Wzol7LyY2QVczXynJtVo",
 		IgnoreRedirectParm: true,
 		RedirectUrl:        "error",
 	})
@@ -537,7 +545,7 @@ func TestDownloadNoPassword(t *testing.T) {
 func TestDownloadPagePassword(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/d?id=jpLXGJKigM4hjtA6T6sN",
+		Url:             urlIp + "/d?id=jpLXGJKigM4hjtA6T6sN",
 		IsHtml:          true,
 		RequiredContent: []string{"Password required", "Retention period"}, // checks the retention-period notice is shown
 	})
@@ -545,7 +553,7 @@ func TestDownloadPagePassword(t *testing.T) {
 func TestDownloadPageIncorrectPassword(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/d?id=jpLXGJKigM4hjtA6T6sN",
+		Url:             urlIp + "/d?id=jpLXGJKigM4hjtA6T6sN",
 		IsHtml:          true,
 		RequiredContent: []string{"Incorrect password!"},
 		Method:          "POST",
@@ -556,7 +564,7 @@ func TestDownloadPageIncorrectPassword(t *testing.T) {
 func TestDownloadIncorrectPasswordCookie(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/d?id=jpLXGJKigM4hjtA6T6sN",
+		Url:             urlIp + "/d?id=jpLXGJKigM4hjtA6T6sN",
 		IsHtml:          true,
 		RequiredContent: []string{"Password required"},
 		Cookies:         []test.Cookie{{"pjpLXGJKigM4hjtA6T6sN", "invalid"}},
@@ -566,7 +574,7 @@ func TestDownloadIncorrectPasswordCookie(t *testing.T) {
 func TestDownloadIncorrectPassword(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://127.0.0.1:53843/downloadFile?id=jpLXGJKigM4hjtA6T6sN",
+		Url:         urlIp + "/downloadFile?id=jpLXGJKigM4hjtA6T6sN",
 		RedirectUrl: "d?id=jpLXGJKigM4hjtA6T6sN",
 		Cookies:     []test.Cookie{{"pjpLXGJKigM4hjtA6T6sN", "invalid"}},
 	})
@@ -576,7 +584,7 @@ func TestDownloadCorrectPassword(t *testing.T) {
 	t.Parallel()
 	// Submit download page correct password
 	cookies := test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://127.0.0.1:53843/d?id=jpLXGJKigM4hjtA6T6sN2",
+		Url:         urlIp + "/d?id=jpLXGJKigM4hjtA6T6sN2",
 		RedirectUrl: "d?id=jpLXGJKigM4hjtA6T6sN2",
 		Method:      "POST",
 		PostValues:  []test.PostBody{{"password", "123"}},
@@ -593,14 +601,14 @@ func TestDownloadCorrectPassword(t *testing.T) {
 	}
 	// Show download page correct password
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/d?id=jpLXGJKigM4hjtA6T6sN2",
+		Url:             urlIp + "/d?id=jpLXGJKigM4hjtA6T6sN2",
 		IsHtml:          true,
 		RequiredContent: []string{"smallfile"},
 		Cookies:         []test.Cookie{{"pjpLXGJKigM4hjtA6T6sN2", pwCookie}},
 	})
 	// Download correct password
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=jpLXGJKigM4hjtA6T6sN2",
+		Url:             urlIp + "/downloadFile?id=jpLXGJKigM4hjtA6T6sN2",
 		RequiredContent: []string{"456"},
 		Cookies:         []test.Cookie{{"pjpLXGJKigM4hjtA6T6sN2", pwCookie}},
 	})
@@ -609,7 +617,7 @@ func TestDownloadCorrectPassword(t *testing.T) {
 func TestPostUploadNoAuth(t *testing.T) {
 	t.Parallel()
 	test.HttpPostUploadRequest(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/uploadChunk",
+		Url:             urlIp + "/uploadChunk",
 		UploadFileName:  "test/fileupload.jpg",
 		ResultCode:      http.StatusUnauthorized,
 		UploadFieldName: "file",
@@ -620,7 +628,7 @@ func TestPostUploadNoAuth(t *testing.T) {
 
 func TestPostUpload(t *testing.T) {
 	// Open the SSE connection
-	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/uploadStatus", nil)
+	req, err := http.NewRequest("GET", urlIp+"/uploadStatus", nil)
 	test.IsNil(t, err)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cookie", "session_token=validsession")
@@ -633,7 +641,7 @@ func TestPostUpload(t *testing.T) {
 	scanner := bufio.NewScanner(resp.Body)
 
 	test.HttpPostUploadRequest(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/uploadChunk",
+		Url:             urlIp + "/uploadChunk",
 		UploadFileName:  "test/fileupload.jpg",
 		UploadFieldName: "file",
 		PostValues: []test.PostBody{{
@@ -656,7 +664,7 @@ func TestPostUpload(t *testing.T) {
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		test.HttpPostRequest(t, test.HttpTestConfig{
-			Url: "http://127.0.0.1:53843/api/chunk/complete",
+			Url: urlIp + "/api/chunk/complete",
 			Headers: []test.Header{
 				{"apikey", "validkeyid7"},
 				{"uuid", "eeng4ier3Taen7a"},
@@ -707,7 +715,7 @@ type eventUploadStatus struct {
 func TestApiPageAuthorized(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/apiKeys",
+		Url:             urlIp + "/apiKeys",
 		IsHtml:          true,
 		RequiredContent: []string{"Click on the API key name to give it a new name."},
 		Cookies: []test.Cookie{{
@@ -719,7 +727,7 @@ func TestApiPageAuthorized(t *testing.T) {
 func TestApiPageNotAuthorized(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/apiKeys",
+		Url:             urlIp + "/apiKeys",
 		RedirectUrl:     "login",
 		ResultCode:      http.StatusTemporaryRedirect,
 		ExcludedContent: []string{"Click on the API key name to give it a new name."},
@@ -733,7 +741,7 @@ func TestApiPageNotAuthorized(t *testing.T) {
 func TestProcessApi(t *testing.T) {
 	// Not authorised
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/api/files/list",
+		Url:             urlIp + "/api/files/list",
 		RequiredContent: []string{`{"Result":"error","ErrorMessage":"Unauthorized","ErrorCode":2}`},
 		ExcludedContent: []string{"smallfile2"},
 		ResultCode:      401,
@@ -743,7 +751,7 @@ func TestProcessApi(t *testing.T) {
 		}},
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/api/files/list",
+		Url:             urlIp + "/api/files/list",
 		RequiredContent: []string{`{"Result":"error","ErrorMessage":"Unauthorized","ErrorCode":2}`},
 		ExcludedContent: []string{"smallfile2"},
 		ResultCode:      401,
@@ -752,7 +760,7 @@ func TestProcessApi(t *testing.T) {
 
 	// Valid session does not grant API access
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/api/files/list",
+		Url:             urlIp + "/api/files/list",
 		RequiredContent: []string{`{"Result":"error","ErrorMessage":"Unauthorized","ErrorCode":2}`},
 		ExcludedContent: []string{"smallfile2"},
 		ResultCode:      401,
@@ -762,7 +770,7 @@ func TestProcessApi(t *testing.T) {
 		}},
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/api/files/list",
+		Url:             urlIp + "/api/files/list",
 		RequiredContent: []string{"smallfile2"},
 		ExcludedContent: []string{"Unauthorized"},
 		Headers:         []test.Header{{"apikey", "validkey"}},
@@ -771,7 +779,7 @@ func TestProcessApi(t *testing.T) {
 
 func TestDisableLogin(t *testing.T) {
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:         "http://localhost:53843/admin",
+		Url:         urlLocalhost + "/admin",
 		RedirectUrl: "login",
 		Cookies: []test.Cookie{{
 			Name:  "session_token",
@@ -781,7 +789,7 @@ func TestDisableLogin(t *testing.T) {
 	configuration.Get().Authentication.Method = models.AuthenticationDisabled
 	authentication.Init(configuration.Get().Authentication)
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://localhost:53843/admin",
+		Url:             urlLocalhost + "/admin",
 		RequiredContent: []string{"Downloads remaining"},
 		IsHtml:          true,
 		Cookies: []test.Cookie{{
@@ -803,14 +811,14 @@ func TestResponseError(t *testing.T) {
 func TestServeWasmDownloader(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:    "http://localhost:53843/main.wasm",
+		Url:    urlLocalhost + "/main.wasm",
 		IsHtml: false,
 	})
 }
 func TestServeWasmE2E(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:    "http://localhost:53843/e2e.wasm",
+		Url:    urlLocalhost + "/e2e.wasm",
 		IsHtml: false,
 	})
 }
@@ -833,7 +841,7 @@ func TestPublicApiFileUnprotected(t *testing.T) {
 		UserId:             5,
 	})
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=pubapifileunprot1234")
+	resp, err := client.Get(urlIp + "/pubapi/file?id=pubapifileunprot1234")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -877,7 +885,7 @@ func TestPublicApiFileUnprotected(t *testing.T) {
 func TestPublicApiFilePasswordProtected(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=jpLXGJKigM4hjtA6T6sN")
+	resp, err := client.Get(urlIp + "/pubapi/file?id=jpLXGJKigM4hjtA6T6sN")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -914,7 +922,7 @@ func TestPublicApiFilePasswordProtectedWithCookie(t *testing.T) {
 	// First, get a valid password cookie by authenticating
 	client := &http.Client{}
 	data := strings.NewReader("password=123")
-	resp, err := client.Post("http://127.0.0.1:53843/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
+	resp, err := client.Post(urlIp+"/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
 	if err != nil {
 		t.Errorf("Failed to authenticate: %v", err)
 		return
@@ -936,7 +944,7 @@ func TestPublicApiFilePasswordProtectedWithCookie(t *testing.T) {
 	}
 
 	// Now make a request to /pubapi/file with the cookie
-	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/file?id=jpLXGJKigM4hjtA6T6sN", nil)
+	req, err := http.NewRequest("GET", urlIp+"/pubapi/file?id=jpLXGJKigM4hjtA6T6sN", nil)
 	if err != nil {
 		t.Errorf("Failed to create request: %v", err)
 		return
@@ -972,7 +980,7 @@ func TestPublicApiFilePasswordProtectedWithCookie(t *testing.T) {
 func TestPublicApiFileNotFound(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=unknownfileid123456")
+	resp, err := client.Get(urlIp + "/pubapi/file?id=unknownfileid123456")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -998,7 +1006,7 @@ func TestPublicApiFilePasswordWrong(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
 	data := strings.NewReader("password=wrongpassword")
-	resp, err := client.Post("http://127.0.0.1:53843/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
+	resp, err := client.Post(urlIp+"/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -1031,7 +1039,7 @@ func TestPublicApiFilePasswordCorrect(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
 	data := strings.NewReader("password=123")
-	resp, err := client.Post("http://127.0.0.1:53843/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
+	resp, err := client.Post(urlIp+"/pubapi/filepassword?id=jpLXGJKigM4hjtA6T6sN", "application/x-www-form-urlencoded", data)
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -1104,7 +1112,7 @@ func TestPublicApiFilePasswordTrimMatchesSetTrim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to marshal payload: %v", err)
 	}
-	req, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/filepassword?id="+fileId, bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", urlIp+"/pubapi/filepassword?id="+fileId, bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
@@ -1159,7 +1167,7 @@ func TestPublicApiFolderPasswordTrimMatchesSetTrim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to marshal payload: %v", err)
 	}
-	req, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", urlIp+"/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
@@ -1202,7 +1210,7 @@ func TestPublicApiUploadRequestValid(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreq123456", nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id=testuploadreq123456", nil)
 	if err != nil {
 		t.Errorf("Failed to build request: %v", err)
 		return
@@ -1299,7 +1307,7 @@ func TestPublicApiUploadRequestReportsEffectiveMaxSize(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqmaxsize1", nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id=testuploadreqmaxsize1", nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -1375,7 +1383,7 @@ func TestPublicApiUploadRequestReportsRemainingFilesAfterReservations(t *testing
 	}
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqremain1", nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id=testuploadreqremain1", nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -1422,7 +1430,7 @@ func TestPublicApiUploadRequestKeyInQueryStringRejected(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqquery12&key=testkey123")
+	resp, err := client.Get(urlIp + "/pubapi/uploadrequest?id=testuploadreqquery12&key=testkey123")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -1461,7 +1469,7 @@ func TestPublicApiUploadRequestExpired(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=expireduploadreq1234", nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id=expireduploadreq1234", nil)
 	if err != nil {
 		t.Errorf("Failed to build request: %v", err)
 		return
@@ -1509,7 +1517,7 @@ func TestPublicApiUploadRequestClosed(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=closeduploadreq12345", nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id=closeduploadreq12345", nil)
 	if err != nil {
 		t.Errorf("Failed to build request: %v", err)
 		return
@@ -1562,7 +1570,7 @@ func TestPublicApiUploadRequestWrongKey(t *testing.T) {
 	database.SaveFileRequest(testRequest)
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id=testuploadreqkey1234", nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id=testuploadreqkey1234", nil)
 	if err != nil {
 		t.Errorf("Failed to build request: %v", err)
 		return
@@ -1627,7 +1635,7 @@ func TestPublicApiUploadRequestRestrictedNoCredential(t *testing.T) {
 		database.DeleteShareRecipient(recipientId)
 	})
 
-	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id)
+	resp, err := http.Get(urlIp + "/pubapi/uploadrequest?id=" + testRequest.Id)
 	if err != nil {
 		t.Fatalf("Failed to make request: %v", err)
 	}
@@ -1678,7 +1686,7 @@ func TestPublicApiUploadRequestRestrictedApiKeyOnlyDenied(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id="+testRequest.Id, nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id="+testRequest.Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -1745,7 +1753,7 @@ func TestPublicApiUploadRequestRestrictedValidToken(t *testing.T) {
 		database.DeleteShareRecipient(recipientId)
 	})
 
-	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	resp, err := http.Get(urlIp + "/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
 	if err != nil {
 		t.Fatalf("Failed to make request: %v", err)
 	}
@@ -1817,7 +1825,7 @@ func TestPublicApiUploadRequestRestrictedSharetokenHeader(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id="+testRequest.Id, nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id="+testRequest.Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -1891,7 +1899,7 @@ func TestPublicApiUploadRequestRestrictedTokenWrongResource(t *testing.T) {
 		database.DeleteShareRecipient(recipientId)
 	})
 
-	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	resp, err := http.Get(urlIp + "/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
 	if err != nil {
 		t.Fatalf("Failed to make request: %v", err)
 	}
@@ -1940,7 +1948,7 @@ func TestPublicApiUploadRequestRestrictedIdentityLeakPin(t *testing.T) {
 		database.DeleteShareRecipient(recipientId)
 	})
 
-	resp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id)
+	resp, err := http.Get(urlIp + "/pubapi/uploadrequest?id=" + testRequest.Id)
 	if err != nil {
 		t.Fatalf("Failed to make request: %v", err)
 	}
@@ -1999,7 +2007,7 @@ func TestPublicApiUploadRequestRestrictedCookieOnly(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	firstResp, err := client.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	firstResp, err := client.Get(urlIp + "/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
 	if err != nil {
 		t.Fatalf("Failed to make first request: %v", err)
 	}
@@ -2017,7 +2025,7 @@ func TestPublicApiUploadRequestRestrictedCookieOnly(t *testing.T) {
 		t.Fatalf("Expected Set-Cookie for %s, got cookies %v", expectedCookieName, firstResp.Cookies())
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:53843/pubapi/uploadrequest?id="+testRequest.Id, nil)
+	req, err := http.NewRequest(http.MethodGet, urlIp+"/pubapi/uploadrequest?id="+testRequest.Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -2075,7 +2083,7 @@ func TestPublicApiUploadRequestRestrictedExpiredIdentityOrdering(t *testing.T) {
 		database.DeleteShareRecipient(recipientId)
 	})
 
-	noCredResp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id)
+	noCredResp, err := http.Get(urlIp + "/pubapi/uploadrequest?id=" + testRequest.Id)
 	if err != nil {
 		t.Fatalf("Failed to make request: %v", err)
 	}
@@ -2092,7 +2100,7 @@ func TestPublicApiUploadRequestRestrictedExpiredIdentityOrdering(t *testing.T) {
 		t.Errorf("Expected reason 'identity' for an anonymous caller on a restricted+expired request, got %v", noCredResponse)
 	}
 
-	tokenResp, err := http.Get("http://127.0.0.1:53843/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
+	tokenResp, err := http.Get(urlIp + "/pubapi/uploadrequest?id=" + testRequest.Id + "&token=" + rawToken)
 	if err != nil {
 		t.Fatalf("Failed to make request: %v", err)
 	}
@@ -2130,7 +2138,7 @@ func TestPublicApiFolderUnprotected(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle.Id)
+	resp, err := client.Get(urlIp + "/pubapi/folder?id=" + bundle.Id)
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -2165,7 +2173,7 @@ func TestPublicApiFolderUnprotected(t *testing.T) {
 func TestPublicApiFolderNotFound(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=unknownfolder123456")
+	resp, err := client.Get(urlIp + "/pubapi/folder?id=unknownfolder123456")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -2231,7 +2239,7 @@ func TestPublicApiFolderRestrictedDeniedToAnonymous(t *testing.T) {
 
 	client := &http.Client{}
 
-	folderResp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle.Id)
+	folderResp, err := client.Get(urlIp + "/pubapi/folder?id=" + bundle.Id)
 	if err != nil {
 		t.Fatalf("Failed to request folder: %v", err)
 	}
@@ -2245,7 +2253,7 @@ func TestPublicApiFolderRestrictedDeniedToAnonymous(t *testing.T) {
 		t.Errorf("Restricted bundle member name leaked to an anonymous request: %s", folderBody)
 	}
 
-	zipResp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id)
+	zipResp, err := client.Get(urlIp + "/pubapi/folderzip?id=" + bundle.Id)
 	if err != nil {
 		t.Fatalf("Failed to request folderzip: %v", err)
 	}
@@ -2266,7 +2274,7 @@ func TestPublicApiFolderRestrictedDeniedToAnonymous(t *testing.T) {
 // recipient without a mail round-trip.
 func testShareAccessCookie(resourceType int, resourceId string, recipientId int) test.Cookie {
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "http://127.0.0.1:53843/", nil)
+	req := httptest.NewRequest("GET", urlIp+"/", nil)
 	shareaccess.WriteCookie(recorder, req, resourceType, resourceId, recipientId)
 	cookies := recorder.Result().Cookies()
 	return test.Cookie{Name: cookies[0].Name, Value: cookies[0].Value}
@@ -2383,7 +2391,7 @@ func TestSingleFileCascadesRestrictedBundleDeniesAnonymous(t *testing.T) {
 
 	// /downloadFile redirects to /pubapi/folderzip, which the default client follows
 	// automatically; the anonymous caller must still be denied there.
-	resp, err := client.Get("http://127.0.0.1:53843/downloadFile?id=" + fileId)
+	resp, err := client.Get(urlIp + "/downloadFile?id=" + fileId)
 	if err != nil {
 		t.Fatalf("Failed to request download: %v", err)
 	}
@@ -2397,7 +2405,7 @@ func TestSingleFileCascadesRestrictedBundleDeniesAnonymous(t *testing.T) {
 	}
 
 	// /pubapi/file redirects to /pubapi/folder, same reasoning.
-	resp2, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + fileId)
+	resp2, err := client.Get(urlIp + "/pubapi/file?id=" + fileId)
 	if err != nil {
 		t.Fatalf("Failed to request file metadata: %v", err)
 	}
@@ -2444,7 +2452,7 @@ func TestPublicApiFileMetadataHidesSizeExpiryForNonRecipient(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + fileId)
+	resp, err := client.Get(urlIp + "/pubapi/file?id=" + fileId)
 	if err != nil {
 		t.Fatalf("Failed to request file metadata: %v", err)
 	}
@@ -2586,7 +2594,7 @@ func TestPublicApiShareResendCooldownIsIndistinguishableFromNonRecipient(t *test
 			"email":        email,
 		})
 		test.IsNil(t, err)
-		resp, err := http.Post("http://127.0.0.1:53843/pubapi/share/resend",
+		resp, err := http.Post(urlIp+"/pubapi/share/resend",
 			"application/json", bytes.NewReader(payload))
 		if err != nil {
 			t.Fatalf("resend request failed: %v", err)
@@ -2658,7 +2666,7 @@ func TestPublicApiShareResendExpiredFileRequestMailsNothing(t *testing.T) {
 			"email":        email,
 		})
 		test.IsNil(t, err)
-		resp, err := http.Post("http://127.0.0.1:53843/pubapi/share/resend",
+		resp, err := http.Post(urlIp+"/pubapi/share/resend",
 			"application/json", bytes.NewReader(payload))
 		if err != nil {
 			t.Fatalf("resend request failed: %v", err)
@@ -2723,7 +2731,7 @@ func TestSingleFileCascadesRestrictedBundleAllowsRecipient(t *testing.T) {
 	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
 
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		Url:             urlIp + "/downloadFile?id=" + fileId,
 		RequiredContent: []string{"789"},
 		Cookies:         []test.Cookie{cookie},
 	})
@@ -2790,17 +2798,17 @@ func TestSingleFileNoCascadeWhenBundleUnrestrictedOrAbsent(t *testing.T) {
 	})
 
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + memberFileId,
+		Url:             urlIp + "/downloadFile?id=" + memberFileId,
 		RequiredContent: []string{"789"},
 	})
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + noBundleFileId,
+		Url:             urlIp + "/downloadFile?id=" + noBundleFileId,
 		RequiredContent: []string{"456"},
 	})
 
 	client := &http.Client{}
 	for _, id := range []string{memberFileId} {
-		resp, err := client.Get("http://127.0.0.1:53843/pubapi/file?id=" + id)
+		resp, err := client.Get(urlIp + "/pubapi/file?id=" + id)
 		if err != nil {
 			t.Fatalf("Failed to request file metadata: %v", err)
 		}
@@ -2886,7 +2894,7 @@ func TestFolderZipExhaustedBundleAllowanceStillRefusesWhole(t *testing.T) {
 
 	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
+	req, err := http.NewRequest("GET", urlIp+"/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -2967,7 +2975,7 @@ func TestSingleFileRestrictedDownloadAttributesRecipient(t *testing.T) {
 
 	cookie := testShareAccessCookie(models.ShareResourceFile, fileId, recipientId)
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		Url:             urlIp + "/downloadFile?id=" + fileId,
 		RequiredContent: []string{"789"},
 		Cookies:         []test.Cookie{cookie},
 	})
@@ -3001,7 +3009,7 @@ func TestSingleFileUnrestrictedDownloadStaysAnonymous(t *testing.T) {
 	})
 
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		Url:             urlIp + "/downloadFile?id=" + fileId,
 		RequiredContent: []string{"789"},
 	})
 
@@ -3046,7 +3054,7 @@ func TestSingleFileRestrictedAllowanceExhaustedDenialAttributesRecipient(t *test
 
 	// First download spends the one allowed download.
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId,
+		Url:             urlIp + "/downloadFile?id=" + fileId,
 		RequiredContent: []string{"789"},
 		Cookies:         []test.Cookie{cookie},
 	})
@@ -3055,7 +3063,7 @@ func TestSingleFileRestrictedAllowanceExhaustedDenialAttributesRecipient(t *test
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/downloadFile?id="+fileId, nil)
+	req, err := http.NewRequest("GET", urlIp+"/downloadFile?id="+fileId, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -3125,7 +3133,7 @@ func TestFolderZipRestrictedAttributesEveryMemberToRecipient(t *testing.T) {
 
 	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
+	req, err := http.NewRequest("GET", urlIp+"/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -3206,7 +3214,7 @@ func TestShareLinkRedeemedLogsOnlyOnFirstOpen(t *testing.T) {
 
 	// First open: presents the token, is served, and logs the redemption once.
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId + "&token=" + rawToken,
+		Url:             urlIp + "/downloadFile?id=" + fileId + "&token=" + rawToken,
 		RequiredContent: []string{"789"},
 	})
 	time.Sleep(200 * time.Millisecond)
@@ -3214,7 +3222,7 @@ func TestShareLinkRedeemedLogsOnlyOnFirstOpen(t *testing.T) {
 
 	// Second open with the very same token: still served, but must not log a second redemption.
 	test.HttpPageResult(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/downloadFile?id=" + fileId + "&token=" + rawToken,
+		Url:             urlIp + "/downloadFile?id=" + fileId + "&token=" + rawToken,
 		RequiredContent: []string{"789"},
 	})
 	time.Sleep(200 * time.Millisecond)
@@ -3225,7 +3233,7 @@ func TestShareLinkRedeemedLogsOnlyOnFirstOpen(t *testing.T) {
 func TestPublicApiConfig(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/config")
+	resp, err := client.Get(urlIp + "/pubapi/config")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -3360,7 +3368,7 @@ func TestDownloadLeewayIsNotOnAuthenticatedConfig(t *testing.T) {
 func TestPublicApiConfigNoSensitiveFields(t *testing.T) {
 	t.Parallel()
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/config")
+	resp, err := client.Get(urlIp + "/pubapi/config")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -3399,7 +3407,7 @@ func TestPublicApiConfigUnauthenticated(t *testing.T) {
 	t.Parallel()
 	// Create client without any authentication
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/config")
+	resp, err := client.Get(urlIp + "/pubapi/config")
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -3470,7 +3478,7 @@ func TestFolderPasswordGatesEveryMember(t *testing.T) {
 
 	// A single member requested directly through the zip door, with no cookie, is gated the
 	// same as the whole folder: no bytes, just the requiresPassword prompt.
-	zipResp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id + "&ids=" + member1Id)
+	zipResp, err := client.Get(urlIp + "/pubapi/folderzip?id=" + bundle.Id + "&ids=" + member1Id)
 	if err != nil {
 		t.Fatalf("Failed to request folderzip: %v", err)
 	}
@@ -3485,7 +3493,7 @@ func TestFolderPasswordGatesEveryMember(t *testing.T) {
 
 	// A wrong password is rejected and sets no cookie.
 	payloadWrongPw := []byte(`{"password":"not_the_password"}`)
-	req, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payloadWrongPw))
+	req, err := http.NewRequest("POST", urlIp+"/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payloadWrongPw))
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
@@ -3516,7 +3524,7 @@ func TestFolderPasswordGatesEveryMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to marshal payload: %v", err)
 	}
-	req2, err := http.NewRequest("POST", "http://127.0.0.1:53843/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payloadCorrectPw))
+	req2, err := http.NewRequest("POST", urlIp+"/pubapi/folderpassword?id="+bundle.Id, bytes.NewReader(payloadCorrectPw))
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
@@ -3549,7 +3557,7 @@ func TestFolderPasswordGatesEveryMember(t *testing.T) {
 
 	// The same cookie now unlocks the OTHER member too - one password gates every member, not
 	// just the one that happened to be requested when it was verified.
-	req3, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+member2Id, nil)
+	req3, err := http.NewRequest("GET", urlIp+"/pubapi/folderzip?id="+bundle.Id+"&ids="+member2Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}
@@ -3593,7 +3601,7 @@ func TestFolderLockedLeaksNothing(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle.Id)
+	resp, err := client.Get(urlIp + "/pubapi/folder?id=" + bundle.Id)
 	if err != nil {
 		t.Errorf("Failed to make request: %v", err)
 		return
@@ -3658,7 +3666,7 @@ func TestPublicApiFolderDeadMembersLeaksNothing(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle.Id)
+	resp, err := client.Get(urlIp + "/pubapi/folder?id=" + bundle.Id)
 	if err != nil {
 		t.Fatalf("Failed to request dead folder: %v", err)
 	}
@@ -3697,7 +3705,7 @@ func TestPublicApiFolderDeadMembersLeaksNothing(t *testing.T) {
 		BundleId:           protectedBundle.Id,
 	})
 
-	resp2, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + protectedBundle.Id)
+	resp2, err := client.Get(urlIp + "/pubapi/folder?id=" + protectedBundle.Id)
 	if err != nil {
 		t.Fatalf("Failed to request dead protected folder: %v", err)
 	}
@@ -3770,7 +3778,7 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 
 	// First request: the whole zip (no ids=, so len(requestedMembers) == 2), spends the folder's
 	// one and only download.
-	firstReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
+	firstReq, err := http.NewRequest("GET", urlIp+"/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to create first request: %v", err)
 	}
@@ -3795,7 +3803,7 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 
 	// Second request: the folder's allowance is exhausted. A second whole-zip request must be
 	// refused as a whole - no partial archive.
-	secondReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id, nil)
+	secondReq, err := http.NewRequest("GET", urlIp+"/pubapi/folderzip?id="+bundle.Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to create second request: %v", err)
 	}
@@ -3814,7 +3822,7 @@ func TestFolderZipCounterEnforced(t *testing.T) {
 
 	// Third request: a SINGLE member, drawing from the same now-exhausted allowance, must also
 	// be refused - proving the zip and single-member doors share one counter, not two.
-	thirdReq, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundle.Id+"&ids="+member1Id, nil)
+	thirdReq, err := http.NewRequest("GET", urlIp+"/pubapi/folderzip?id="+bundle.Id+"&ids="+member1Id, nil)
 	if err != nil {
 		t.Fatalf("Failed to create third request: %v", err)
 	}
@@ -3913,7 +3921,7 @@ func TestFolderZipMemberOwnDownloadFieldsAreInert(t *testing.T) {
 	})
 
 	client := &http.Client{}
-	resp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id)
+	resp, err := client.Get(urlIp + "/pubapi/folderzip?id=" + bundle.Id)
 	if err != nil {
 		t.Fatalf("Failed to request folderzip: %v", err)
 	}
@@ -3973,7 +3981,7 @@ func TestFolderZipConcurrentVisitsExactlyOneSucceeds(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			client := &http.Client{}
-			resp, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle.Id)
+			resp, err := client.Get(urlIp + "/pubapi/folderzip?id=" + bundle.Id)
 			if err != nil {
 				t.Errorf("Failed to request folderzip: %v", err)
 				return
@@ -4063,7 +4071,7 @@ func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
 
 	client := &http.Client{}
 
-	resp1, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle1.Id + "&ids=" + file1Id + "," + file2Id)
+	resp1, err := client.Get(urlIp + "/pubapi/folderzip?id=" + bundle1.Id + "&ids=" + file1Id + "," + file2Id)
 	if err != nil {
 		t.Errorf("Failed to make request with cross-bundle ids: %v", err)
 		return
@@ -4074,7 +4082,7 @@ func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
 		t.Errorf("Expected status 400 for cross-bundle ids, got %d", resp1.StatusCode)
 	}
 
-	resp2, err := client.Get("http://127.0.0.1:53843/pubapi/folder?id=" + bundle1.Id)
+	resp2, err := client.Get(urlIp + "/pubapi/folder?id=" + bundle1.Id)
 	if err != nil {
 		t.Errorf("Failed to make folder request: %v", err)
 		return
@@ -4097,7 +4105,7 @@ func TestFolderZipMembershipAndFileRequestExclusion(t *testing.T) {
 		t.Errorf("Expected 1 file (file request should be excluded), got %d files", len(files))
 	}
 
-	resp3, err := client.Get("http://127.0.0.1:53843/pubapi/folderzip?id=" + bundle1.Id)
+	resp3, err := client.Get(urlIp + "/pubapi/folderzip?id=" + bundle1.Id)
 	if err != nil {
 		t.Errorf("Failed to make folderzip request: %v", err)
 		return

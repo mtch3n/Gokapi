@@ -151,7 +151,7 @@ func TestFolderExists(t *testing.T) {
 func TestHttpPageResult(t *testing.T) {
 	startTestServer()
 	HttpPageResult(t, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		RequiredContent: []string{"TestContent", "testName", "testValue", "testPostKey", "testPostValue"},
 		ExcludedContent: []string{"invalid"},
 		PostValues: []PostBody{{
@@ -171,21 +171,21 @@ func TestHttpPageResult(t *testing.T) {
 	mockT := MockTest{reference: t}
 	mockT.WantFail()
 	HttpPageResult(mockT, HttpTestConfig{
-		Url: "http://127.0.0.1:9999/invalid",
+		Url: Url(PortHelper) + "/invalid",
 	})
 	mockT.WantFail()
 	HttpPageResult(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		RequiredContent: []string{"invalid"},
 	})
 	mockT.WantFail()
 	HttpPageResult(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		ExcludedContent: []string{"TestContent"},
 	})
 	mockT.WantFail()
 	HttpPageResult(mockT, HttpTestConfig{
-		Url:    "http://127.0.0.1:9999/test",
+		Url:    Url(PortHelper) + "/test",
 		IsHtml: true,
 	})
 	mockT.Check()
@@ -194,7 +194,7 @@ func TestHttpPageResult(t *testing.T) {
 func TestHttpPostUploadRequest(t *testing.T) {
 	os.WriteFile("testfile", []byte("Testbytes"), 0777)
 	HttpPostUploadRequest(t, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		PostValues:      []PostBody{{Key: "test", Value: "test2"}},
@@ -208,14 +208,14 @@ func TestHttpPostUploadRequest(t *testing.T) {
 	mockT := MockTest{reference: t}
 	mockT.WantFail()
 	HttpPostUploadRequest(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		ExcludedContent: []string{"TestContent"}},
 	)
 	mockT.WantFail()
 	HttpPostUploadRequest(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		RequiredContent: []string{"invalid"}},
@@ -225,7 +225,7 @@ func TestHttpPostUploadRequest(t *testing.T) {
 }
 func TestHttpPageResultJson(t *testing.T) {
 	HttpPageResultJson(t, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		PostValues:      []PostBody{{Key: "test", Value: "test2"}},
@@ -239,7 +239,7 @@ func TestHttpPageResultJson(t *testing.T) {
 	mockT := MockTest{reference: t}
 	mockT.WantFail()
 	HttpPageResultJson(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		Headers:         []Header{{Name: "test", Value: "input"}},
@@ -247,7 +247,7 @@ func TestHttpPageResultJson(t *testing.T) {
 	)
 	mockT.WantFail()
 	HttpPageResultJson(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		RequiredContent: []string{"invalid"}},
@@ -256,7 +256,7 @@ func TestHttpPageResultJson(t *testing.T) {
 }
 func TestHttpPostRequest(t *testing.T) {
 	HttpPostRequest(t, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		PostValues:      []PostBody{{Key: "test", Value: "test2"}},
@@ -270,7 +270,7 @@ func TestHttpPostRequest(t *testing.T) {
 	mockT := MockTest{reference: t}
 	mockT.WantFail()
 	HttpPostRequest(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		Headers:         []Header{{Name: "test", Value: "input"}},
@@ -278,7 +278,7 @@ func TestHttpPostRequest(t *testing.T) {
 	)
 	mockT.WantFail()
 	HttpPostRequest(mockT, HttpTestConfig{
-		Url:             "http://127.0.0.1:9999/test",
+		Url:             Url(PortHelper) + "/test",
 		UploadFileName:  "testfile",
 		UploadFieldName: "file",
 		RequiredContent: []string{"invalid"}},
@@ -310,7 +310,7 @@ func startTestServer() {
 			_, _ = io.WriteString(writer, "testPostKey: "+request.PostForm.Get("testPostKey")+"\n")
 		}
 	})
-	go func() { log.Fatal(http.ListenAndServe("127.0.0.1:9999", nil)) }()
+	go func() { log.Fatal(http.ListenAndServe(PortHelper, nil)) }()
 	time.Sleep(2 * time.Second)
 }
 
