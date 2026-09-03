@@ -1265,8 +1265,8 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		// refused here rather than at the per-recipient check below, exactly as an expired one
 		// is. The recipient asking for it is attached first, or the last denial of a share's life
 		// would be the one entry in its trail with nobody's name on it. Costs nothing for an
-		// ordinary probe: with no token and no cookie, recipientFor answers from memory.
-		r = attachRecipient(r, recipientFor(w, r, models.ShareResourceFile, id))
+		// ordinary probe: with no token and no cookie, RecipientFor answers from memory.
+		r = attachRecipient(r, shareaccess.RecipientFor(w, r, models.ShareResourceFile, id))
 		if err := logging.LogDownloadDenied(models.File{Id: id}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
 			respondAuditWriteFailed(w)
 			return
@@ -1284,7 +1284,7 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	// itself is also independently restricted, and before anything else below, so a
 	// non-recipient never learns more than "not found".
 	if savedFile.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, savedFile.BundleId) {
-		bundleRecipientId := recipientFor(w, r, models.ShareResourceBundle, savedFile.BundleId)
+		bundleRecipientId := shareaccess.RecipientFor(w, r, models.ShareResourceBundle, savedFile.BundleId)
 		if bundleRecipientId == 0 {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"no valid recipient access for the file's restricted bundle"); err != nil {
@@ -1307,7 +1307,7 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	// "not found" rather than "forbidden": a 403 would confirm that this ID
 	// names a real file to anyone probing IDs.
 	if database.IsShareRestricted(models.ShareResourceFile, savedFile.Id) {
-		recipientId := recipientFor(w, r, models.ShareResourceFile, savedFile.Id)
+		recipientId := shareaccess.RecipientFor(w, r, models.ShareResourceFile, savedFile.Id)
 		if recipientId == 0 {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"no valid recipient access for a restricted file"); err != nil {
@@ -1429,7 +1429,7 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	// the page has made any other request.
 	isAuthorisedRecipient := true
 	if accessMode == models.AccessModeIdentity {
-		recipientId := recipientFor(w, r, models.ShareResourceFile, keyId)
+		recipientId := shareaccess.RecipientFor(w, r, models.ShareResourceFile, keyId)
 		isAuthorisedRecipient = recipientId != 0
 		// A recipient who has spent their own allowance, and whose download window has closed
 		// with it, is finished with this file: they are no longer entitled to its name, its size
@@ -1608,9 +1608,9 @@ func pubApiUploadRequest(w http.ResponseWriter, r *http.Request) {
 	if database.IsShareRestricted(models.ShareResourceFileRequest, requestId) {
 		// A request mailed to named recipients supersedes the apikey header: everyone holding
 		// the link has that same header value, so it must not double as identity here, or the
-		// recipient list restricts nothing. recipientFor checks a sharetoken header, a ?token=
+		// recipient list restricts nothing. RecipientFor checks a sharetoken header, a ?token=
 		// query param fallback, or an existing cookie, and on a token exchanges it for a cookie.
-		if recipientFor(w, r, models.ShareResourceFileRequest, requestId) == 0 {
+		if shareaccess.RecipientFor(w, r, models.ShareResourceFileRequest, requestId) == 0 {
 			// An unthrottled fast 200 next to every other refusal's slow 404 would itself be an
 			// existence oracle for restricted request ids, and token guessing must not be free.
 			ratelimiter.WaitOnFailedId(r)
@@ -1923,10 +1923,10 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 
 	// See the identical check in pubApiFolder: a restricted bundle is refused as
 	// "not found" for a non-authorised requester, before any bytes are served.
-	// recipientFor is used instead of mayAccessShare so the id is available to attach below;
+	// RecipientFor is used instead of mayAccessShare so the id is available to attach below;
 	// for an unrestricted bundle it returns 0 and attachRecipient below is then a no-op.
 	if database.IsShareRestricted(models.ShareResourceBundle, bundle.Id) {
-		bundleRecipientId := recipientFor(w, r, models.ShareResourceBundle, bundle.Id)
+		bundleRecipientId := shareaccess.RecipientFor(w, r, models.ShareResourceBundle, bundle.Id)
 		if bundleRecipientId == 0 {
 			respondPubApiNotFound(w, r)
 			return

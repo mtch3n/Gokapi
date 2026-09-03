@@ -10,66 +10,6 @@ import (
 	"github.com/forceu/gokapi/internal/storage"
 )
 
-// shareTokenParam is the query parameter carrying an access token. It is kept as a fallback
-// only: the mailed link itself now carries the token in the URL fragment (see
-// shareaccess.BuildAccessUrl), which is never sent to the server at all, so links mailed before
-// that change - still valid for up to 30 days - and any other caller that lands here with the
-// old query form both keep working.
-const shareTokenParam = "token"
-
-// shareTokenHeader is the request header the SPA forwards the token in, since a fragment never
-// reaches the server and has to be read out client-side. It mirrors the existing apikey header
-// idiom used elsewhere on /pubapi/*.
-const shareTokenHeader = "sharetoken"
-
-// recipientFor returns the recipient authorised for this resource by the
-// current request, or 0.
-//
-// Three ways in are accepted, in this order:
-//
-//  1. A token in the sharetoken request header, which is how the SPA forwards the fragment
-//     token it read out of the mailed link.
-//  2. A token in the query string, kept as a fallback: links mailed before the fragment change
-//     still carry it there, and a caller that downloads straight from the link (no JS, so no
-//     header) has no other way to present it.
-//  3. A cookie from an earlier exchange.
-//
-// On success from either token form it is exchanged for a cookie so it stops appearing in later
-// requests, and therefore in browser history and proxy access logs.
-//
-// The grant is re-checked on every call, not trusted from the cookie, so
-// removing a recipient or blocking them takes effect on their next request
-// rather than when their cookie happens to expire.
-func recipientFor(w http.ResponseWriter, r *http.Request, resourceType int, resourceId string) int {
-	rawToken := r.Header.Get(shareTokenHeader)
-	if rawToken == "" {
-		rawToken = r.URL.Query().Get(shareTokenParam)
-	}
-	if rawToken != "" {
-		recipient, firstUse, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
-		if err == nil {
-			if w != nil {
-				shareaccess.WriteCookie(w, r, resourceType, resourceId, recipient.Id)
-			}
-			if firstUse {
-				logging.LogShareLinkRedeemed(resourceType, resourceId, recipient, r)
-			}
-			return recipient.Id
-		}
-		// A bad token falls through to the cookie rather than failing
-		// outright: a recipient who already has a session should not be locked
-		// out by clicking a link that has since been superseded by a resend.
-	}
-	recipientId, ok := shareaccess.ReadCookie(r, resourceType, resourceId)
-	if !ok {
-		return 0
-	}
-	if !database.HasShareGrant(resourceType, resourceId, recipientId) {
-		return 0
-	}
-	return recipientId
-}
-
 // attachRecipient looks up recipientId and, if it names a real recipient, returns a shallow
 // copy of r with it attached via logging.WithRecipient - the sibling of WithActor - so that a
 // download or upload served through r afterwards is attributed to that recipient instead of
@@ -104,7 +44,7 @@ func mayAccessShare(w http.ResponseWriter, r *http.Request, resourceType int, re
 	if !database.IsShareRestricted(resourceType, resourceId) {
 		return true
 	}
-	recipientId := recipientFor(w, r, resourceType, resourceId)
+	recipientId := shareaccess.RecipientFor(w, r, resourceType, resourceId)
 	if recipientId == 0 {
 		return false
 	}
@@ -150,9 +90,10 @@ func consumeShareDownload(r *http.Request, resourceType int, resourceId string, 
 		// Fall back to a token in the URL query. Mailed links now carry the token in a
 		// fragment the server never sees, but this fallback remains for pre-fragment mailed
 		// links (?token= form, valid up to 30 days) presented directly to a download URL.
-		if rawToken := r.URL.Query().Get(shareTokenParam); rawToken != "" {
+		if rawToken := r.URL.Query().Get(shareaccess.TokenQueryParam); rawToken != "" {
 			// firstUse is not raised here: this fallback only feeds the download-consuming
-			// path, and recipientFor - which does raise share.link.redeemed - is always the
+			// path, and shareaccess.RecipientFor - which does raise share.link.redeemed - is
+			// always the
 			// first call to validate a token for a given request.
 			recipient, _, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
 			if err != nil {
@@ -167,7 +108,7 @@ func consumeShareDownload(r *http.Request, resourceType int, resourceId string, 
 		// only proves the cookie is genuine, not that the grant behind it still
 		// exists. Without this, revoking a recipient mid-cookie-lifetime would
 		// not take effect on this download-consuming path until the cookie
-		// itself expired, the same gap recipientFor already closes for the
+		// itself expired, the same gap RecipientFor already closes for the
 		// read-only access check.
 		return false
 	}

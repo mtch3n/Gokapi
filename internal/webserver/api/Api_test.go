@@ -3937,14 +3937,19 @@ func TestChunkUploadRequestClosesOnLastFile(t *testing.T) {
 }
 
 // uploadChunkToFileRequestWithCookie behaves like uploadChunkToFileRequest but, when cookie is
-// non-nil, attaches it to the chunk-complete call - the same access cookie a real recipient's
-// browser carries after exchanging their mailed token on the public upload page (see
-// ShareGuard.recipientFor / pubApiUploadRequest). Used to prove the resulting upload is
-// attributed to that recipient rather than to the request's owner.
+// non-nil, attaches it to every call - the same access cookie a real recipient's browser carries
+// after exchanging their mailed token on the public upload page (see shareaccess.RecipientFor /
+// pubApiUploadRequest). Used to prove the resulting upload is attributed to that recipient rather
+// than to the request's owner. The cookie is sent on all three calls because a file request
+// restricted to named recipients now requires the recipient's identity on each of them, not only
+// the request's api key - see checkFileRequestAndApiKey.
 func uploadChunkToFileRequestWithCookie(t *testing.T, frId, publicKey, tmpName string, cookie *http.Cookie) {
 	w, r := getRecorderWithBody("/uploadrequest/chunk/reserve", publicKey, "POST", []test.Header{
 		{Name: "id", Value: frId},
 	}, nil)
+	if cookie != nil {
+		r.AddCookie(cookie)
+	}
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
 	var reserved struct {
@@ -3972,6 +3977,9 @@ func uploadChunkToFileRequestWithCookie(t *testing.T, frId, publicKey, tmpName s
 		{Name: "fileRequestId", Value: frId},
 	}, body)
 	r.Header.Add("Content-Type", formcontent)
+	if cookie != nil {
+		r.AddCookie(cookie)
+	}
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
 

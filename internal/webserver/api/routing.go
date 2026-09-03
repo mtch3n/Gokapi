@@ -1072,20 +1072,24 @@ func (p *paramChunkComplete) ProcessParameter(r *http.Request) error {
 
 type paramChunkReserve struct {
 	Id           string `header:"id" required:"true"`
+	WebRequest   *http.Request
 	foundHeaders map[string]bool
 }
 
-func (p *paramChunkReserve) ProcessParameter(_ *http.Request) error {
+func (p *paramChunkReserve) ProcessParameter(r *http.Request) error {
+	p.WebRequest = r
 	return nil
 }
 
 type paramChunkUnreserve struct {
 	Id           string `header:"id" required:"true"`
 	Uuid         string `header:"uuid" required:"true"`
+	WebRequest   *http.Request
 	foundHeaders map[string]bool
 }
 
-func (p *paramChunkUnreserve) ProcessParameter(_ *http.Request) error {
+func (p *paramChunkUnreserve) ProcessParameter(r *http.Request) error {
+	p.WebRequest = r
 	return nil
 }
 

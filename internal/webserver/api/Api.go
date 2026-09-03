@@ -1077,7 +1077,7 @@ func apiChunkReserve(w http.ResponseWriter, r requestParser, _ models.User, apik
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(request.Id, apikey)
+	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(w, request.WebRequest, request.Id, apikey)
 	if !ok {
 		sendError(w, status, errorCode, errorMsg)
 		return
@@ -1112,7 +1112,7 @@ func apiChunkUnreserve(w http.ResponseWriter, r requestParser, _ models.User, ap
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(request.Id, apikey)
+	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(w, request.WebRequest, request.Id, apikey)
 	if !ok {
 		sendError(w, status, errorCode, errorMsg)
 		return
@@ -1127,7 +1127,7 @@ func apiChunkUploadRequestAdd(w http.ResponseWriter, r requestParser, user model
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(request.FileRequestId, apikey)
+	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(w, request.GetRequest(), request.FileRequestId, apikey)
 	if !ok {
 		sendError(w, status, errorCode, errorMsg)
 		return
@@ -1145,13 +1145,32 @@ func apiChunkUploadRequestAdd(w http.ResponseWriter, r requestParser, user model
 	}
 }
 
-func checkFileRequestAndApiKey(fileRequestId string, apiKey models.ApiKey) (models.FileRequest, bool, int, int, string) {
+func checkFileRequestAndApiKey(w http.ResponseWriter, r *http.Request, fileRequestId string, apiKey models.ApiKey) (models.FileRequest, bool, int, int, string) {
 	fileRequest, ok := filerequest.Get(fileRequestId)
 	if !ok {
 		return models.FileRequest{}, false, http.StatusNotFound, errorcodes.NotFound, "FileRequest does not exist with the given ID"
 	}
 	if fileRequest.ApiKey != apiKey.Id {
 		return models.FileRequest{}, false, http.StatusUnauthorized, errorcodes.InvalidApiKey, "Invalid API key"
+	}
+	// A request mailed to named recipients is not authorised by its api key alone. The entry
+	// endpoint (pubApiUploadRequest) refuses a non-recipient, but it hands the api key to
+	// everyone it lets past, and that key keeps working after the holder is removed from the
+	// list - so the same question has to be asked again on every chunk, or removing a recipient
+	// revokes their downloads immediately and their uploads never. shareaccess.RecipientFor is
+	// the same resolution the download paths use: a sharetoken header, a ?token= query fallback,
+	// then a cookie, with the grant re-checked against the database every time.
+	//
+	// An unrestricted request has no recipient list to be on and is untouched: a public upload
+	// link keeps working for anonymous guests holding the api key.
+	if database.IsShareRestricted(models.ShareResourceFileRequest, fileRequestId) {
+		if shareaccess.RecipientFor(w, r, models.ShareResourceFileRequest, fileRequestId) == 0 {
+			// Refused as "not found", the same convention a restricted bundle gets in
+			// pubApiFolder, so this answer says no more than the not-found branch above does.
+			// The caller is told what is actually wrong by the entry endpoint, which reports
+			// valid:false/identity when they reload the upload page.
+			return models.FileRequest{}, false, http.StatusNotFound, errorcodes.NotFound, "FileRequest does not exist with the given ID"
+		}
 	}
 	if !fileRequest.IsUnlimitedTime() && fileRequest.Expiry < time.Now().Unix() {
 		return models.FileRequest{}, false, http.StatusUnauthorized, errorcodes.RequestExpired, "Filerequest has expired"
@@ -1450,7 +1469,7 @@ func apiChunkUploadRequestComplete(w http.ResponseWriter, r requestParser, user 
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(request.FileRequestId, apikey)
+	fileRequest, ok, status, errorCode, errorMsg := checkFileRequestAndApiKey(w, request.WebRequest, request.FileRequestId, apikey)
 	if !ok {
 		sendError(w, status, errorCode, errorMsg)
 		return
