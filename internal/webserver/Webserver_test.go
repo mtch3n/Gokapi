@@ -3335,6 +3335,36 @@ func TestPublicApiConfig(t *testing.T) {
 			t.Errorf("expiryOptionsSeconds must never be empty")
 		}
 
+		// defaultExpirySeconds is the preset a client preselects for a new upload. Neither
+		// GOKAPI_DEFAULT_EXPIRY nor GOKAPI_EXPIRY_OPTIONS is set for these tests, so the value
+		// published here must be the built-in default of 7d against the built-in six-preset
+		// list, written out as seconds rather than derived from either. It must also be one of
+		// the presets actually published above, and must not be the longest of them - a client
+		// that takes this value unchanged must not end up handing every upload the maximum
+		// retention the instance allows.
+		defaultExpirySeconds, ok := limits["defaultExpirySeconds"].(float64)
+		if !ok {
+			t.Errorf("Missing or invalid defaultExpirySeconds field in limits")
+		} else {
+			if int64(defaultExpirySeconds) != 604800 {
+				t.Errorf("Expected defaultExpirySeconds 604800, got %v", defaultExpirySeconds)
+			}
+			isOption := false
+			for _, option := range options {
+				value, isNumber := option.(float64)
+				if isNumber && value == defaultExpirySeconds {
+					isOption = true
+				}
+			}
+			if !isOption {
+				t.Errorf("defaultExpirySeconds %v is not one of expiryOptionsSeconds %v", defaultExpirySeconds, options)
+			}
+			longest, isNumber := options[len(options)-1].(float64)
+			if isNumber && longest == defaultExpirySeconds {
+				t.Errorf("defaultExpirySeconds %v must not be the longest expiry option", defaultExpirySeconds)
+			}
+		}
+
 		// maxFilesGuestUpload/maxSizeGuestUploadMB must match GOKAPI_MAX_FILES_GUESTUPLOAD and
 		// GOKAPI_MAX_SIZE_GUESTUPLOAD exactly - the same env values isUserAllowedUnlimited
 		// (internal/webserver/api/Api.go) reads to cap a non-admin file request owner. Publishing

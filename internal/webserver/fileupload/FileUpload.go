@@ -211,7 +211,7 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 	}
 	expiryDaysInt, err := strconv.Atoi(expiryDays)
 	if err != nil {
-		expiryDaysInt = 14
+		expiryDaysInt = defaultExpiryDays()
 	}
 
 	unlimitedDownload := values.Get("isUnlimitedDownload") == "true"
@@ -240,6 +240,24 @@ func parseConfig(values formOrHeader) (models.UploadParameters, error) {
 
 type formOrHeader interface {
 	Get(key string) string
+}
+
+// defaultExpiryDays is GOKAPI_DEFAULT_EXPIRY expressed in the whole days this path works in.
+// It is the expiry used when a caller supplies no usable expiryDays at all, so that the
+// server's own default is the one the operator configured rather than a value hardcoded here.
+//
+// The conversion rounds up and never returns less than one day. parseConfig reads an
+// expiryDays of 0 as "unlimited", so truncating a configured default shorter than a day down
+// to 0 would turn the safest possible setting into a permanent file - the same trap
+// applyMaxExpiry below rounds up to avoid.
+func defaultExpiryDays() int {
+	defaultExpiry := time.Duration(environment.New().DefaultExpiry)
+	const day = 24 * time.Hour
+	days := int((defaultExpiry + day - 1) / day)
+	if days < 1 {
+		days = 1
+	}
+	return days
 }
 
 // applyMaxExpiry clamps an upload's lifetime to GOKAPI_MAX_EXPIRY.

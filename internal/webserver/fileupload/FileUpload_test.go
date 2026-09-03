@@ -57,7 +57,9 @@ func TestParseConfig(t *testing.T) {
 	config, err = parseConfig(data)
 	test.IsNil(t, err)
 	test.IsEqualInt(t, config.AllowedDownloads, 1)
-	test.IsEqualInt(t, config.Expiry, 14)
+	// No usable expiryDays, so the server falls back to GOKAPI_DEFAULT_EXPIRY, which is unset
+	// here and therefore its built-in default of 7d.
+	test.IsEqualInt(t, config.Expiry, 7)
 	test.IsEqualBool(t, config.UnlimitedTime, false)
 	test.IsEqualBool(t, config.UnlimitedDownload, false)
 
@@ -92,6 +94,35 @@ func TestParseConfig(t *testing.T) {
 // password at all, producing an unprotected upload while the caller believed it was
 // protected. Unlike a header value, a form field is not trimmed by the transport, so
 // this reproduces the exact string a real whitespace-only submission would carry.
+// TestParseConfigUsesDefaultExpiry pins that the fallback parseConfig applies when a caller
+// supplies no usable expiryDays is the operator's GOKAPI_DEFAULT_EXPIRY and not a value fixed
+// in the code. A default shorter than a day is rounded up to one day rather than truncated to
+// zero, which parseConfig would otherwise read as an unlimited lifetime.
+func TestParseConfigUsesDefaultExpiry(t *testing.T) {
+	data := testData{
+		allowedDownloads: "1",
+		expiryDays:       "invalid",
+		password:         "",
+	}
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "1d")
+	defer os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
+	config, err := parseConfig(data)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 1)
+	test.IsEqualBool(t, config.UnlimitedTime, false)
+
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "30d")
+	config, err = parseConfig(data)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 30)
+
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "1h")
+	config, err = parseConfig(data)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, config.Expiry, 1)
+	test.IsEqualBool(t, config.UnlimitedTime, false)
+}
+
 func TestParseConfigRejectsWhitespaceOnlyPassword(t *testing.T) {
 	data := testData{password: "   "}
 	_, err := parseConfig(data)
