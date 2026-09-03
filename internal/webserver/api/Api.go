@@ -2315,6 +2315,13 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 	grantedByNames := make(map[int]string)
 
 	for _, grant := range database.GetShareGrantsForRecipient(recipient.Id) {
+		// A grant that has spent its allowance is over, and the resource behind it refuses the
+		// download. Listing it anyway offered an Open link that could only fail - see
+		// models.ShareGrant.HasDownloadsLeft, which exists for exactly this display.
+		if !grant.HasDownloadsLeft() {
+			continue
+		}
+
 		var name string
 		var expiresAt int64
 		var size int64
@@ -2330,10 +2337,15 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			size = file.SizeBytes
 		case models.ShareResourceBundle:
 			bundle, ok := database.GetFileBundle(grant.ResourceId)
-			if !ok {
+			// A folder is the unit of sharing, so its own expiry and allowance decide whether
+			// there is anything left to open - the same test pubApiFolder applies. Without this
+			// an exhausted or expired folder stayed listed alongside the files, which are
+			// filtered just below.
+			if !ok || !bundle.IsAvailable(timeNow) {
 				continue
 			}
 			name = bundle.DisplayName()
+			expiresAt = shareExpiry(bundle.UnlimitedTime, bundle.ExpireAt)
 		case models.ShareResourceFileRequest:
 			fileRequest, ok := database.GetFileRequest(grant.ResourceId)
 			if !ok || fileRequest.Closed || fileRequest.IsExpired() {
