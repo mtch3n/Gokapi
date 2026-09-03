@@ -205,3 +205,62 @@ func TestSingleFileLastRecipientDenialAttributesRecipient(t *testing.T) {
 	test.IsEqualString(t, entry.Actor.RecipientEmail, "last-recipient@example.com")
 	test.IsEqualString(t, entry.Error, "unknown, expired, or invalid file id")
 }
+
+// TestPublicApiFolderRefusesExhaustedRecipient is the folder sibling of the file check above.
+// /pubapi/folder asked only whether a grant existed, so a recipient who had taken every visit
+// they were given still got the folder's name and its contents listing back. The same rule
+// applies here as everywhere else: they are finished, everybody else is not.
+func TestPublicApiFolderRefusesExhaustedRecipient(t *testing.T) {
+	bundleId := "perRecipientFolderView" + helper.GenerateRandomString(8)
+	database.SaveFileBundle(models.FileBundle{
+		Id:                 bundleId,
+		Name:               "recipient view folder",
+		UserId:             999,
+		CreationDate:       time.Now().Unix(),
+		DownloadsRemaining: 2,
+		UnlimitedTime:      true,
+	})
+	memberId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:          memberId,
+		Name:        "folder_view_member.txt",
+		Size:        "3 B",
+		SizeBytes:   3,
+		SHA1:        "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ContentType: "text/plain",
+		UserId:      999,
+		BundleId:    bundleId,
+		ExpireAt:    2147483646,
+	})
+	spent := database.SaveShareRecipient(models.ShareRecipient{
+		Email: "folder-view-spent@example.com", CreatedAt: time.Now().Unix()})
+	waiting := database.SaveShareRecipient(models.ShareRecipient{
+		Email: "folder-view-waiting@example.com", CreatedAt: time.Now().Unix()})
+	database.SetShareGrants(models.ShareResourceBundle, bundleId, []int{spent, waiting}, 999, 1)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundleId)
+		database.DeleteShareRecipient(spent)
+		database.DeleteShareRecipient(waiting)
+		database.DeleteMetaData(memberId)
+		database.DeleteFileBundle(models.FileBundle{Id: bundleId})
+	})
+
+	folderAs := func(recipientId int) int {
+		cookie := shareCookieFor(t, models.ShareResourceBundle, bundleId, recipientId)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/pubapi/folder?id="+bundleId, nil)
+		r.AddCookie(cookie)
+		pubApiFolder(w, r)
+		return w.Code
+	}
+
+	test.IsEqualInt(t, folderAs(spent), http.StatusOK)
+	test.IsEqualInt(t, folderAs(waiting), http.StatusOK)
+
+	granted, _ := database.AcquireShareGrantDownload(models.ShareResourceBundle, bundleId,
+		spent, time.Now().Unix(), 0)
+	test.IsEqualBool(t, granted, true)
+
+	test.IsEqualInt(t, folderAs(spent), http.StatusNotFound)
+	test.IsEqualInt(t, folderAs(waiting), http.StatusOK)
+}

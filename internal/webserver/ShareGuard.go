@@ -7,6 +7,7 @@ import (
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/shareaccess"
+	"github.com/forceu/gokapi/internal/storage"
 )
 
 // shareTokenParam is the query parameter carrying an access token. It is kept as a fallback
@@ -91,12 +92,38 @@ func attachRecipient(r *http.Request, recipientId int) *http.Request {
 //
 // A resource with no recipients is unrestricted and keeps the behaviour it has
 // always had: possession of the link, plus any passcode, is enough. A resource
-// with recipients is reachable only by one of them.
+// with recipients is reachable only by one of them, and only while that one
+// still has an allowance left.
+//
+// Spending the last of it ends this recipient's access outright rather than
+// only refusing them the download: they were given a number of collections and
+// they have taken them all, so there is nothing left for them to be shown. It
+// ends nobody else's - every other recipient keeps their own budget, and the
+// resource itself lives until the last of them is finished or it expires.
 func mayAccessShare(w http.ResponseWriter, r *http.Request, resourceType int, resourceId string) bool {
 	if !database.IsShareRestricted(resourceType, resourceId) {
 		return true
 	}
-	return recipientFor(w, r, resourceType, resourceId) != 0
+	recipientId := recipientFor(w, r, resourceType, resourceId)
+	if recipientId == 0 {
+		return false
+	}
+	return !shareaccess.IsExhausted(resourceType, resourceId, recipientId,
+		shareLeewayFor(resourceType, resourceId))
+}
+
+// shareLeewayFor returns how long a download window stays open for this
+// resource, so that "is this recipient finished with it" is asked with the same
+// window the download itself is metered by rather than a second one. Only a
+// secret differs - it has no window at all, see storage.LeewayFor - and a
+// folder or a file request is always the configured leeway.
+func shareLeewayFor(resourceType int, resourceId string) int64 {
+	if resourceType == models.ShareResourceFile {
+		if file, ok := database.GetMetaDataById(resourceId); ok {
+			return int64(storage.LeewayFor(file).Seconds())
+		}
+	}
+	return int64(storage.DownloadLeeway().Seconds())
 }
 
 // shareAccessMode reports which download flow applies, for a client to branch
