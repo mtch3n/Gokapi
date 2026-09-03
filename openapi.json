@@ -3014,7 +3014,7 @@
             "description": "Operation successful"
           },
           "400": {
-            "description": "Invalid parameter supplied, for example a malformed email address"
+            "description": "Invalid parameter supplied, for example a malformed email address, or the resource has no downloads remaining to give its recipients"
           },
           "401": {
             "description": "Invalid API key provided for authentication or API key does not have the required permission"
