@@ -63,11 +63,21 @@ func TestFolderZipGivesEveryRecipientTheOwnersWholeAllowance(t *testing.T) {
 		Email: "folder-allowance-a@example.com", CreatedAt: time.Now().Unix()})
 	second := database.SaveShareRecipient(models.ShareRecipient{
 		Email: "folder-allowance-b@example.com", CreatedAt: time.Now().Unix()})
-	database.SetShareGrants(models.ShareResourceBundle, bundleId, []int{first, second}, 999, 2)
+	// A third recipient who never collects, and is what this test is measured against rather
+	// than a spare. Once EVERY recipient is spent the folder is exhausted and CleanUp may
+	// legitimately collect it, so a test that spends them all is racing the sweep for the rows
+	// it then asserts on. Leaving one budget unspent keeps the folder alive, which is also the
+	// sharper statement: an individual recipient running out is independent of the folder's own
+	// life. That the folder dies when the LAST recipient finishes is asserted in
+	// storage.TestCleanUpDisposesFileOnceEveryRecipientIsSpent, where no webserver is running.
+	third := database.SaveShareRecipient(models.ShareRecipient{
+		Email: "folder-allowance-c@example.com", CreatedAt: time.Now().Unix()})
+	database.SetShareGrants(models.ShareResourceBundle, bundleId, []int{first, second, third}, 999, 2)
 	t.Cleanup(func() {
 		database.DeleteShareGrants(models.ShareResourceBundle, bundleId)
 		database.DeleteShareRecipient(first)
 		database.DeleteShareRecipient(second)
+		database.DeleteShareRecipient(third)
 		database.DeleteMetaData(memberId)
 		database.DeleteFileBundle(models.FileBundle{Id: bundleId})
 	})
@@ -81,7 +91,8 @@ func TestFolderZipGivesEveryRecipientTheOwnersWholeAllowance(t *testing.T) {
 		test.IsEqualInt(t, folderZipAs(t, bundleId, secondCookie), http.StatusOK)
 	}
 
-	// The fifth is refused, whoever asks for it: both recipients are finished, so the folder is.
+	// A fifth visit is refused for each of them: they are individually finished, even though the
+	// folder is not - the third recipient has never collected and still may.
 	test.IsEqualInt(t, folderZipAs(t, bundleId, firstCookie), http.StatusNotFound)
 	test.IsEqualInt(t, folderZipAs(t, bundleId, secondCookie), http.StatusNotFound)
 
