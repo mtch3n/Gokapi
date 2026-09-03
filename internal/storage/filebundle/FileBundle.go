@@ -49,32 +49,9 @@ func GetFiles(bundle models.FileBundle) []models.File {
 	return result
 }
 
-// Delete deletes a bundle and all its associated files.
-//
-// The bundle row itself is only removed when nothing refers to it any more. A disposed file
-// keeps its row for the metadata retention period so its owner can still see what was deleted,
-// and the folder has to outlive those rows: deleting it straight away left every member
-// pointing at a bundle that no longer existed, so the file list had nothing to group them
-// under and showed them flat, which is what the retention period exists to avoid. Once the
-// last member row is purged, storage.CleanUp's cleanInvalidBundles collects the bundle - the
-// same rule, in the same one place, for both paths. A folder that really had nothing left to
-// keep is still removed here rather than waiting for that sweep.
+// Delete deletes a bundle and all its associated files
 func Delete(bundle models.FileBundle) {
 	files := GetFiles(bundle)
 	storage.DeleteFiles(files, true)
-	if !hasStoredMember(bundle.Id) {
-		database.DeleteFileBundle(bundle)
-	}
-}
-
-// hasStoredMember reports whether any file ROW still names this bundle, disposed or not.
-// Deliberately not models.File.IsBundleMember, which answers the different question of what a
-// recipient may be served: every member has just been disposed of, so that would always say no.
-func hasStoredMember(bundleId string) bool {
-	for _, file := range database.GetAllMetadata() {
-		if file.BundleId == bundleId {
-			return true
-		}
-	}
-	return false
+	database.DeleteFileBundle(bundle)
 }
