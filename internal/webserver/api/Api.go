@@ -873,7 +873,10 @@ func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ m
 	result := make([]BundleWithMetadata, 0)
 	for _, bundle := range allBundles {
 		if bundle.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
-			_, totalSize, memberCount := bundle.Populate(allFiles)
+			// Listing view, not serving view: a disposed member keeps its row and its size in
+			// the file list, so the folder above it must count the same rows. See
+			// models.FileBundle.RetainedTotals.
+			totalSize, memberCount := bundle.RetainedTotals(allFiles)
 			// bundle.Name is empty when it could not be decrypted (see models.FileBundle.Name),
 			// which happens while the instance is sealed. Rendered as the placeholder rather than
 			// left blank; the underlying bundle is left untouched, only this local copy going to
