@@ -131,11 +131,16 @@ type Database interface {
 	// token and session they hold.
 	DeleteShareRecipient(id int)
 
-	// SetShareGrants replaces the recipient list for one resource. An empty
-	// list clears it, returning the resource to an anonymous access mode.
-	// Replacing rather than appending is what makes removing an address
-	// actually revoke it instead of leaving a stale grant behind.
-	// downloadsAllowed is the per-recipient budget; 0 means unlimited.
+	// SetShareGrants sets the recipient list for one resource to exactly the
+	// IDs given. An empty list clears it, returning the resource to an
+	// anonymous access mode. Taking the whole list rather than appending one
+	// at a time is what makes removing an address actually revoke it instead
+	// of leaving a stale grant behind.
+	//
+	// A recipient present both before and after keeps their grant untouched,
+	// counters included, so that editing the list cannot refund what someone
+	// has already spent. Only the recipients being added get a new grant, and
+	// downloadsAllowed is their per-recipient budget; 0 means unlimited.
 	SetShareGrants(resourceType int, resourceId string, recipientIds []int, grantedBy int, downloadsAllowed int)
 	// GetShareGrants returns every grant on a resource.
 	GetShareGrants(resourceType int, resourceId string) []models.ShareGrant

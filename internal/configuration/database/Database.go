@@ -167,9 +167,10 @@ func migrateShareAccess(dbOld, dbNew dbabstraction.Database) {
 		}
 		dbNew.SetShareGrants(key.resourceType, key.resourceId, recipientIds,
 			grants[0].GrantedBy, grants[0].DownloadsAllowed)
-		// SetShareGrants resets the counters, so the downloads each recipient
-		// has already taken are restored afterwards. Without this a migration
-		// would hand every recipient a fresh allowance.
+		// The destination has no grants yet, so every one of these is written
+		// fresh with a counter of zero. The downloads each recipient has
+		// already taken are replayed afterwards; without this a migration would
+		// hand every recipient a fresh allowance.
 		for _, grant := range grants {
 			newId, ok := idMapping[grant.RecipientId]
 			if !ok {

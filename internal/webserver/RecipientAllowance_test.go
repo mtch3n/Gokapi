@@ -23,7 +23,7 @@ import (
 func folderZipAs(t *testing.T, bundleId string, cookie test.Cookie) int {
 	t.Helper()
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", "http://127.0.0.1:53843/pubapi/folderzip?id="+bundleId, nil)
+	req, err := http.NewRequest("GET", urlIp+"/pubapi/folderzip?id="+bundleId, nil)
 	if err != nil {
 		t.Fatalf("Failed to build request: %v", err)
 	}

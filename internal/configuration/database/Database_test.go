@@ -855,6 +855,179 @@ func TestShareGrantDownloadCounter(t *testing.T) {
 	})
 }
 
+// shareGrantFor returns the grant this recipient holds on the resource. The test fails if there
+// is none, since every caller below is asserting something about a grant it has just created.
+func shareGrantFor(t *testing.T, resourceType int, resourceId string, recipientId int) models.ShareGrant {
+	t.Helper()
+	for _, grant := range GetShareGrants(resourceType, resourceId) {
+		if grant.RecipientId == recipientId {
+			return grant
+		}
+	}
+	t.Fatalf("recipient %d holds no grant on %s", recipientId, resourceId)
+	return models.ShareGrant{}
+}
+
+// Editing a resource's recipient list must leave the recipients that stay on it exactly as they
+// were. SetShareGrants is the only way to add or remove one, because the API replaces the whole
+// list, so a destructive implementation refunds everybody already on the share every time a
+// further address is typed in.
+//
+// The second call passes a different actor and a different allowance from the first, so a grant
+// that was rewritten with the current arguments is visible even though both calls land in the
+// same second. The counts are written as literals rather than derived from the allowance, so the
+// test still says something if the allowance ever changes.
+func TestSetShareGrantsKeepsExistingRecipientsProgress(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		anna := SaveShareRecipient(models.ShareRecipient{Email: "anna@example.com", CreatedAt: 1})
+		ben := SaveShareRecipient(models.ShareRecipient{Email: "ben@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "res-keep", []int{anna}, 7, 3)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-keep", anna), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-keep", anna), true)
+		before := shareGrantFor(t, file, "res-keep", anna)
+		test.IsEqualInt(t, before.DownloadsUsed, 2)
+		test.IsEqualBool(t, before.LastDownloadAt > 0, true)
+
+		// The owner adds a second address.
+		SetShareGrants(file, "res-keep", []int{anna, ben}, 9, 5)
+
+		after := shareGrantFor(t, file, "res-keep", anna)
+		test.IsEqual(t, after, before)
+		test.IsEqualInt(t, after.DownloadsUsed, 2)
+		test.IsEqualInt(t, after.DownloadsAllowed, 3)
+		test.IsEqualInt(t, after.GrantedBy, 7)
+		test.IsEqualInt64(t, after.LastDownloadAt, before.LastDownloadAt)
+		test.IsEqualInt64(t, after.GrantedAt, before.GrantedAt)
+
+		// Anna had one of her three left, so exactly one more download is granted and the next is
+		// refused. Two more would mean the edit had refunded her.
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-keep", anna), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-keep", anna), false)
+
+		// Ben is new, so he gets the allowance and the actor this call resolved.
+		newGrant := shareGrantFor(t, file, "res-keep", ben)
+		test.IsEqualInt(t, newGrant.DownloadsUsed, 0)
+		test.IsEqualInt(t, newGrant.DownloadsAllowed, 5)
+		test.IsEqualInt(t, newGrant.GrantedBy, 9)
+		test.IsEqualInt64(t, newGrant.LastDownloadAt, 0)
+
+		DeleteShareGrants(file, "res-keep")
+		DeleteShareRecipient(anna)
+		DeleteShareRecipient(ben)
+	})
+}
+
+// A recipient who has spent everything they were given must stay spent. This is the worst of the
+// refund cases: a resource is finished once its last recipient has taken their last download, so
+// handing an exhausted recipient a fresh budget brings content that was already out of reach back
+// within it.
+func TestSetShareGrantsDoesNotRefundAnExhaustedRecipient(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		anna := SaveShareRecipient(models.ShareRecipient{Email: "anna@example.com", CreatedAt: 1})
+		ben := SaveShareRecipient(models.ShareRecipient{Email: "ben@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "res-spent", []int{anna}, 7, 1)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-spent", anna), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-spent", anna), false)
+
+		SetShareGrants(file, "res-spent", []int{anna, ben}, 7, 1)
+
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-spent", anna), false)
+		spent := shareGrantFor(t, file, "res-spent", anna)
+		test.IsEqualInt(t, spent.DownloadsUsed, 1)
+		test.IsEqualBool(t, spent.IsExhausted(time.Now().Unix(), 0), true)
+		// Ben, who is new, is not caught by Anna having finished.
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-spent", ben), true)
+
+		DeleteShareGrants(file, "res-spent")
+		DeleteShareRecipient(anna)
+		DeleteShareRecipient(ben)
+	})
+}
+
+// Taking one address off the list revokes that one and nothing else. Revocation stays immediate:
+// the grant is gone, the reverse index no longer lists it, and the download is refused.
+func TestSetShareGrantsRemovalLeavesTheOthersUntouched(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		anna := SaveShareRecipient(models.ShareRecipient{Email: "anna@example.com", CreatedAt: 1})
+		ben := SaveShareRecipient(models.ShareRecipient{Email: "ben@example.com", CreatedAt: 1})
+		cara := SaveShareRecipient(models.ShareRecipient{Email: "cara@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "res-remove", []int{anna, ben, cara}, 7, 3)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-remove", anna), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-remove", ben), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-remove", ben), true)
+		annaBefore := shareGrantFor(t, file, "res-remove", anna)
+		benBefore := shareGrantFor(t, file, "res-remove", ben)
+
+		SetShareGrants(file, "res-remove", []int{anna, ben}, 9, 5)
+
+		test.IsEqualInt(t, len(GetShareGrants(file, "res-remove")), 2)
+		test.IsEqual(t, shareGrantFor(t, file, "res-remove", anna), annaBefore)
+		test.IsEqual(t, shareGrantFor(t, file, "res-remove", ben), benBefore)
+		test.IsEqualInt(t, shareGrantFor(t, file, "res-remove", anna).DownloadsUsed, 1)
+		test.IsEqualInt(t, shareGrantFor(t, file, "res-remove", ben).DownloadsUsed, 2)
+		test.IsEqualInt(t, shareGrantFor(t, file, "res-remove", anna).DownloadsAllowed, 3)
+
+		// Cara is revoked at once.
+		test.IsEqualBool(t, HasShareGrant(file, "res-remove", cara), false)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-remove", cara), false)
+		test.IsEqualInt(t, len(GetShareGrantsForRecipient(cara)), 0)
+
+		DeleteShareGrants(file, "res-remove")
+		DeleteShareRecipient(anna)
+		DeleteShareRecipient(ben)
+		DeleteShareRecipient(cara)
+	})
+}
+
+// Taking an address off the list and putting it back is a revocation followed by a new grant, so
+// that recipient starts again from zero. Nothing of the old grant is kept across the removal: the
+// row is what makes a resource restricted at all, so keeping a spent one alive to remember a
+// count would leave a revoked person listed as a recipient of the share.
+//
+// It does mean an owner can deliberately refund someone by removing them and adding them back.
+// That is a two-step act the owner chose, and it is the only way to reopen a share to someone who
+// has finished with it. What was wrong before was that the refund happened to everyone, silently,
+// as a side effect of typing in one more address.
+func TestSetShareGrantsReAddedRecipientStartsFresh(t *testing.T) {
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		anna := SaveShareRecipient(models.ShareRecipient{Email: "anna@example.com", CreatedAt: 1})
+		ben := SaveShareRecipient(models.ShareRecipient{Email: "ben@example.com", CreatedAt: 1})
+
+		SetShareGrants(file, "res-readd", []int{anna, ben}, 7, 2)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-readd", anna), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-readd", anna), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-readd", anna), false)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-readd", ben), true)
+		benBefore := shareGrantFor(t, file, "res-readd", ben)
+
+		SetShareGrants(file, "res-readd", []int{ben}, 7, 2)
+		test.IsEqualBool(t, HasShareGrant(file, "res-readd", anna), false)
+		SetShareGrants(file, "res-readd", []int{ben, anna}, 7, 2)
+
+		fresh := shareGrantFor(t, file, "res-readd", anna)
+		test.IsEqualInt(t, fresh.DownloadsUsed, 0)
+		test.IsEqualInt64(t, fresh.LastDownloadAt, 0)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-readd", anna), true)
+
+		// Ben never left the list, so neither edit touched him and he still has one of his two.
+		test.IsEqual(t, shareGrantFor(t, file, "res-readd", ben), benBefore)
+		test.IsEqualInt(t, shareGrantFor(t, file, "res-readd", ben).DownloadsUsed, 1)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-readd", ben), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-readd", ben), false)
+
+		DeleteShareGrants(file, "res-readd")
+		DeleteShareRecipient(anna)
+		DeleteShareRecipient(ben)
+	})
+}
+
 // TestGetAllShareGrants covers the one read that walks the whole grant table, which the callers
 // resolving every file's access axes in one pass depend on - the owner's file list and the
 // CleanUp sweep, which would otherwise read the grants of every file one at a time. Every
@@ -1003,8 +1176,8 @@ func TestShareGrantDownloadCannotResurrectRevokedGrant(t *testing.T) {
 // Replacing a recipient list must never leave the resource momentarily
 // unrestricted, because an unrestricted resource reads as publicly
 // downloadable. The observable requirement is that the resource is restricted
-// before and after, and that the counters of a recipient kept across the
-// replacement are reset rather than carried over.
+// before, during and after, whether the new list overlaps the old one or is
+// disjoint from it.
 func TestSetShareGrantsKeepsResourceRestricted(t *testing.T) {
 	runShareTypes(t, func() {
 		const file = models.ShareResourceFile
@@ -1020,7 +1193,14 @@ func TestSetShareGrantsKeepsResourceRestricted(t *testing.T) {
 		test.IsEqualBool(t, IsShareRestricted(file, "res-replace"), true)
 		test.IsEqualInt(t, len(GetShareGrants(file, "res-replace")), 2)
 		for _, grant := range GetShareGrants(file, "res-replace") {
-			test.IsEqualInt(t, grant.DownloadsUsed, 0)
+			// The recipient carried across the replacement keeps the download
+			// she had already taken; the one added by it starts at zero. See
+			// TestSetShareGrantsKeepsExistingRecipientsProgress.
+			if grant.RecipientId == first {
+				test.IsEqualInt(t, grant.DownloadsUsed, 1)
+			} else {
+				test.IsEqualInt(t, grant.DownloadsUsed, 0)
+			}
 			test.IsEqualInt(t, grant.DownloadsAllowed, 2)
 		}
 
