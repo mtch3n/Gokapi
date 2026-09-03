@@ -77,6 +77,22 @@ const (
 	StatusDeleted = "deleted"
 )
 
+// Allowance governing values, naming which counter decides whether a resource is exhausted. They
+// exist for the same reason the Status values above do: the server already resolves this and a
+// client that guessed it from the raw counters would be wrong exactly when it matters. A
+// resource's own DownloadsRemaining is frozen while another counter governs (see
+// DownloadAccess.SpendsOwnCounter), so "the number on the wire is zero" and "this resource is
+// spent" are different questions once a share or a folder is involved.
+const (
+	// AllowanceGoverningOwn means the resource's own stored counter decides.
+	AllowanceGoverningOwn = "own"
+	// AllowanceGoverningRecipients means the per-recipient grants decide, and the remaining
+	// count is the sum of what every recipient still has.
+	AllowanceGoverningRecipients = "recipients"
+	// AllowanceGoverningFolder means the file is a folder member and its folder decides.
+	AllowanceGoverningFolder = "folder"
+)
+
 // IsDisposed returns true if the file's content has been deleted, leaving this row behind as
 // history. A disposed row carries no credential material - see storage.CleanUp - and every
 // public path must treat it exactly like a row that was deleted outright.
@@ -108,6 +124,12 @@ type DownloadAccess struct {
 	// storage.DownloadAccessOf's decision, exactly like the axes above, so that no caller has to
 	// work it out for itself.
 	SpendsOwnCounter bool
+	// Governing names the counter SpendsOwnCounter decides between, one of the
+	// AllowanceGoverning values. It is the read side of the same fact: SpendsOwnCounter answers
+	// "may I decrement the resource's own row", Governing answers "whose number is this", which
+	// is what a client rendering the row needs. Kept as a separate field rather than derived,
+	// because "not my own" is three different answers and only this one distinguishes them.
+	Governing string
 }
 
 // IsExpired reports whether the expiry timestamp has passed.
@@ -157,6 +179,7 @@ func (a DownloadAccess) WithShareGrants(grants []ShareGrant) DownloadAccess {
 	a.UnlimitedDownloads = unlimitedDownloads
 	a.WindowOpenedAt = windowOpenedAt
 	a.SpendsOwnCounter = false
+	a.Governing = AllowanceGoverningRecipients
 	return a
 }
 
@@ -172,6 +195,7 @@ func (f *File) DownloadAccess(leeway int64) DownloadAccess {
 		WindowOpenedAt:     f.WindowOpenedAt,
 		Leeway:             leeway,
 		SpendsOwnCounter:   true,
+		Governing:          AllowanceGoverningOwn,
 	}
 }
 
@@ -290,6 +314,9 @@ type FileApiOutput struct {
 	IsPasswordProtected          bool   `json:"IsPasswordProtected"`          // True if a password has to be entered before downloading the file
 	IsSavedOnLocalStorage        bool   `json:"IsSavedOnLocalStorage"`        // True if the file does not use cloud storage
 	Status                       string `json:"Status"`                       // One of the Status* constants: active, pending_deletion, expired, downloaded or deleted
+	AllowanceGoverning           string `json:"AllowanceGoverning"`           // One of the AllowanceGoverning* constants: which counter decides whether this file is exhausted - own, recipients or folder
+	AllowanceRemaining           int    `json:"AllowanceRemaining"`           // Downloads left on the governing counter. Equals DownloadsRemaining only when AllowanceGoverning is own
+	AllowanceUnlimited           bool   `json:"AllowanceUnlimited"`           // True if the governing counter imposes no limit
 	IsFileRequest                bool   `json:"IsFileRequest"`                // True if the file belongs to a file request
 	UploaderId                   int    `json:"UploaderId"`                   // The user ID of the uploader
 }
@@ -350,6 +377,15 @@ func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool, access D
 	}
 	result.UploaderId = f.UserId
 	result.Status = f.Status(access, time.Now().Unix())
+	// The resolved allowance, from the same access Status is computed from. copier has already
+	// copied the file's OWN DownloadsRemaining and UnlimitedDownloads above, and those stay on
+	// the wire because the edit dialog and the "n of m" denominator are about what the owner set.
+	// They are not the same numbers: a file governed by its recipients or its folder has its own
+	// counter frozen (see DownloadAccess.SpendsOwnCounter), so a client that read it to decide
+	// whether the file is spent would be wrong for exactly the files that are shared.
+	result.AllowanceGoverning = access.Governing
+	result.AllowanceRemaining = access.DownloadsRemaining
+	result.AllowanceUnlimited = access.UnlimitedDownloads
 	result.FileRequestId = f.UploadRequestId
 	result.ExpireAtString = time.Unix(f.ExpireAt, 0).UTC().Format("2006-01-02 15:04:05")
 

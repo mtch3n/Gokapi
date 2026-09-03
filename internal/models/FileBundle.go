@@ -83,7 +83,29 @@ func (b *FileBundle) DownloadAccess(leeway int64) DownloadAccess {
 		WindowOpenedAt:     b.WindowOpenedAt,
 		Leeway:             leeway,
 		SpendsOwnCounter:   true,
+		Governing:          AllowanceGoverningOwn,
 	}
+}
+
+// Status computes which of the Status* values applies to this folder, the folder twin of
+// File.Status. Same order of tests, minus the pending-deletion branch: a folder is never
+// scheduled for deletion, only its members are, so pending_deletion has no folder-level meaning.
+//
+// Membership is deliberately not part of it. storage.IsAvailableBundle answers "may a visitor
+// open this", which needs to know whether anything is in it; this answers "what state is the
+// folder itself in", and the two differ for an empty folder that is live and waiting for its
+// first upload - available says no, this says active, and both are right for their own question.
+func (b *FileBundle) Status(access DownloadAccess, timeNow int64) string {
+	if b.IsDeleted() {
+		return StatusDeleted
+	}
+	if access.IsExhausted(timeNow) {
+		return StatusDownloaded
+	}
+	if access.IsExpired(timeNow) {
+		return StatusExpired
+	}
+	return StatusActive
 }
 
 // IsExpired reports whether the folder's own expiry has passed. Mirrors storage.IsExpiredFile's

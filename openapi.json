@@ -2299,6 +2299,22 @@
                       "totalsizebytes": {
                         "type": "integer",
                         "description": "Combined size in bytes of the files counted in membercount, using each row's recorded size. A disposed member keeps its recorded size here, matching the size the file listing shows for that same row; the member status, not this figure, is what says whether the bytes are still stored."
+                      },
+                      "status": {
+                        "type": "string",
+                        "description": "One of active, expired, downloaded or deleted. The folder twin of a file's Status, minus pending_deletion, which has no folder-level meaning. Says what state the folder itself is in, not whether a visitor could open it: an empty live folder is active but has nothing to serve."
+                      },
+                      "allowancegoverning": {
+                        "type": "string",
+                        "description": "Which counter decides whether this folder is exhausted: own (its own downloadsremaining) or recipients (the sum of what its named recipients still have). A folder's own counter is frozen while its recipients govern it, so downloadsremaining answers what the owner set and this answers what is actually left."
+                      },
+                      "allowanceremaining": {
+                        "type": "integer",
+                        "description": "Downloads left on the counter named by allowancegoverning. Equal to downloadsremaining only when that is own. Meaningless when allowanceunlimited is true."
+                      },
+                      "allowanceunlimited": {
+                        "type": "boolean",
+                        "description": "True if the counter named by allowancegoverning imposes no limit."
                       }
                     }
                   }
@@ -3386,6 +3402,21 @@
             "description": "One of active, pending_deletion, expired, downloaded or deleted. A status other than active means the file's content has been removed; expired/downloaded/deleted records are kept as owner-visible history until the metadata retention window (GOKAPI_METADATA_RETENTION) removes them",
             "type": "string",
             "example": "active"
+          },
+          "AllowanceGoverning": {
+            "description": "Which counter decides whether this file is exhausted: own (its own DownloadsRemaining), recipients (the sum of what its named recipients still have) or folder (the folder it belongs to). A file's own counter is frozen while another counter governs, so DownloadsRemaining answers what the owner set and this answers what is actually left",
+            "type": "string",
+            "example": "recipients"
+          },
+          "AllowanceRemaining": {
+            "description": "Downloads left on the counter named by AllowanceGoverning. Equal to DownloadsRemaining only when that is own. Meaningless when AllowanceUnlimited is true",
+            "type": "integer",
+            "example": "4"
+          },
+          "AllowanceUnlimited": {
+            "description": "True if the counter named by AllowanceGoverning imposes no limit",
+            "type": "boolean",
+            "example": "false"
           },
           "IsFileRequest": {
             "description": "True if the file belongs to an upload request",

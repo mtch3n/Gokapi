@@ -869,13 +869,26 @@ func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ m
 	// A client cannot otherwise tell a protected folder from an open one, and had to either
 	// guess or ask for something only a protected folder can have - the folder list page was
 	// requesting a share key for every row and taking a 404 for most of them.
+	//
+	// Status and the three Allowance fields are the folder twins of models.FileApiOutput's, and
+	// exist for the same reason: the folder's own DownloadsRemaining is frozen while its
+	// recipients' grants govern it (see models.DownloadAccess.SpendsOwnCounter), so a client
+	// reading the raw counter to decide whether a folder is spent is wrong for exactly the
+	// folders that were shared. The raw counters stay on the wire beside them - the edit dialog
+	// is about what the owner set.
 	type BundleWithMetadata struct {
 		models.FileBundle
-		MemberCount         int   `json:"membercount"`
-		TotalSizeBytes      int64 `json:"totalsizebytes"`
-		IsPasswordProtected bool  `json:"ispasswordprotected"`
+		MemberCount         int    `json:"membercount"`
+		TotalSizeBytes      int64  `json:"totalsizebytes"`
+		IsPasswordProtected bool   `json:"ispasswordprotected"`
+		Status              string `json:"status"`
+		AllowanceGoverning  string `json:"allowancegoverning"`
+		AllowanceRemaining  int    `json:"allowanceremaining"`
+		AllowanceUnlimited  bool   `json:"allowanceunlimited"`
 	}
 
+	resolver := storage.NewDownloadAccessResolver()
+	timeNow := time.Now().Unix()
 	result := make([]BundleWithMetadata, 0)
 	for _, bundle := range allBundles {
 		if bundle.UserId == user.Id || user.HasPermission(models.UserPermListOtherUploads) {
@@ -888,11 +901,16 @@ func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			// left blank; the underlying bundle is left untouched, only this local copy going to
 			// JSON is changed.
 			bundle.Name = bundle.DisplayName()
+			access := resolver.OfBundle(bundle)
 			result = append(result, BundleWithMetadata{
 				FileBundle:          bundle,
 				MemberCount:         memberCount,
 				TotalSizeBytes:      totalSize,
 				IsPasswordProtected: bundle.PasswordHash != "",
+				Status:              bundle.Status(access, timeNow),
+				AllowanceGoverning:  access.Governing,
+				AllowanceRemaining:  access.DownloadsRemaining,
+				AllowanceUnlimited:  access.UnlimitedDownloads,
 			})
 		}
 	}
