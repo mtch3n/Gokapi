@@ -2284,6 +2284,10 @@
                         "type": "integer",
                         "description": "Number of member files this bundle still has rows for, including files pending deletion and files whose content has already been disposed of (expired or download allowance exhausted). Those rows remain in a file listing as history for the metadata retention period, with a status saying the content is gone, so the folder summarising them counts the same rows. This is the listing view and is NOT what a recipient would receive."
                       },
+                      "ispasswordprotected": {
+                        "type": "boolean",
+                        "description": "True if the folder is password protected. Only the fact is published, never the hash. A file carries the equivalent as IsPasswordProtected."
+                      },
                       "totalsizebytes": {
                         "type": "integer",
                         "description": "Combined size in bytes of the files counted in membercount, using each row's recorded size. A disposed member keeps its recorded size here, matching the size the file listing shows for that same row; the member status, not this figure, is what says whether the bytes are still stored."

@@ -864,10 +864,16 @@ func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ m
 	allBundles := filebundle.GetAll()
 	allFiles := database.GetAllMetadata()
 
+	// IsPasswordProtected mirrors models.FileApiOutput's field of the same meaning for a file:
+	// the BOOLEAN is published, never models.FileBundle.PasswordHash, which stays json:"-".
+	// A client cannot otherwise tell a protected folder from an open one, and had to either
+	// guess or ask for something only a protected folder can have - the folder list page was
+	// requesting a share key for every row and taking a 404 for most of them.
 	type BundleWithMetadata struct {
 		models.FileBundle
-		MemberCount    int   `json:"membercount"`
-		TotalSizeBytes int64 `json:"totalsizebytes"`
+		MemberCount         int   `json:"membercount"`
+		TotalSizeBytes      int64 `json:"totalsizebytes"`
+		IsPasswordProtected bool  `json:"ispasswordprotected"`
 	}
 
 	result := make([]BundleWithMetadata, 0)
@@ -883,9 +889,10 @@ func apiFolderList(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			// JSON is changed.
 			bundle.Name = bundle.DisplayName()
 			result = append(result, BundleWithMetadata{
-				FileBundle:     bundle,
-				MemberCount:    memberCount,
-				TotalSizeBytes: totalSize,
+				FileBundle:          bundle,
+				MemberCount:         memberCount,
+				TotalSizeBytes:      totalSize,
+				IsPasswordProtected: bundle.PasswordHash != "",
 			})
 		}
 	}
