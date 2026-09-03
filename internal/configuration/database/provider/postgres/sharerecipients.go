@@ -3,6 +3,8 @@ package postgres
 import (
 	"database/sql"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/forceu/gokapi/internal/helper"
@@ -133,32 +135,59 @@ func scanShareGrant(scanner interface{ Scan(...any) error }) (models.ShareGrant,
 	return result, err
 }
 
-// SetShareGrants replaces the recipient list for one resource.
+// SetShareGrants brings the recipient list for one resource into line with the
+// list given. Recipients that are new get a grant, recipients that are gone
+// lose theirs, and recipients that appear in both are left alone.
 //
-// The delete and the inserts run in one transaction. Without it, a failure
-// between them would leave the resource with no grants at all, which is a
-// silent downgrade from identity-gated to anonymously reachable. Failing
-// closed on the previous list is the safe direction.
+// Left alone means untouched, not rewritten with the same values. Re-issuing a
+// grant that already exists would set downloadsused back to zero, which refunds
+// a recipient who had already spent their allowance and brings a resource every
+// recipient had finished with back within reach; it would set lastdownloadat
+// back to zero, which makes the owner's list claim a file was never opened by
+// someone who collected it; and it would overwrite downloadsallowed with
+// whatever the resource's limit happens to be now. Adding a fourth address to a
+// share is not a reason for any of that to happen to the first three.
+//
+// The delete and the inserts run in one transaction, so a half-edited list is
+// never observable and a failure leaves the previous, stricter list in place
+// rather than a resource with no grants at all, which would read as anonymously
+// reachable.
 func (p DatabaseProvider) SetShareGrants(resourceType int, resourceId string, recipientIds []int, grantedBy int, downloadsAllowed int) {
 	if resourceId == "" || !models.IsValidShareResourceType(resourceType) {
 		return
 	}
+	wanted := deduplicate(recipientIds)
+
 	transaction, err := p.postgresDb.Begin()
 	helper.Check(err)
 	defer func() { _ = transaction.Rollback() }()
 
-	_, err = transaction.Exec("DELETE FROM ShareGrants WHERE resourcetype = $1 AND resourceid = $2",
-		resourceType, resourceId)
+	// The delete names the recipients to keep rather than clearing the resource
+	// and putting them back. It runs first, matching SQLite, where starting the
+	// transaction with the write is what keeps it from having to upgrade a
+	// shared lock later.
+	deleteStatement := "DELETE FROM ShareGrants WHERE resourcetype = $1 AND resourceid = $2"
+	arguments := []any{resourceType, resourceId}
+	if len(wanted) > 0 {
+		placeholders := make([]string, 0, len(wanted))
+		for _, recipientId := range wanted {
+			arguments = append(arguments, recipientId)
+			placeholders = append(placeholders, "$"+strconv.Itoa(len(arguments)))
+		}
+		deleteStatement = deleteStatement + " AND recipientid NOT IN (" + strings.Join(placeholders, ", ") + ")"
+	}
+	_, err = transaction.Exec(deleteStatement, arguments...)
 	helper.Check(err)
 
 	grantedAt := time.Now().Unix()
-	for _, recipientId := range deduplicate(recipientIds) {
+	for _, recipientId := range wanted {
+		// DO NOTHING, not DO UPDATE. A recipient who survived the delete still
+		// has their row, so this writes nothing and their counters, their
+		// allowance and their grantedat all stand. DO UPDATE reset all three.
 		_, err = transaction.Exec(`INSERT INTO ShareGrants
 			(resourcetype, resourceid, recipientid, grantedat, grantedby,
 			 downloadsused, downloadsallowed, lastdownloadat) VALUES ($1, $2, $3, $4, $5, 0, $6, 0)
-			ON CONFLICT (resourcetype, resourceid, recipientid) DO UPDATE
-			SET grantedat = EXCLUDED.grantedat, grantedby = EXCLUDED.grantedby,
-				downloadsallowed = EXCLUDED.downloadsallowed`,
+			ON CONFLICT (resourcetype, resourceid, recipientid) DO NOTHING`,
 			resourceType, resourceId, recipientId, grantedAt, grantedBy, downloadsAllowed)
 		helper.Check(err)
 	}

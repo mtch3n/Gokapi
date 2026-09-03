@@ -143,13 +143,32 @@ func (p DatabaseProvider) DeleteShareRecipient(id int) {
 // Grants
 // ---------------------------------------------------------------------------
 
-// SetShareGrants replaces the recipient list for one resource.
+// SetShareGrants brings the recipient list for one resource into line with the
+// list given. Recipients that are new get a grant, recipients that are gone
+// lose theirs, and recipients that appear in both are left alone.
+//
+// Left alone means untouched, not rewritten with the same values. Re-issuing a
+// grant that already exists would set DownloadsUsed back to zero, which refunds
+// a recipient who had already spent their allowance and brings a resource every
+// recipient had finished with back within reach; it would set LastDownloadAt
+// back to zero, which makes the owner's list claim a file was never opened by
+// someone who collected it; and it would overwrite DownloadsAllowed with
+// whatever the resource's limit happens to be now. Adding a fourth address to a
+// share is not a reason for any of that to happen to the first three.
+//
+// A recipient that stays is skipped in both loops, so neither their shg: hash
+// nor their shgr: index entry is written. The index entry records GrantedAt,
+// which must not move either.
 func (p DatabaseProvider) SetShareGrants(resourceType int, resourceId string, recipientIds []int, grantedBy int, downloadsAllowed int) {
 	if resourceId == "" || !models.IsValidShareResourceType(resourceType) {
 		return
 	}
 	previous := p.GetShareGrants(resourceType, resourceId)
 	wanted := deduplicate(recipientIds)
+	existing := make([]int, 0, len(previous))
+	for _, grant := range previous {
+		existing = append(existing, grant.RecipientId)
+	}
 	grantedAt := time.Now().Unix()
 
 	// The new grants are written BEFORE the old ones are removed, and the whole
@@ -166,6 +185,9 @@ func (p DatabaseProvider) SetShareGrants(resourceType int, resourceId string, re
 	helper.Check(conn.Send("MULTI"))
 
 	for _, recipientId := range wanted {
+		if containsInt(existing, recipientId) {
+			continue
+		}
 		grant := models.ShareGrant{
 			ResourceType:     resourceType,
 			ResourceId:       resourceId,
@@ -180,18 +202,19 @@ func (p DatabaseProvider) SetShareGrants(resourceType int, resourceId string, re
 		helper.Check(conn.Send("HSET", p.dbPrefix+prefixShareGrantByUser+strconv.Itoa(recipientId),
 			key, grantedAt))
 	}
-	for _, existing := range previous {
-		if containsInt(wanted, existing.RecipientId) {
+	for _, existingGrant := range previous {
+		if containsInt(wanted, existingGrant.RecipientId) {
 			continue
 		}
-		key := grantKey(resourceType, resourceId, existing.RecipientId)
+		key := grantKey(resourceType, resourceId, existingGrant.RecipientId)
 		helper.Check(conn.Send("DEL", p.dbPrefix+prefixShareGrant+key))
-		helper.Check(conn.Send("HDEL", p.dbPrefix+prefixShareGrantByUser+strconv.Itoa(existing.RecipientId), key))
+		helper.Check(conn.Send("HDEL", p.dbPrefix+prefixShareGrantByUser+strconv.Itoa(existingGrant.RecipientId), key))
 	}
 	_, err := conn.Do("EXEC")
 	helper.Check(err)
 }
 
+// containsInt reports whether this ID is in the list.
 func containsInt(values []int, wanted int) bool {
 	for _, value := range values {
 		if value == wanted {

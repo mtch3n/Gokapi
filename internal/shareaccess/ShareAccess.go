@@ -98,8 +98,9 @@ type GrantResult struct {
 
 // GrantAccess shares a resource with a list of email addresses.
 //
-// It replaces the whole recipient list, so removing an address from the list
-// revokes it. Every recipient is mailed their own access link.
+// It sets the whole recipient list, so removing an address from the list
+// revokes it, while an address that stays keeps the grant it already holds.
+// Every recipient is mailed their own access link.
 //
 // It refuses outright when no mail connector is configured. That check is here,
 // at the single entry point for creating grants, rather than in the HTTP

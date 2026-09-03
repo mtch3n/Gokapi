@@ -2936,7 +2936,7 @@
           "share"
         ],
         "summary": "Shares a resource with a list of email addresses",
-        "description": "Replaces the recipient list of a file, folder or file request. Each address is resolved to an external share recipient, created if unknown, and is emailed a personal access link. Passing an empty list clears the recipient list, returning the resource to anonymous link access. Requires API permission EDIT. To change a resource that was not uploaded by the user, the user needs the user permission EDIT. Returns 412 if no mail connector is configured, since an access link could then not be delivered and the share would be unreachable.",
+        "description": "Sets the recipient list of a file, folder or file request to exactly the addresses given. Each address is resolved to an external share recipient, created if unknown, and is emailed a personal access link. An address that is already on the list keeps the grant it holds, so the downloads it has already spent, the allowance it was granted and the time it last collected the resource all survive the edit; an address that is left out of the list is revoked immediately, and adding it again later grants it afresh. Passing an empty list clears the recipient list, returning the resource to anonymous link access. Requires API permission EDIT. To change a resource that was not uploaded by the user, the user needs the user permission EDIT. Returns 412 if no mail connector is configured, since an access link could then not be delivered and the share would be unreachable.",
         "operationId": "setShareRecipients",
         "security": [
           {
@@ -2974,7 +2974,7 @@
                   },
                   "downloadsAllowed": {
                     "type": "integer",
-                    "description": "Per-recipient download allowance, spent against this recipient alone. 0 takes the resource's own download limit, so the owner's one number applies to each recipient separately - a file limited to three downloads and shared with three people is nine - and only a resource that is itself unlimited yields an unlimited grant"
+                    "description": "Per-recipient download allowance, spent against this recipient alone. 0 takes the resource's own download limit, so the owner's one number applies to each recipient separately - a file limited to three downloads and shared with three people is nine - and only a resource that is itself unlimited yields an unlimited grant. Applies to the addresses this call adds; an address already on the list keeps the allowance it was granted with"
                   }
                 }
               }

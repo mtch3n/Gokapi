@@ -2081,8 +2081,12 @@ func updateApiKeyPermsOnUserPermChange(userId int, userPerm models.UserPermissio
 }
 
 // apiSetShareRecipients shares a resource with a list of email addresses,
-// replacing whatever list it had. An empty list clears it, which returns the
-// resource to its previous anonymous access mode.
+// setting its list to exactly the addresses given. An empty list clears it,
+// which returns the resource to its previous anonymous access mode.
+//
+// The list is replaced from the caller's point of view, but an address that
+// appears in both the old list and the new one keeps the grant it already
+// holds. Adding one address is not allowed to refund the ones already there.
 //
 // The uploader must own the resource, or hold the permission to edit other
 // people's uploads. Granting someone access to a file is a change to that
