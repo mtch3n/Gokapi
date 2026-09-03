@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 27
+const DatabaseSchemeVersion = 28
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -273,6 +273,16 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		helper.Check(err)
 		p.backfillBundleSettingsFromMembers()
 	}
+	// The download window: the timestamp the most recent window opened on a file and on a folder,
+	// so access can end at whichever comes first, the resource's own expiry or the close of its
+	// window (see models.DownloadAccess). Every row that already exists gets 0, "never opened",
+	// which is closed under any leeway - so an upgrade with GOKAPI_DOWNLOAD_LEEWAY unset behaves
+	// exactly as before. IF NOT EXISTS keeps this idempotent, same as the steps above.
+	if currentDbVersion < 28 {
+		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS WindowOpenedAt BIGINT NOT NULL DEFAULT 0;
+		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS WindowOpenedAt BIGINT NOT NULL DEFAULT 0;`)
+		helper.Check(err)
+	}
 }
 
 // backfillBundleSettingsFromMembers derives every existing bundle's PasswordHash, ExpireAt,
@@ -423,6 +433,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			EncryptedSharePassword	BYTEA,
 			DisposedAt	BIGINT NOT NULL DEFAULT 0,
 			DisposalReason	INTEGER NOT NULL DEFAULT 0,
+			WindowOpenedAt	BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY(Id)
 		);
 		CREATE TABLE IF NOT EXISTS Hotlinks (
@@ -518,6 +529,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			UnlimitedTime	BOOLEAN NOT NULL DEFAULT false,
 			DownloadsRemaining	BIGINT NOT NULL DEFAULT 0,
 			UnlimitedDownloads	BOOLEAN NOT NULL DEFAULT false,
+			WindowOpenedAt	BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY(id)
 		);`
 	err := p.rawPostgres(sqlStmt)

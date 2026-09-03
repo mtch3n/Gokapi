@@ -138,26 +138,19 @@ func (p DatabaseProvider) DeleteMetaData(id string) {
 	p.deleteKey(prefixMetaData + id)
 }
 
-// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
-// is true, DownloadsRemaining is only decremented if it is currently greater than 0, via a Lua script that
-// Redis runs as a single atomic operation, so the database itself refuses to go below zero; the return
-// value reports whether this call actually consumed a remaining download. A false return means
-// DownloadsRemaining was already 0 and the caller must not serve the file.
-func (p DatabaseProvider) IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool {
-	if decreaseRemainingDownloads {
-		return p.decrementHashFieldIfPositive(prefixMetaData+id, "DownloadsRemaining", "DownloadCount")
-	}
-	p.increaseHashmapIntField(prefixMetaData+id, "DownloadCount")
-	return true
+// AcquireDownload atomically lets one request through to a capped file's content, via the Lua
+// script in acquireWindowedDownload - see that function for the window rule and for why Redis
+// needs no equivalent of the SQL providers' lost-race retry.
+func (p DatabaseProvider) AcquireDownload(id string, timeNow, leeway int64) (bool, bool) {
+	result := p.acquireWindowedDownload(prefixMetaData+id, "WindowOpenedAt", "DownloadsRemaining", "DownloadCount",
+		timeNow, timeNow-leeway)
+	return result > 0, result == 2
 }
 
-// GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads
-func (p DatabaseProvider) GetDownloadsRemaining(id string) int {
-	file, ok := p.GetMetaDataById(id)
-	if !ok {
-		return 0
-	}
-	return file.DownloadsRemaining
+// IncreaseDownloadCount atomically increases the download count of a file, leaving its allowance
+// and its window untouched. Only for a file with UnlimitedDownloads set.
+func (p DatabaseProvider) IncreaseDownloadCount(id string) {
+	p.increaseHashmapIntField(prefixMetaData+id, "DownloadCount")
 }
 
 // MigratePlaintextFileNames re-encrypts every file name, folder name, request name and request

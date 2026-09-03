@@ -193,14 +193,18 @@ func TestFileMetaData(t *testing.T) {
 	test.IsEqualBool(t, retrieved.Encryption.IsEndToEndEncrypted, true)
 	test.IsEqualBool(t, retrieved.UnlimitedDownloads, false)
 
-	test.IsEqualInt(t, dbInstance.GetDownloadsRemaining("file-1"), 3)
+	test.IsEqualInt64(t, retrieved.WindowOpenedAt, 0)
 
-	dbInstance.IncreaseDownloadCount("file-1", true)
+	timeNow := time.Now().Unix()
+	granted, opened := dbInstance.AcquireDownload("file-1", timeNow, 0)
+	test.IsEqualBool(t, granted, true)
+	test.IsEqualBool(t, opened, true)
 	retrieved, _ = dbInstance.GetMetaDataById("file-1")
 	test.IsEqualInt(t, retrieved.DownloadCount, 1)
 	test.IsEqualInt(t, retrieved.DownloadsRemaining, 2)
+	test.IsEqualInt64(t, retrieved.WindowOpenedAt, timeNow)
 
-	dbInstance.IncreaseDownloadCount("file-1", false)
+	dbInstance.IncreaseDownloadCount("file-1")
 	retrieved, _ = dbInstance.GetMetaDataById("file-1")
 	test.IsEqualInt(t, retrieved.DownloadCount, 2)
 	test.IsEqualInt(t, retrieved.DownloadsRemaining, 2)
@@ -213,7 +217,7 @@ func TestFileMetaData(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 }
 
-// TestIncreaseDownloadCountAtomicAcrossInstances proves that the conditional
+// TestAcquireDownloadAtomicAcrossInstances proves that the conditional
 // UPDATE ... WHERE DownloadsRemaining > 0 is atomic even when the racing callers are two
 // independently-connected DatabaseProvider values against the same PostgreSQL server - which is
 // what two separate Gokapi instances sharing one database would look like. A process-local mutex
@@ -225,7 +229,7 @@ func TestFileMetaData(t *testing.T) {
 // This test does NOT prove: end-to-end correctness of storage.ServeFile, or behaviour with a true
 // second OS process. See TestServeFile-adjacent coverage in internal/storage for the single-process
 // serving path, and a staging smoke test for the two-process case.
-func TestIncreaseDownloadCountAtomicAcrossInstances(t *testing.T) {
+func TestAcquireDownloadAtomicAcrossInstances(t *testing.T) {
 	config := testConfig(t)
 	instanceA := dbInstance
 	instanceB, err := New(config)
@@ -242,32 +246,33 @@ func TestIncreaseDownloadCountAtomicAcrossInstances(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if instanceA.IncreaseDownloadCount(id, true) {
+			if _, opened := instanceA.AcquireDownload(id, time.Now().Unix(), 0); opened {
 				atomic.AddInt32(&successCount, 1)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if instanceB.IncreaseDownloadCount(id, true) {
+			if _, opened := instanceB.AcquireDownload(id, time.Now().Unix(), 0); opened {
 				atomic.AddInt32(&successCount, 1)
 			}
 		}()
 		wg.Wait()
 
 		test.IsEqualInt(t, int(successCount), 1)
-		test.IsEqualInt(t, instanceA.GetDownloadsRemaining(id), 0)
+		raced, _ := instanceA.GetMetaDataById(id)
+		test.IsEqualInt(t, raced.DownloadsRemaining, 0)
 
 		instanceA.DeleteMetaData(id)
 	}
 }
 
-// TestIncreaseDownloadCountManyGoroutinesNeverExceedsAllowance hammers a single row with far more
+// TestAcquireDownloadManyGoroutinesNeverExceedsAllowance hammers a single row with far more
 // concurrent callers than its allowance, split across two independently-connected DatabaseProvider
 // values, and checks the totals rather than a single winner. This is the "many goroutines, assert
 // the total never exceeds the allowance and never goes negative" shape called for when a two-provider,
 // two-concurrent-ServeFile-calls test is not expressible in one process (database.Connect installs a
 // single package-global provider).
-func TestIncreaseDownloadCountManyGoroutinesNeverExceedsAllowance(t *testing.T) {
+func TestAcquireDownloadManyGoroutinesNeverExceedsAllowance(t *testing.T) {
 	config := testConfig(t)
 	instanceA := dbInstance
 	instanceB, err := New(config)
@@ -289,7 +294,7 @@ func TestIncreaseDownloadCountManyGoroutinesNeverExceedsAllowance(t *testing.T) 
 		}
 		go func() {
 			defer wg.Done()
-			if instance.IncreaseDownloadCount(id, true) {
+			if _, opened := instance.AcquireDownload(id, time.Now().Unix(), 0); opened {
 				atomic.AddInt32(&successCount, 1)
 			}
 		}()
@@ -297,7 +302,8 @@ func TestIncreaseDownloadCountManyGoroutinesNeverExceedsAllowance(t *testing.T) 
 	wg.Wait()
 
 	test.IsEqualInt(t, int(successCount), allowance)
-	test.IsEqualInt(t, instanceA.GetDownloadsRemaining(id), 0)
+	hammered, _ := instanceA.GetMetaDataById(id)
+	test.IsEqualInt(t, hammered.DownloadsRemaining, 0)
 
 	instanceA.DeleteMetaData(id)
 }

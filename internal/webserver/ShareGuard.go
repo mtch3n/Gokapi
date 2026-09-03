@@ -109,11 +109,12 @@ func shareAccessMode(file models.File) string {
 // consumeShareDownload records a download against the recipient's own
 // allowance when the resource is restricted.
 //
-// Returns false when the allowance is exhausted, in which case the caller must
-// not serve the file. For an unrestricted resource there is no per-recipient
-// allowance and this is a no-op, leaving the existing per-file counter as the
-// only limit.
-func consumeShareDownload(r *http.Request, resourceType int, resourceId string) bool {
+// Returns false when the allowance is exhausted and no download window is open,
+// in which case the caller must not serve the file. For an unrestricted resource
+// there is no per-recipient allowance and this is a no-op, leaving the existing
+// per-file counter as the only limit. leeway is the window length the caller
+// resolved for the resource being served (see storage.LeewayFor), in seconds.
+func consumeShareDownload(r *http.Request, resourceType int, resourceId string, leeway int64) bool {
 	if !database.IsShareRestricted(resourceType, resourceId) {
 		return true
 	}
@@ -143,7 +144,7 @@ func consumeShareDownload(r *http.Request, resourceType int, resourceId string) 
 		// read-only access check.
 		return false
 	}
-	return shareaccess.ConsumeDownload(resourceType, resourceId, recipientId) == nil
+	return shareaccess.ConsumeDownload(resourceType, resourceId, recipientId, leeway) == nil
 }
 
 // accessibleBundleMembers narrows a bundle's member list to the files the current

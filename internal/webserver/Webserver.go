@@ -981,11 +981,14 @@ func (u *AdminView) convertGlobalConfig(view int, user models.User) *AdminView {
 	u.CustomContent = customStaticInfo
 	switch view {
 	case ViewMain:
+		// One read of the folder table for the whole list: a folder decides its members' status,
+		// and resolving that per file would read the same folder once per member of it.
+		resolver := storage.NewDownloadAccessResolver()
 		for _, element := range database.GetAllMetadata() {
 			if element.UserId != user.Id && !user.HasPermissionListOtherUploads() {
 				continue
 			}
-			fileInfo, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
+			fileInfo, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, resolver.Of(element))
 			helper.Check(err)
 			metaDataList = append(metaDataList, fileInfo)
 		}
@@ -1317,7 +1320,7 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		r = attachRecipient(r, recipientId)
 		// The allowance is spent per recipient, so one recipient exhausting
 		// theirs does not consume anyone else's.
-		if shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, recipientId) != nil {
+		if shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, recipientId, int64(storage.LeewayFor(savedFile).Seconds())) != nil {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"recipient download allowance exhausted"); err != nil {
 				respondAuditWriteFailed(w)
@@ -1343,7 +1346,7 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	// The bundle's own allowance is spent only once every other check has passed and the file
 	// is actually about to be served, mirroring how pubApiFolderZip meters the bundle.
 	if savedFile.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, savedFile.BundleId) {
-		if !consumeShareDownload(r, models.ShareResourceBundle, savedFile.BundleId) {
+		if !consumeShareDownload(r, models.ShareResourceBundle, savedFile.BundleId, int64(storage.DownloadLeeway().Seconds())) {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"bundle download allowance exhausted"); err != nil {
 				respondAuditWriteFailed(w)
@@ -1921,6 +1924,18 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The folder itself - not any member's own now-inert ExpireAt/DownloadsRemaining - decides
+	// whether it can be served at all. Rechecked fresh here rather than trusting the allFiles
+	// snapshot, since it may already be stale by the time of the request. Answered before the
+	// requested ids are resolved below, so an unavailable folder always answers "not found"
+	// rather than leaking, through the 400 that resolution can produce, whether an id names a
+	// member of it - which also stops the answer depending on whether a CleanUp sweep has caught
+	// up with disposing the members of a folder that just became unavailable.
+	if !bundle.IsAvailable(time.Now().Unix(), int64(storage.DownloadLeeway().Seconds())) {
+		respondPubApiNotFound(w, r)
+		return
+	}
+
 	// Parse ids parameter (optional; absent = every member)
 	idsParam := r.URL.Query().Get("ids")
 	var requestedIds []string
@@ -1970,14 +1985,6 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The folder itself - not any member's own now-inert ExpireAt/DownloadsRemaining - decides
-	// whether it can be served at all. Rechecked fresh here rather than trusting the allFiles
-	// snapshot, since it may already be stale by the time of the request.
-	if !bundle.IsAvailable(time.Now().Unix()) {
-		respondPubApiNotFound(w, r)
-		return
-	}
-
 	// Serve single file raw, or multiple files as zip. Every member of requestedMembers is a
 	// confirmed current member of an available bundle at this point, so reaching this branch
 	// with exactly one never means filtering silently narrowed a larger set down to one - it
@@ -1987,13 +1994,13 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		file := requestedMembers[0]
 		// A member that is itself identity-restricted spends its own recipient
 		// allowance, same as a direct single-file download would.
-		if !consumeShareDownload(r, models.ShareResourceFile, file.Id) {
+		if !consumeShareDownload(r, models.ShareResourceFile, file.Id, int64(storage.DownloadLeeway().Seconds())) {
 			respondPubApiNotFound(w, r)
 			return
 		}
 		// The per-recipient bundle allowance (ShareGrants), when the bundle is restricted to
 		// named recipients, is metered here alongside the file-level one above.
-		if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
+		if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id, int64(storage.DownloadLeeway().Seconds())) {
 			respondPubApiNotFound(w, r)
 			return
 		}
@@ -2020,7 +2027,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	for _, file := range requestedMembers {
 		// A member that is itself identity-restricted also spends its own recipient
 		// allowance; refuse the whole request rather than excluding just this member.
-		if !consumeShareDownload(r, models.ShareResourceFile, file.Id) {
+		if !consumeShareDownload(r, models.ShareResourceFile, file.Id, int64(storage.DownloadLeeway().Seconds())) {
 			respondPubApiNotFound(w, r)
 			return
 		}
@@ -2031,7 +2038,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// recipients, is metered here - after every member's own allowance above, and before the
 	// folder's own visit allowance just below, for the same "never burn an allowance on a
 	// request that is refused after this point" reasoning as the single-member branch.
-	if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id) {
+	if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id, int64(storage.DownloadLeeway().Seconds())) {
 		respondPubApiNotFound(w, r)
 		return
 	}
@@ -2053,14 +2060,16 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 // consumeBundleDownload atomically spends one visit of the bundle's own download allowance (see
 // models.FileBundle.DownloadsRemaining) - the folder-level counter that replaces each member's
 // now-inert DownloadsRemaining. A zip download and a single-member download both go through this
-// exactly once per request (see pubApiFolderZip), so the same allowance gates both uniformly.
-// Returns false, refusing to serve, once the allowance is exhausted; always true for an unlimited
+// exactly once per request (see pubApiFolderZip), so the same allowance gates both uniformly, and
+// both are free while the visit's download window is still open. Returns false, refusing to
+// serve, once the allowance is exhausted and that window has closed; always true for an unlimited
 // bundle.
 func consumeBundleDownload(bundle models.FileBundle) bool {
 	if bundle.UnlimitedDownloads {
 		return true
 	}
-	return database.DecreaseBundleDownloadsRemaining(bundle.Id)
+	granted, _ := database.AcquireBundleDownload(bundle.Id, time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
+	return granted
 }
 
 // Serve a single file from a bundle with proper headers and decryption
@@ -2105,7 +2114,7 @@ func bundleAvailability(bundle models.FileBundle, members []models.File) bool {
 	if len(members) == 0 {
 		return false
 	}
-	return bundle.IsAvailable(time.Now().Unix())
+	return bundle.IsAvailable(time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
 }
 
 // isValidFolderPassword reports whether the folder's own password gate (see
@@ -2286,6 +2295,15 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 			// an admin caller.
 			"maxFilesGuestUpload":  env.MaxFilesGuestUpload,
 			"maxSizeGuestUploadMB": env.MaxSizeGuestUploadMb,
+			// downloadLeewaySeconds is GOKAPI_DOWNLOAD_LEEWAY: how long a download stays
+			// retrievable after the first request that reached the bytes. Published here, on the
+			// public endpoint the recipient's download page already reads, purely so that page
+			// can state the policy - "Download Link Available For 30 Minutes" - instead of the
+			// recipient discovering it by losing a transfer. 0 means no window, and there is then
+			// nothing to say. Deliberately absent from every authenticated endpoint: it is
+			// server configuration, not a setting, and an uploader can neither change it nor
+			// override it per file.
+			"downloadLeewaySeconds": int64(storage.DownloadLeeway().Seconds()),
 		},
 	}
 

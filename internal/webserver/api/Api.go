@@ -1440,7 +1440,7 @@ func outputFileJsonWithRecipients(w http.ResponseWriter, file models.File, resul
 		return
 	}
 	config := configuration.Get()
-	info, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
+	info, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(file))
 	helper.Check(err)
 
 	output := make([]chunkCompleteRecipientOutput, 0, len(results))
@@ -1559,12 +1559,15 @@ func getFilesForUser(user models.User, includeUploadRequests bool) []models.File
 	if includeUploadRequests {
 		collaborated = collaboratedRequestIds(user)
 	}
+	// One read of the folder table for the whole list: a folder decides its members' status, and
+	// resolving that per file would read the same folder once per member of it.
+	resolver := storage.NewDownloadAccessResolver()
 	for _, element := range database.GetAllMetadata() {
 		if !includeUploadRequests && element.IsFileRequest() {
 			continue
 		}
 		if mayViewFile(element, user, collaborated) {
-			file, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
+			file, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, resolver.Of(element))
 			helper.Check(err)
 			validFiles = append(validFiles, file)
 		}
@@ -1594,7 +1597,7 @@ func apiListSingle(w http.ResponseWriter, r requestParser, user models.User, _ m
 		return
 	}
 	config := configuration.Get()
-	output, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
+	output, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(file))
 	helper.Check(err)
 	result, err := json.Marshal(output)
 	helper.Check(err)
@@ -1976,7 +1979,7 @@ func apiReplaceFile(w http.ResponseWriter, r requestParser, user models.User, ap
 
 func outputFileApiInfo(w http.ResponseWriter, file models.File) {
 	config := configuration.Get()
-	publicOutput, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename)
+	publicOutput, err := file.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(file))
 	helper.Check(err)
 	result, err := json.Marshal(publicOutput)
 	helper.Check(err)
@@ -1988,7 +1991,7 @@ func outputFileJson(w http.ResponseWriter, file models.File) {
 		return
 	}
 	config := configuration.Get()
-	_, _ = io.WriteString(w, file.ToJsonResult(config.ServerUrl, config.IncludeFilename))
+	_, _ = io.WriteString(w, file.ToJsonResult(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(file)))
 }
 
 // apiModifyUser applies whichever of a rank change, a permission grant/revoke, and a password

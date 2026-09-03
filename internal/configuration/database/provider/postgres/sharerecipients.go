@@ -250,22 +250,45 @@ func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string)
 // Login tokens and sessions
 // ---------------------------------------------------------------------------
 
-// IncreaseShareGrantDownloadCount atomically records one download.
-//
-// The allowance test lives in the UPDATE's WHERE clause, mirroring
-// IncreaseDownloadCount in metadata.go. Reading the count and then writing it
-// back would let two concurrent downloads both observe one remaining and both
-// proceed. A downloadsallowed of 0 means unlimited.
-func (p DatabaseProvider) IncreaseShareGrantDownloadCount(resourceType int, resourceId string, recipientId int) bool {
+// AcquireShareGrantDownload atomically records one download by this recipient - mirrors
+// AcquireDownload in metadata.go exactly, including its three steps and the reasoning behind each;
+// see that function. The grant's lastdownloadat, which this already wrote before windows existed,
+// is the window start. A downloadsallowed of 0 means unlimited.
+func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
+	windowOpenSince := timeNow - leeway
+	if p.isShareGrantWindowOpen(resourceType, resourceId, recipientId, windowOpenSince) {
+		return true, false
+	}
 	result, err := p.exec(`UPDATE ShareGrants
 		SET downloadsused = downloadsused + 1, lastdownloadat = $1
 		WHERE resourcetype = $2 AND resourceid = $3 AND recipientid = $4
-		  AND (downloadsallowed = 0 OR downloadsused < downloadsallowed)`,
-		time.Now().Unix(), resourceType, resourceId, recipientId)
+		  AND (downloadsallowed = 0 OR downloadsused < downloadsallowed)
+		  AND lastdownloadat <= $5`,
+		timeNow, resourceType, resourceId, recipientId, windowOpenSince)
 	helper.Check(err)
 	affected, err := result.RowsAffected()
 	helper.Check(err)
-	return affected > 0
+	if affected > 0 {
+		return true, true
+	}
+	return p.isShareGrantWindowOpen(resourceType, resourceId, recipientId, windowOpenSince), false
+}
+
+// isShareGrantWindowOpen reports whether the grant's most recent download window is still open.
+// See metadata.go's isDownloadWindowOpen for why this is a SELECT.
+func (p DatabaseProvider) isShareGrantWindowOpen(resourceType int, resourceId string, recipientId int, windowOpenSince int64) bool {
+	var lastDownloadAt int64
+	row := p.queryRow(`SELECT lastdownloadat FROM ShareGrants
+		WHERE resourcetype = $1 AND resourceid = $2 AND recipientid = $3`, resourceType, resourceId, recipientId)
+	err := row.Scan(&lastDownloadAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
+		helper.Check(err)
+		return false
+	}
+	return lastDownloadAt > windowOpenSince
 }
 
 // SaveShareLoginToken stores a magic link.

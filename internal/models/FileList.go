@@ -84,6 +84,50 @@ func (f *File) IsDisposed() bool {
 	return f.DisposedAt != 0
 }
 
+// DownloadAccess is the resolved set of axes that decide whether a resource may still be
+// downloaded, and when its content is disposed of. It exists so that the two questions a caller
+// would otherwise have to answer for itself - "does this file's own allowance govern it, or its
+// folder's" and "how long is its download window" - are decided once, where the value is
+// resolved (see storage.DownloadAccessOf), rather than at every call site that has to know.
+//
+// Leeway is how long the window stays open, in seconds. A window opens when a request spends an
+// allowance and closes Leeway later; while it is open the resource is not exhausted, however
+// many further requests arrive.
+type DownloadAccess struct {
+	ExpireAt           int64
+	UnlimitedTime      bool
+	DownloadsRemaining int
+	UnlimitedDownloads bool
+	WindowOpenedAt     int64
+	Leeway             int64
+}
+
+// IsExpired reports whether the expiry timestamp has passed.
+func (a DownloadAccess) IsExpired(timeNow int64) bool {
+	return a.ExpireAt < timeNow && !a.UnlimitedTime
+}
+
+// IsExhausted reports whether the download allowance is spent and no window is open anymore.
+// With a leeway of 0 this is exactly "no downloads remaining", the rule that applied before
+// windows existed.
+func (a DownloadAccess) IsExhausted(timeNow int64) bool {
+	return a.DownloadsRemaining < 1 && !a.UnlimitedDownloads && a.WindowOpenedAt+a.Leeway <= timeNow
+}
+
+// DownloadAccess returns the axes governing this file itself. Only correct for a file that
+// belongs to no bundle - a member is governed by its folder instead, which is what
+// storage.DownloadAccessOf resolves.
+func (f *File) DownloadAccess(leeway int64) DownloadAccess {
+	return DownloadAccess{
+		ExpireAt:           f.ExpireAt,
+		UnlimitedTime:      f.UnlimitedTime,
+		DownloadsRemaining: f.DownloadsRemaining,
+		UnlimitedDownloads: f.UnlimitedDownloads,
+		WindowOpenedAt:     f.WindowOpenedAt,
+		Leeway:             leeway,
+	}
+}
+
 // Status computes which of the Status* values applies to this file, given the current time.
 //
 // A record already marked disposed reports the reason it was disposed of. One that is not yet
@@ -92,7 +136,7 @@ func (f *File) IsDisposed() bool {
 // reports the same status it will carry once the next storage.CleanUp pass catches up to it.
 // The alternative, reporting "active" until the sweep actually runs, would make the owner's view
 // depend on cron timing rather than on the file's own state.
-func (f *File) Status(timeNow int64) string {
+func (f *File) Status(access DownloadAccess, timeNow int64) string {
 	if f.IsDisposed() {
 		switch f.DisposalReason {
 		case DisposalReasonExpired:
@@ -112,10 +156,10 @@ func (f *File) Status(timeNow int64) string {
 		}
 		return StatusPendingDeletion
 	}
-	if f.DownloadsRemaining < 1 && !f.UnlimitedDownloads {
+	if access.IsExhausted(timeNow) {
 		return StatusDownloaded
 	}
-	if f.ExpireAt < timeNow && !f.UnlimitedTime {
+	if access.IsExpired(timeNow) {
 		return StatusExpired
 	}
 	return StatusActive
@@ -137,6 +181,7 @@ type File struct {
 	PendingDeletion    int64          `json:"PendingDeletion" redis:"PendingDeletion"`       // UTC timestamp when the file will be deleted, if pending. Otherwise 0
 	SizeBytes          int64          `json:"SizeBytes" redis:"SizeBytes"`                   // Filesize in bytes
 	UploadDate         int64          `json:"UploadDate" redis:"UploadDate"`                 // UTC timestamp of upload time
+	WindowOpenedAt     int64          `json:"WindowOpenedAt" redis:"WindowOpenedAt"`         // UTC timestamp the most recent download window opened, 0 if never. Server-side only, never reported to a client
 	DownloadsRemaining int            `json:"DownloadsRemaining" redis:"DownloadsRemaining"` // The remaining downloads for this file
 	DownloadCount      int            `json:"DownloadCount" redis:"DownloadCount"`           // The number of times the file has been downloaded
 	UserId             int            `json:"UserId" redis:"UserId"`                         // The user ID of the uploader
@@ -227,7 +272,7 @@ func (f *File) IsPendingForDeletion() bool {
 }
 
 // ToFileApiOutput returns a JSON object without sensitive information
-func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool) (FileApiOutput, error) {
+func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool, access DownloadAccess) (FileApiOutput, error) {
 	var result FileApiOutput
 	err := copier.Copy(&result, &f)
 	if err != nil {
@@ -257,7 +302,7 @@ func (f *File) ToFileApiOutput(serverUrl string, useFilenameInUrl bool) (FileApi
 		result.UrlDownload = getDownloadUrl(result, serverUrl, useFilenameInUrl)
 	}
 	result.UploaderId = f.UserId
-	result.Status = f.Status(time.Now().Unix())
+	result.Status = f.Status(access, time.Now().Unix())
 	result.FileRequestId = f.UploadRequestId
 	result.ExpireAtString = time.Unix(f.ExpireAt, 0).UTC().Format("2006-01-02 15:04:05")
 
@@ -290,8 +335,8 @@ func escapeFilename(filename string) string {
 }
 
 // ToJsonResult converts the file info to a json String used for returning a result for an upload
-func (f *File) ToJsonResult(serverUrl string, includeFilename bool) string {
-	info, err := f.ToFileApiOutput(serverUrl, includeFilename)
+func (f *File) ToJsonResult(serverUrl string, includeFilename bool, access DownloadAccess) string {
+	info, err := f.ToFileApiOutput(serverUrl, includeFilename, access)
 	if err != nil {
 		return errorAsJson(err)
 	}

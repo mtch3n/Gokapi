@@ -149,8 +149,10 @@ func GetUploadCounts() map[int]int {
 	result := make(map[int]int)
 	timeNow := time.Now().Unix()
 	files := database.GetAllMetadata()
+	resolver := NewDownloadAccessResolver()
 	for _, file := range files {
-		if !IsExpiredFile(file, timeNow) {
+		access := resolver.Of(file)
+		if !access.IsExpired(timeNow) && !access.IsExhausted(timeNow) {
 			result[file.UserId] = result[file.UserId] + 1
 		}
 	}
@@ -774,9 +776,16 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	// database.IncreaseDownloadCount), which stays correct even across multiple instances sharing one DB.
 	apimutex.Lock(apimutex.TypeMetaData, file.Id)
 	if recheckExpiry {
-		if !file.UnlimitedDownloads {
-			file.DownloadsRemaining = database.GetDownloadsRemaining(file.Id)
+		// Re-read the row rather than trusting the caller's copy: the allowance and the download
+		// window may both have moved since it was fetched, and both decide whether this request
+		// may still be served.
+		current, ok := database.GetMetaDataById(file.Id)
+		if !ok {
+			apimutex.Unlock(apimutex.TypeMetaData, file.Id)
+			return false
 		}
+		file.DownloadsRemaining = current.DownloadsRemaining
+		file.WindowOpenedAt = current.WindowOpenedAt
 		if IsExpiredFile(file, time.Now().Unix()) {
 			apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 			return false
@@ -784,18 +793,27 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	}
 	if increaseCounter {
 		if !file.UnlimitedDownloads {
-			if !database.IncreaseDownloadCount(file.Id, true) {
-				// The atomic, floored decrement lost the race (or found the allowance already exhausted) -
-				// this caller must not serve the file, regardless of what the pre-fetched file struct says.
+			granted, opened := database.AcquireDownload(file.Id, time.Now().Unix(), int64(LeewayFor(file).Seconds()))
+			if !granted {
+				// The allowance is exhausted and no download window is open (or the atomic,
+				// floored decrement lost the race and the winner's window has since closed) -
+				// this caller must not serve the file, regardless of what the pre-fetched file
+				// struct says.
 				apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 				return false
 			}
+			// A request served inside an already-open window spends nothing: it is the same
+			// pickup as the one that opened it, retried or resumed.
+			if opened {
+				file.DownloadsRemaining = file.DownloadsRemaining - 1
+				file.DownloadCount = file.DownloadCount + 1
+				go sse.PublishDownloadCount(file)
+			}
 		} else {
-			database.IncreaseDownloadCount(file.Id, false)
+			database.IncreaseDownloadCount(file.Id)
+			file.DownloadCount = file.DownloadCount + 1
+			go sse.PublishDownloadCount(file)
 		}
-		file.DownloadsRemaining = file.DownloadsRemaining - 1
-		file.DownloadCount = file.DownloadCount + 1
-		go sse.PublishDownloadCount(file)
 	}
 	apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 
@@ -1036,6 +1054,7 @@ func CleanUp(periodic bool) {
 	retention := time.Duration(environment.New().MetadataRetention)
 
 	allFiles := database.GetAllMetadata()
+	resolver := NewDownloadAccessResolver()
 	shaRefCount := make(map[string]int, len(allFiles))
 	for _, file := range allFiles {
 		if !file.IsDisposed() {
@@ -1058,10 +1077,10 @@ func CleanUp(periodic bool) {
 			// content is already gone, so there is nothing to check.
 		case !FileExists(element, dataDir):
 			deleteFileHard(element, key, "stored object missing")
-		case isExpiredFileWithoutDownload(element, timeNow):
+		case isExpiredFileWithoutDownload(element, resolver.Of(element), timeNow):
 			reason := models.DisposalReasonExpired
 			reasonText := "expired"
-			if element.DownloadsRemaining < 1 && !element.UnlimitedDownloads {
+			if resolver.Of(element).IsExhausted(timeNow) {
 				reason = models.DisposalReasonDownloaded
 				reasonText = "downloads exhausted"
 			}
@@ -1351,19 +1370,99 @@ func isPendingToBeDeletedWithoutDownload(file models.File, timeNow int64) bool {
 	return isPendingToBeDeleted(file, timeNow)
 }
 
-// IsExpiredFile returns true if the file is expired, either due to download count
-// or if the provided timestamp is after the expiry timestamp
+// contentTypeSecret is the MIME type a client sends for a text secret or note, and the only thing
+// that distinguishes one from any other one-download file once it reaches the server. LeewayFor
+// below is the only place it is consulted, which is also why trusting it is safe: claiming it for
+// an ordinary file can only shorten that file's own access, never lengthen it or anyone else's.
+const contentTypeSecret = "application/x-exchangepoint-secret"
+
+// DownloadLeeway returns how long a download window stays open, GOKAPI_DOWNLOAD_LEEWAY. Re-read on
+// every use rather than cached, the same contract GOKAPI_MAX_EXPIRY and GOKAPI_METADATA_RETENTION
+// have. This is the policy for a resource that is not a file - a folder, whose window covers every
+// member of it at once. For a file, use LeewayFor.
+func DownloadLeeway() time.Duration {
+	return time.Duration(configuration.GetEnvironment().DownloadLeeway)
+}
+
+// LeewayFor returns how long a download window stays open for this file. A secret has none: the
+// leeway exists so a broken transfer does not cost the recipient their download, and a secret is
+// one short response with nothing to resume.
+//
+// This is the only function that decides the duration. Every caller passes the value it returns
+// and is otherwise identical, so there is one rule - access ends at whichever comes first, the
+// expiry or the close of the download window - and only the window's length varies.
+func LeewayFor(file models.File) time.Duration {
+	if file.ContentType == contentTypeSecret {
+		return 0
+	}
+	return DownloadLeeway()
+}
+
+// DownloadAccessOf resolves the axes that decide whether this file may still be downloaded and
+// when its content is disposed of, reading its folder from the database when it belongs to one.
+// See models.DownloadAccess and downloadAccessOf.
+func DownloadAccessOf(file models.File) models.DownloadAccess {
+	if file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
+		return downloadAccessOf(file, models.FileBundle{}, false)
+	}
+	bundle, ok := database.GetFileBundle(file.BundleId)
+	return downloadAccessOf(file, bundle, ok)
+}
+
+// DownloadAccessResolver answers DownloadAccessOf's question for many files against one read of
+// the folder table. A caller that walks every file - the owner's file list, the CleanUp sweep -
+// would otherwise read the same folder once per member of it.
+type DownloadAccessResolver struct {
+	bundles map[string]models.FileBundle
+}
+
+// NewDownloadAccessResolver reads every folder once, for the resolver to answer from.
+func NewDownloadAccessResolver() DownloadAccessResolver {
+	bundles := make(map[string]models.FileBundle)
+	for _, bundle := range database.GetAllFileBundles() {
+		bundles[bundle.Id] = bundle
+	}
+	return DownloadAccessResolver{bundles: bundles}
+}
+
+// Of returns the axes governing this file, the same answer DownloadAccessOf gives.
+func (r DownloadAccessResolver) Of(file models.File) models.DownloadAccess {
+	if file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
+		return downloadAccessOf(file, models.FileBundle{}, false)
+	}
+	bundle, ok := r.bundles[file.BundleId]
+	return downloadAccessOf(file, bundle, ok)
+}
+
+// downloadAccessOf is the one place that decides which axes govern a file. A member's own expiry
+// and download allowance are inert while it belongs to a folder (see models.File.IsBundleMember):
+// the folder is the unit of sharing, so it is the folder that decides access, exhaustion and
+// disposal, for every member of it together. One visit, one window, one folder - a folder whose
+// allowance runs out takes all of its members with it on the next sweep, and a member whose own
+// stale counter reached zero long ago is not disposed of while its folder still has allowance.
+//
+// A folder is never a secret, so its window is always the configured leeway.
+func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool) models.DownloadAccess {
+	if hasBundle {
+		return bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
+	}
+	return file.DownloadAccess(int64(LeewayFor(file).Seconds()))
+}
+
+// IsExpiredFile returns true if the file can no longer be served: the expiry timestamp passed, or
+// the download allowance is spent and the download window that spending it opened has closed. A
+// member of a folder is judged by its folder, not by itself - see DownloadAccessOf.
 func IsExpiredFile(file models.File, timeNow int64) bool {
-	return (file.ExpireAt < timeNow && !file.UnlimitedTime) ||
-		(file.DownloadsRemaining < 1 && !file.UnlimitedDownloads)
+	access := DownloadAccessOf(file)
+	return access.IsExpired(timeNow) || access.IsExhausted(timeNow)
 }
 
 // isExpiredFileWithoutDownload returns true if there is no active download for an expired file
-func isExpiredFileWithoutDownload(file models.File, timeNow int64) bool {
+func isExpiredFileWithoutDownload(file models.File, access models.DownloadAccess, timeNow int64) bool {
 	if downloadstatus.IsCurrentlyDownloading(file) {
 		return false
 	}
-	return IsExpiredFile(file, timeNow)
+	return access.IsExpired(timeNow) || access.IsExhausted(timeNow)
 }
 
 // deleteSource removes the source file from the file system or cloud storage.
@@ -1545,7 +1644,7 @@ func CancelPendingFileDeletion(fileId string) (models.File, bool) {
 	if !ok {
 		return models.File{}, false
 	}
-	if file.IsDisposed() || file.Status(time.Now().Unix()) == models.StatusDeleted {
+	if file.IsDisposed() || file.Status(DownloadAccessOf(file), time.Now().Unix()) == models.StatusDeleted {
 		return models.File{}, false
 	}
 	file.PendingDeletion = 0

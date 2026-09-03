@@ -59,7 +59,7 @@ func ProcessCompleteFile(w http.ResponseWriter, r *http.Request, userId, maxMemo
 		}
 		return err
 	}
-	_, _ = io.WriteString(w, result.ToJsonResult(config.ExternalUrl, configuration.Get().IncludeFilename))
+	_, _ = io.WriteString(w, result.ToJsonResult(config.ExternalUrl, configuration.Get().IncludeFilename, storage.DownloadAccessOf(result)))
 	return nil
 }
 

@@ -78,13 +78,20 @@ type Database interface {
 	MigratePlaintextFileNames() int
 	// DeleteMetaData deletes information about a file
 	DeleteMetaData(id string)
-	// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
-	// is true, DownloadsRemaining is only decremented if it is greater than 0, and the return value reports
-	// whether this call actually consumed a remaining download. If it returns false, the download was already
-	// exhausted by a concurrent caller and must not be served.
-	IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool
-	// GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads
-	GetDownloadsRemaining(id string) int
+	// AcquireDownload atomically lets one request through to a capped file's content. A request
+	// that finds no download window open opens one, which spends one of DownloadsRemaining,
+	// increments DownloadCount and records WindowOpenedAt; opened reports that. A request that
+	// arrives while a window is open is granted without spending anything, so a broken or
+	// resumed transfer does not cost the recipient their download. granted is false, and nothing
+	// is written, once the allowance is exhausted and no window is open - the caller must not
+	// serve the file then. leeway is how long a window stays open, in seconds; 0 makes every
+	// request open its own window, which is the behaviour before windows existed. Never called
+	// for a file with UnlimitedDownloads set - that is checked by the caller, not here.
+	AcquireDownload(id string, timeNow, leeway int64) (granted, opened bool)
+	// IncreaseDownloadCount atomically increases the download count of a file, leaving its
+	// allowance and its window untouched. Only for a file with UnlimitedDownloads set, which has
+	// no allowance to spend and no lifetime a window could bound.
+	IncreaseDownloadCount(id string)
 
 	// GetSession returns the session with the given ID or false if not a valid ID
 	GetSession(id string) (models.Session, bool)
@@ -142,12 +149,12 @@ type Database interface {
 	// what it refers to.
 	DeleteShareGrants(resourceType int, resourceId string)
 
-	// IncreaseShareGrantDownloadCount atomically records one download by this
-	// recipient. It returns false when the recipient's allowance is already
-	// exhausted, in which case the caller must not serve the resource. The
-	// test and the increment happen in one statement, so two concurrent
-	// downloads cannot both pass a check that only one of them should.
-	IncreaseShareGrantDownloadCount(resourceType int, resourceId string, recipientId int) bool
+	// AcquireShareGrantDownload atomically records one download by this recipient, under the
+	// same window rule as AcquireDownload: the recipient's own allowance is spent only when this
+	// call opens a window, and a request inside an open window is granted for free. granted is
+	// false when the allowance is exhausted and no window is open, in which case the caller must
+	// not serve the resource. The grant's lastdownloadat is the window start.
+	AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (granted, opened bool)
 
 	// SaveShareLoginToken stores a magic link.
 	SaveShareLoginToken(token models.ShareLoginToken)
@@ -187,13 +194,12 @@ type Database interface {
 	SaveFileBundle(bundle models.FileBundle)
 	// DeleteFileBundle deletes a file bundle with the given ID
 	DeleteFileBundle(bundle models.FileBundle)
-	// DecreaseBundleDownloadsRemaining atomically spends one of the bundle's own download
-	// allowance (see models.FileBundle.DownloadsRemaining), conditional on it being greater than
-	// 0 - mirrors IncreaseDownloadCount's decrement half for a file. Returns false, and leaves
-	// the allowance untouched, if it was already exhausted; the caller must not serve in that
-	// case. Never called for a bundle with UnlimitedDownloads set - that is checked by the
-	// caller, not here.
-	DecreaseBundleDownloadsRemaining(id string) bool
+	// AcquireBundleDownload atomically lets one visit through to a bundle's content, under the
+	// same window rule as AcquireDownload - the bundle owning the window rather than any member,
+	// so a zip and a single member fetched inside the same window are one visit between them.
+	// Never called for a bundle with UnlimitedDownloads set - that is checked by the caller, not
+	// here.
+	AcquireBundleDownload(id string, timeNow, leeway int64) (granted, opened bool)
 
 	// GetStatTraffic returns the total traffic from statistics
 	GetStatTraffic() uint64

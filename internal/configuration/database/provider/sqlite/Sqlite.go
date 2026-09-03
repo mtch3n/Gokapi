@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 27
+const DatabaseSchemeVersion = 28
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -336,6 +336,21 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		}
 		p.backfillBundleSettingsFromMembers()
 	}
+	// The download window: the timestamp the most recent window opened on a file and on a folder,
+	// so access can end at whichever comes first, the resource's own expiry or the close of its
+	// window (see models.DownloadAccess). Every row that already exists gets 0, "never opened",
+	// which is closed under any leeway - so an upgrade with GOKAPI_DOWNLOAD_LEEWAY unset behaves
+	// exactly as before. Same idempotency guard as the v17 step above.
+	if currentDbVersion < 28 {
+		if !p.columnExists("FileMetaData", "WindowOpenedAt") {
+			err := p.rawSqlite(`ALTER TABLE FileMetaData ADD COLUMN "WindowOpenedAt" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+		if !p.columnExists("FileBundles", "WindowOpenedAt") {
+			err := p.rawSqlite(`ALTER TABLE FileBundles ADD COLUMN "WindowOpenedAt" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+	}
 }
 
 // backfillBundleSettingsFromMembers derives every existing bundle's PasswordHash, ExpireAt,
@@ -514,6 +529,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"EncryptedSharePassword"	BLOB,
 			"DisposedAt"	INTEGER NOT NULL DEFAULT 0,
 			"DisposalReason"	INTEGER NOT NULL DEFAULT 0,
+			"WindowOpenedAt"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("Id")
 		);
 		CREATE TABLE "Hotlinks" (
@@ -606,6 +622,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"UnlimitedTime"	INTEGER NOT NULL DEFAULT 0,
 			"DownloadsRemaining"	INTEGER NOT NULL DEFAULT 0,
 			"UnlimitedDownloads"	INTEGER NOT NULL DEFAULT 0,
+			"WindowOpenedAt"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("id")
 		);`
 	err := p.rawSqlite(sqlStmt)
