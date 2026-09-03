@@ -58,8 +58,8 @@ func TestParseConfig(t *testing.T) {
 	test.IsNil(t, err)
 	test.IsEqualInt(t, config.AllowedDownloads, 1)
 	// No usable expiryDays, so the server falls back to GOKAPI_DEFAULT_EXPIRY, which is unset
-	// here and therefore its built-in default of 7d.
-	test.IsEqualInt(t, config.Expiry, 7)
+	// here and therefore its built-in default of 1d.
+	test.IsEqualInt(t, config.Expiry, 1)
 	test.IsEqualBool(t, config.UnlimitedTime, false)
 	test.IsEqualBool(t, config.UnlimitedDownload, false)
 

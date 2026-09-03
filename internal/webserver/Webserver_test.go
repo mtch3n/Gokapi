@@ -3337,7 +3337,7 @@ func TestPublicApiConfig(t *testing.T) {
 
 		// defaultExpirySeconds is the preset a client preselects for a new upload. Neither
 		// GOKAPI_DEFAULT_EXPIRY nor GOKAPI_EXPIRY_OPTIONS is set for these tests, so the value
-		// published here must be the built-in default of 7d against the built-in six-preset
+		// published here must be the built-in default of 1d against the built-in six-preset
 		// list, written out as seconds rather than derived from either. It must also be one of
 		// the presets actually published above, and must not be the longest of them - a client
 		// that takes this value unchanged must not end up handing every upload the maximum
@@ -3346,8 +3346,8 @@ func TestPublicApiConfig(t *testing.T) {
 		if !ok {
 			t.Errorf("Missing or invalid defaultExpirySeconds field in limits")
 		} else {
-			if int64(defaultExpirySeconds) != 604800 {
-				t.Errorf("Expected defaultExpirySeconds 604800, got %v", defaultExpirySeconds)
+			if int64(defaultExpirySeconds) != 86400 {
+				t.Errorf("Expected defaultExpirySeconds 86400, got %v", defaultExpirySeconds)
 			}
 			isOption := false
 			for _, option := range options {

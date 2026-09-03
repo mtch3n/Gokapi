@@ -82,7 +82,7 @@ Available environment variables
 +-------------------------------------+-------------------------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_DATA_DIR                     | Sets the directory for the data                                                                                         | Yes             | data                        |
 +-------------------------------------+-------------------------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+
-| GOKAPI_DEFAULT_EXPIRY               | Sets which of the GOKAPI_EXPIRY_OPTIONS presets a client preselects for a new upload,                                   | No              | 7d                          |
+| GOKAPI_DEFAULT_EXPIRY               | Sets which of the GOKAPI_EXPIRY_OPTIONS presets a client preselects for a new upload,                                   | No              | 1d                          |
 |                                     |                                                                                                                         |                 |                             |
 |                                     | e.g. "7d". Same format as GOKAPI_MAX_EXPIRY. The value is snapped down to the longest                                   |                 |                             |
 |                                     |                                                                                                                         |                 |                             |

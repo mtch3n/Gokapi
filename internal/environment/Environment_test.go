@@ -73,25 +73,26 @@ func TestDefaultExpiry(t *testing.T) {
 	const hour = int64(time.Hour)
 	const day = int64(24 * time.Hour)
 
-	// Unset, against the shipped six-preset list: 7d, and not the longest preset.
+	// Unset, against the shipped six-preset list: 1d, and not the longest preset.
 	os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
 	os.Unsetenv("GOKAPI_MAX_EXPIRY")
 	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1h,1d,7d,14d,30d,365d")
 	env := New()
-	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), day)
 	test.IsEqualBool(t, int64(env.DefaultExpiry) == 365*day, false)
 
-	// Unset, against a shortened three-preset list: still 7d, and still not the longest preset.
+	// Unset, against a shortened three-preset list: still 1d, and still not the longest preset.
 	// This is the case a client-side rule sized against the six-preset list gets wrong.
 	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1d,7d,14d")
 	env = New()
-	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), day)
 	test.IsEqualBool(t, int64(env.DefaultExpiry) == 14*day, false)
 
-	// A set value is honoured.
-	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "1d")
+	// A set value is honoured. Deliberately not 1d, which is the built-in default and so would
+	// pass even if the environment variable were ignored entirely.
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "7d")
 	env = New()
-	test.IsEqualInt64(t, int64(env.DefaultExpiry), day)
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
 
 	// A value matching no preset snaps down to the longest preset below it.
 	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1h,1d,7d,14d,30d,365d")
@@ -119,14 +120,14 @@ func TestDefaultExpiry(t *testing.T) {
 	test.IsEqualInt64(t, int64(env.DefaultExpiry), int64(30*time.Minute))
 
 	// 0 does not mean unlimited here, and a negative value is not honoured either: both fall
-	// back to 7d, which then snaps onto the 7d preset.
+	// back to 1d, which then snaps onto the 1d preset.
 	os.Unsetenv("GOKAPI_MAX_EXPIRY")
 	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "0")
 	env = New()
-	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), day)
 	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "-5d")
 	env = New()
-	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), day)
 
 	os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
 	os.Unsetenv("GOKAPI_EXPIRY_OPTIONS")

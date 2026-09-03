@@ -31,7 +31,7 @@ var defaultExpiryOptions = []Duration{
 // the envDefault tag on Environment.DefaultExpiry, kept as a separate literal for the same
 // reason defaultExpiryOptions is: normalizeDefaultExpiry must have a fallback that does not
 // depend on parsing succeeding.
-const defaultExpiryFallback = Duration(7 * 24 * time.Hour)
+const defaultExpiryFallback = Duration(24 * time.Hour)
 
 // DefaultPort for the webserver
 const DefaultPort = 53842
@@ -127,7 +127,7 @@ type Environment struct {
 	// persistent, for the same reason as GOKAPI_MAX_EXPIRY: it is re-read from the
 	// environment on every start, so an operator can change the default without a
 	// reconfiguration, but it must therefore be present on every start
-	DefaultExpiry Duration `env:"DEFAULT_EXPIRY" envDefault:"7d"`
+	DefaultExpiry Duration `env:"DEFAULT_EXPIRY" envDefault:"1d"`
 	// Sets the maximum number of files that can be uploaded per file requests created by
 	// non-admin users
 	// Set to 0 to allow unlimited file count for all users
