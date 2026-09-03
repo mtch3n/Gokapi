@@ -18,7 +18,7 @@ import (
 var newSession string
 
 func TestMain(m *testing.M) {
-	testconfiguration.CreateWithPort(false, testconfiguration.PortSessionManager)
+	testconfiguration.CreateWithPort(false, test.PortSessionManager)
 	configuration.Load()
 	configuration.ConnectDatabase()
 	exitVal := m.Run()
@@ -110,7 +110,9 @@ func withServerUrl(t *testing.T, https bool) func() {
 	original, err := os.ReadFile(configPath)
 	test.IsNil(t, err)
 
-	modified := bytes.Replace(original, []byte(`"ServerUrl": "http://127.0.0.1:53844/"`), []byte(`"ServerUrl": "https://127.0.0.1:53844/"`), 1)
+	serverUrl := `"ServerUrl": "http://` + test.PortSessionManager + `/"`
+	serverUrlSsl := `"ServerUrl": "https://` + test.PortSessionManager + `/"`
+	modified := bytes.Replace(original, []byte(serverUrl), []byte(serverUrlSsl), 1)
 	if !https {
 		modified = original
 	}

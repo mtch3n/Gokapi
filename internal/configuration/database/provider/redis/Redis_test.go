@@ -15,7 +15,7 @@ import (
 
 var config = models.DbConnection{
 	RedisPrefix: "test_",
-	HostUrl:     "127.0.0.1:16379",
+	HostUrl:     test.PortRedisProvider,
 	Type:        1, // dbabstraction.TypeRedis
 }
 
@@ -24,7 +24,7 @@ var mRedis *miniredis.Miniredis
 func TestMain(m *testing.M) {
 
 	mRedis = miniredis.NewMiniRedis()
-	err := mRedis.StartAddr("127.0.0.1:16379")
+	err := mRedis.StartAddr(test.PortRedisProvider)
 	if err != nil {
 		log.Fatal("Could not start miniredis")
 	}

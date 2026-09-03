@@ -28,9 +28,9 @@ func TestLoad(t *testing.T) {
 	test.IsEqualBool(t, Exists(), true)
 	Load()
 	test.IsEqualString(t, parsedEnvironment.ConfigDir, "test")
-	test.IsEqualString(t, serverSettings.Port, "127.0.0.1:53843")
+	test.IsEqualString(t, serverSettings.Port, test.PortDefault)
 	test.IsEqualString(t, serverSettings.Authentication.Username, "test")
-	test.IsEqualString(t, serverSettings.ServerUrl, "http://127.0.0.1:53843/")
+	test.IsEqualString(t, serverSettings.ServerUrl, test.Url(test.PortDefault)+"/")
 	test.IsEqualBool(t, serverSettings.UseSsl, false)
 
 	_ = os.Setenv("GOKAPI_LENGTH_ID", "20")

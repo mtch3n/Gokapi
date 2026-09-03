@@ -18,6 +18,7 @@ import (
 	"github.com/forceu/gokapi/internal/storage/filesystem"
 	"github.com/forceu/gokapi/internal/storage/filesystem/s3filesystem/aws"
 	"github.com/forceu/gokapi/internal/storage/processingstatus/pstatusdb"
+	"github.com/forceu/gokapi/internal/test"
 	"github.com/johannesboyne/gofakes3"
 	"github.com/johannesboyne/gofakes3/backend/s3mem"
 )
@@ -28,21 +29,6 @@ const (
 	configFile = baseDir + "/config.json"
 	SqliteUrl  = "sqlite://" + dataDir + "/gokapi.sqlite"
 	SaltAdmin  = "LW6fW4Pjv8GtdWVLSZD66gYEev6NAaXxOVBw7C"
-)
-
-// Test ports. `go test ./...` runs every package concurrently, so any two packages whose tests
-// put a real webserver.Start() on the wire (or that hardcode the resulting URL in their own
-// assertions) must never share a port - otherwise they race to bind it. Most packages that call
-// Create never do either of those things, so they stay on portDefault, same as always. The
-// handful that do get their own constant here, which is the single place that value is decided,
-// so a package's test port can never drift out of sync with a literal asserted elsewhere.
-const (
-	portDefault        = "127.0.0.1:53843" // also asserted literally by Configuration_test.go and throughout Webserver_test.go
-	PortSessionManager = "127.0.0.1:53844"
-	PortApi            = "127.0.0.1:53845"
-	PortFileupload     = "127.0.0.1:53846"
-	PortApplyMaxExpiry = "127.0.0.1:53847"
-	PortSelf           = "127.0.0.1:53848"
 )
 
 func SetDirEnv() {
@@ -63,15 +49,15 @@ func SetDirEnv() {
 	}
 }
 
-// Create creates a configuration for unit testing on portDefault, the port shared by every
+// Create creates a configuration for unit testing on test.PortDefault, the port shared by every
 // package that does not put a real webserver on the wire during its tests. If initFiles is set,
 // test metaData and content is created.
 func Create(initFiles bool) {
-	CreateWithPort(initFiles, portDefault)
+	CreateWithPort(initFiles, test.PortDefault)
 }
 
 // CreateWithPort is Create, but binds the on-disk config to a caller-chosen port instead of
-// portDefault. Use this from a package whose tests actually start a real webserver, or that
+// test.PortDefault. Use this from a package whose tests actually start a real webserver, or that
 // hardcodes the resulting URL in its own assertions, so concurrent `go test ./...` packages can
 // never race to bind the same TCP port.
 func CreateWithPort(initFiles bool, port string) {
