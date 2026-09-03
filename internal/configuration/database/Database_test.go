@@ -855,6 +855,37 @@ func TestShareGrantDownloadCounter(t *testing.T) {
 	})
 }
 
+// TestGetAllShareGrants covers the one read that walks the whole grant table, which the callers
+// resolving every file's access axes in one pass depend on - the owner's file list and the
+// CleanUp sweep, which would otherwise read the grants of every file one at a time. Every
+// provider must return grants across resources AND across resource types, since a file and a
+// folder are stored under separate keys.
+func TestGetAllShareGrants(t *testing.T) {
+	runShareTypes(t, func() {
+		erin := SaveShareRecipient(models.ShareRecipient{Email: "erin@example.com", CreatedAt: 1})
+		frank := SaveShareRecipient(models.ShareRecipient{Email: "frank@example.com", CreatedAt: 1})
+
+		SetShareGrants(models.ShareResourceFile, "res-all-file", []int{erin, frank}, 1, 3)
+		SetShareGrants(models.ShareResourceBundle, "res-all-bundle", []int{erin}, 1, 5)
+
+		allowanceByResource := make(map[string][]int)
+		for _, grant := range GetAllShareGrants() {
+			key := grant.ResourceId
+			allowanceByResource[key] = append(allowanceByResource[key], grant.DownloadsAllowed)
+		}
+		test.IsEqualInt(t, len(allowanceByResource["res-all-file"]), 2)
+		test.IsEqualInt(t, allowanceByResource["res-all-file"][0], 3)
+		test.IsEqualInt(t, allowanceByResource["res-all-file"][1], 3)
+		test.IsEqualInt(t, len(allowanceByResource["res-all-bundle"]), 1)
+		test.IsEqualInt(t, allowanceByResource["res-all-bundle"][0], 5)
+
+		DeleteShareGrants(models.ShareResourceFile, "res-all-file")
+		DeleteShareGrants(models.ShareResourceBundle, "res-all-bundle")
+		DeleteShareRecipient(erin)
+		DeleteShareRecipient(frank)
+	})
+}
+
 // The link is reusable by design: a single-use link would be burned by mail
 // scanners such as Outlook Safe Links before the recipient ever clicked it,
 // and the per-recipient download allowance already presumes repeat visits.
