@@ -49,9 +49,28 @@ func GetFiles(bundle models.FileBundle) []models.File {
 	return result
 }
 
-// Delete deletes a bundle and all its associated files
+// Delete disposes of every file in a bundle and marks the bundle itself as deleted.
+//
+// The bundle row is deliberately not removed here. Its members keep their rows for the metadata
+// retention period, so their owner still sees what was deleted, and those rows need the folder to
+// still be there to be grouped under - removing it left the file list rendering them flat, with
+// no folder at all. When the row goes is decided in one place, storage.CleanUp's
+// cleanInvalidBundles, once no file row names the bundle any more; deciding it here would mean
+// deciding against a sweep that runs in the background, and the answer would depend on which of
+// the two got there first.
+//
+// The retained row carries no credential material, the same rule storage.disposeFile applies to a
+// retained file record: the folder's own password, its stored share key and every recipient login
+// token issued against it go now, not when the row is finally collected. Marked before the
+// members are disposed of, so that no sweep can see the folder emptied while it still reads as
+// live.
 func Delete(bundle models.FileBundle) {
+	storage.RevokeShareTokens(models.ShareResourceBundle, bundle.Id)
+	bundle.PasswordHash = ""
+	bundle.EncryptedSharePassword = nil
+	bundle.DeletedAt = time.Now().Unix()
+	database.SaveFileBundle(bundle)
+
 	files := GetFiles(bundle)
 	storage.DeleteFiles(files, true)
-	database.DeleteFileBundle(bundle)
 }

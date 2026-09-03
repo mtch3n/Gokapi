@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/forceu/gokapi/internal/configuration"
@@ -1049,6 +1050,16 @@ func FileExists(file models.File, dataDir string) bool {
 	return exists
 }
 
+// cleanUpMutex serialises sweeps. Every manual delete starts one in the background (see
+// DeleteFile), so two can easily overlap - and two passes over the same rows are never useful,
+// only harmful: each decides what to do from a snapshot taken at its own start, so a pass still
+// working through a stale snapshot writes a disposed record back after a faster one has already
+// purged it. That resurrected row is gone again a moment later, but for as long as it is there it
+// names its bundle, and a bundle is kept alive by exactly that (see cleanInvalidBundles) - so an
+// overlapping pair can leave a folder behind that neither pass on its own would have. DeleteFiles
+// already batches deletions to keep passes from piling up; this makes that hold for every caller.
+var cleanUpMutex sync.Mutex
+
 // CleanUp disposes of expired, exhausted or owner-deleted files, purges disposed records once
 // their retention window has elapsed, and removes files whose stored content has gone missing
 // outright. Will be called periodically or after a file has been manually deleted in the admin
@@ -1072,6 +1083,8 @@ func FileExists(file models.File, dataDir string) bool {
 // pass are disposed of, so that two rows sharing a blob and expiring in the same pass still only
 // have it deleted once, on whichever of them is processed last.
 func CleanUp(periodic bool) {
+	cleanUpMutex.Lock()
+	defer cleanUpMutex.Unlock()
 	downloadstatus.Clean()
 	timeNow := time.Now().Unix()
 	dataDir := configuration.Get().DataDir
@@ -1227,7 +1240,10 @@ func cleanExpiredFileRequests() {
 	}
 }
 
-// cleanInvalidBundles removes bundles older than 24 hours that no file row refers to any more.
+// cleanInvalidBundles removes bundles that no file row refers to any more. This is the only place
+// a bundle's lifetime is decided, for an owner-deleted folder as much as for an abandoned one:
+// filebundle.Delete marks a folder and leaves it here rather than deciding for itself, because it
+// would be deciding against a sweep that runs in the background.
 //
 // A disposed member still has its row, and keeps its bundle alive with it. Metadata retention
 // deliberately outlives the content it describes, so a deleted file stays listed for its owner
@@ -1235,12 +1251,17 @@ func cleanExpiredFileRequests() {
 // member was disposed of left those rows pointing at a bundle that no longer existed, and the
 // file list had nothing left to group them under. The bundle goes when the last member row is
 // purged, not when the last member's content is.
+//
+// A bundle young enough to still be inside models.FileBundleGracePeriod is left alone, since a
+// folder whose first upload is still in flight has no member row to be kept alive by yet. A
+// folder its owner deleted can gain no members, so that grace is not what it needs and would
+// only hold an already-emptied folder in the listing for the rest of the day.
 func cleanInvalidBundles() {
 	bundles := database.GetAllFileBundles()
 	files := database.GetAllMetadata()
 
 	for _, bundle := range bundles {
-		if !bundle.IsOlderThanGracePeriod() {
+		if bundle.DeletedAt == 0 && !bundle.IsOlderThanGracePeriod() {
 			continue
 		}
 		hasMember := false
@@ -1544,13 +1565,22 @@ func DownloadAccessOfBundle(bundle models.FileBundle) models.DownloadAccess {
 	return access.WithShareGrants(grants)
 }
 
-// IsAvailableBundle reports whether the folder itself may currently be opened at all: not expired,
-// and its download allowance is not exhausted - which, with a leeway above 0, includes a folder
-// whose allowance is spent but whose download window is still open. It says nothing about
-// membership: a folder with zero members is still "available" by this function alone, and callers
-// combine it with their own membership check (see webserver.bundleAvailability) because what
-// counts as a member differs by caller (see models.File.IsBundleMember).
+// IsAvailableBundle reports whether the folder itself may currently be opened at all: its owner
+// has not deleted it, it is not expired, and its download allowance is not exhausted - which, with
+// a leeway above 0, includes a folder whose allowance is spent but whose download window is still
+// open. It says nothing about membership: a folder with zero members is still "available" by this
+// function alone, and callers combine it with their own membership check (see
+// webserver.bundleAvailability) because what counts as a member differs by caller (see
+// models.File.IsBundleMember).
+//
+// A deleted folder keeps its row for as long as its disposed members keep theirs (see
+// models.FileBundle.DeletedAt), and that retained row must never let anyone back in. Its members
+// are disposed of, so the membership check already refuses it, but this says so directly rather
+// than leaving the guarantee to depend on what a caller counts as a member.
 func IsAvailableBundle(bundle models.FileBundle, timeNow int64) bool {
+	if bundle.DeletedAt != 0 {
+		return false
+	}
 	access := DownloadAccessOfBundle(bundle)
 	return !access.IsExpired(timeNow) && !access.IsExhausted(timeNow)
 }
@@ -1602,7 +1632,7 @@ func disposeFile(file models.File, reason int, reasonText string, timeNow int64,
 		database.DeleteHotlink(file.HotlinkId)
 		file.HotlinkId = ""
 	}
-	revokeShareTokens(models.ShareResourceFile, file.Id)
+	RevokeShareTokens(models.ShareResourceFile, file.Id)
 	file.SHA1 = ""
 	file.Encryption.DecryptionKey = nil
 	file.Encryption.Nonce = nil
@@ -1637,11 +1667,11 @@ func deleteFileHard(file models.File, fileId string, reasonText string) {
 	logging.LogFileExpired(file, reasonText)
 }
 
-// revokeShareTokens revokes every recipient login token issued against a resource. Used when a
-// file is disposed of: the grant rows recording who had access are kept as history, but the
-// tokens that let a recipient actually use one must not survive - a retained record carries no
-// credential material.
-func revokeShareTokens(resourceType int, resourceId string) {
+// RevokeShareTokens revokes every recipient login token issued against a resource. Used when a
+// file is disposed of, and when a folder is deleted (see filebundle.Delete): the grant rows
+// recording who had access are kept as history, but the tokens that let a recipient actually use
+// one must not survive - a retained record carries no credential material.
+func RevokeShareTokens(resourceType int, resourceId string) {
 	for _, grant := range database.GetShareGrants(resourceType, resourceId) {
 		database.RevokeShareLoginTokens(grant.RecipientId, resourceType, resourceId)
 	}

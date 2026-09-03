@@ -15,7 +15,8 @@ import (
 // fresh from the CREATE TABLE above - which SELECT * would silently scan into the wrong fields.
 // See metadata.go's metaDataColumns for the same hazard, hit and fixed there first.
 const fileBundleColumns = `id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
-	PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt`
+	PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt,
+	DeletedAt`
 
 type schemaFileBundles struct {
 	Id                     string
@@ -29,6 +30,7 @@ type schemaFileBundles struct {
 	DownloadsRemaining     int
 	UnlimitedDownloads     int
 	WindowOpenedAt         int64
+	DeletedAt              int64
 }
 
 func (rowData schemaFileBundles) toFileBundleModel() models.FileBundle {
@@ -45,6 +47,7 @@ func (rowData schemaFileBundles) toFileBundleModel() models.FileBundle {
 		DownloadsRemaining:     rowData.DownloadsRemaining,
 		UnlimitedDownloads:     rowData.UnlimitedDownloads == 1,
 		WindowOpenedAt:         rowData.WindowOpenedAt,
+		DeletedAt:              rowData.DeletedAt,
 	}
 }
 
@@ -57,7 +60,7 @@ func (p DatabaseProvider) GetFileBundle(id string) (models.FileBundle, bool) {
 	row := p.sqliteDb.QueryRow("SELECT "+fileBundleColumns+" FROM FileBundles WHERE id = ?", id)
 	err := row.Scan(&rowResult.Id, &rowResult.NameEncrypted, &rowResult.UserId, &rowResult.CreationDate, &rowResult.EncryptedSharePassword,
 		&rowResult.PasswordHash, &rowResult.ExpireAt, &rowResult.UnlimitedTime, &rowResult.DownloadsRemaining, &rowResult.UnlimitedDownloads,
-		&rowResult.WindowOpenedAt)
+		&rowResult.WindowOpenedAt, &rowResult.DeletedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileBundle{}, false
@@ -80,7 +83,7 @@ func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
 		rowData := schemaFileBundles{}
 		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.UserId, &rowData.CreationDate, &rowData.EncryptedSharePassword,
 			&rowData.PasswordHash, &rowData.ExpireAt, &rowData.UnlimitedTime, &rowData.DownloadsRemaining, &rowData.UnlimitedDownloads,
-			&rowData.WindowOpenedAt)
+			&rowData.WindowOpenedAt, &rowData.DeletedAt)
 		helper.Check(err)
 		result = append(result, rowData.toFileBundleModel())
 	}
@@ -102,6 +105,7 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 		ExpireAt:               bundle.ExpireAt,
 		DownloadsRemaining:     bundle.DownloadsRemaining,
 		WindowOpenedAt:         bundle.WindowOpenedAt,
+		DeletedAt:              bundle.DeletedAt,
 	}
 	if bundle.UnlimitedTime {
 		newData.UnlimitedTime = 1
@@ -112,11 +116,11 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 
 	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO FileBundles
    				 (id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
-   				  PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt)
-        			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+   				  PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt, DeletedAt)
+        			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newData.Id, newData.NameEncrypted, newData.UserId, newData.CreationDate, newData.EncryptedSharePassword,
 		newData.PasswordHash, newData.ExpireAt, newData.UnlimitedTime, newData.DownloadsRemaining, newData.UnlimitedDownloads,
-		newData.WindowOpenedAt)
+		newData.WindowOpenedAt, newData.DeletedAt)
 	helper.Check(err)
 }
 

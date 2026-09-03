@@ -1208,7 +1208,11 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 	}
 	if request.BundleId != "" {
 		bundle, exists := database.GetFileBundle(request.BundleId)
-		if !exists {
+		// A deleted folder keeps its row for as long as its disposed members keep theirs (see
+		// models.FileBundle.DeletedAt), and it answers here exactly as a folder that never existed
+		// does. Uploading into one would give a folder nobody can open a member that is not
+		// disposed of, which is the one thing that would keep its row alive indefinitely.
+		if !exists || bundle.DeletedAt != 0 {
 			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "bundle not found")
 			return
 		}

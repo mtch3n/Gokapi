@@ -4698,8 +4698,15 @@ func TestFolderDelete(t *testing.T) {
 	// Test successful deletion of own folder
 	testFolderDeleteCall(t, apiKey, folder1.Id, 200, "")
 
-	// Wait for async deletion to complete
-	time.Sleep(100 * time.Millisecond)
+	// Deleting a folder does not remove it any more: its members keep their rows for the metadata
+	// retention period so their owner still sees what was deleted, and the folder has to be there
+	// for those rows to stay grouped under. storage.CleanUp is the one place that removes it, once
+	// no file row names it any more - so the sweep is driven here rather than slept on, which also
+	// takes the timing out of the assertions below. This suite runs with GOKAPI_METADATA_RETENTION
+	// at 0 (see testconfiguration.SetDirEnv), under which the member row is purged in the same pass
+	// that then collects its folder; the non-zero setting production runs, where both survive that
+	// pass, is covered in the filebundle package.
+	storage.CleanUp(false)
 
 	// Verify folder and files are deleted
 	_, ok := filebundle.Get(folder1.Id)
@@ -4713,8 +4720,11 @@ func TestFolderDelete(t *testing.T) {
 	// Grant DELETE_OTHER_UPLOADS permission
 	grantUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
 
-	// Test deletion with elevated permission
+	// Test deletion with elevated permission. folder2 has no members at all, so there is nothing to
+	// keep it: the next sweep collects it, without waiting out the creation grace period that would
+	// otherwise hold a folder this young (see models.FileBundleGracePeriod).
 	testFolderDeleteCall(t, apiKey, folder2.Id, 200, "")
+	storage.CleanUp(false)
 	_, ok = filebundle.Get(folder2.Id)
 	test.IsEqualBool(t, ok, false)
 
@@ -5212,6 +5222,32 @@ func TestChunkCompleteBundleOwnershipRejected(t *testing.T) {
 	if strings.Contains(w2.Body.String(), "bundle does not belong to user") {
 		t.Errorf("Positive control should not fail with ownership error when using correct bundle owner")
 	}
+}
+
+// TestChunkCompleteDeletedBundleRejected covers the one write that could keep a deleted folder
+// alive for good. The folder row survives its deletion so its members stay grouped under it, and
+// it is still the caller's own folder, so the ownership check above lets it through - but every
+// member it has is disposed of, and a member that is not would keep the row from ever being
+// collected.
+func TestChunkCompleteDeletedBundleRejected(t *testing.T) {
+	apiKeyUser := generateNewKey(false, idUser, "", "")
+	apiKeyUser.GrantPermission(models.ApiPermUpload)
+	database.SaveApiKey(apiKeyUser)
+
+	bundle := filebundle.Create("TestBundleDeleted_"+helper.GenerateRandomString(8), idUser)
+	bundle.DeletedAt = time.Now().Add(-time.Minute).Unix()
+	database.SaveFileBundle(bundle)
+	t.Cleanup(func() { database.DeleteFileBundle(models.FileBundle{Id: bundle.Id}) })
+
+	w, r := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "apikey", Value: apiKeyUser.Id},
+		{Name: "uuid", Value: helper.GenerateRandomString(16)},
+		{Name: "filename", Value: "test.txt"},
+		{Name: "filesize", Value: "100"},
+		{Name: "bundleid", Value: bundle.Id}}, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"bundle not found","ErrorCode":10}`)
 }
 
 // sealedStatusResponse mirrors apiSealStatus's JSON shape. Deliberately has no EncryptionLevel

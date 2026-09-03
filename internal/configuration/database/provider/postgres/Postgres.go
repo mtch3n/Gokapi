@@ -102,7 +102,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 28
+const DatabaseSchemeVersion = 29
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -281,6 +281,15 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	if currentDbVersion < 28 {
 		_, err := p.exec(`ALTER TABLE FileMetaData ADD COLUMN IF NOT EXISTS WindowOpenedAt BIGINT NOT NULL DEFAULT 0;
 		ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS WindowOpenedAt BIGINT NOT NULL DEFAULT 0;`)
+		helper.Check(err)
+	}
+	// A folder its owner deleted outlives the deletion, so its members' retained rows still have
+	// something to be grouped under (see models.FileBundle.DeletedAt). Every row that already
+	// exists is a live folder by definition - it was never deleted, because a deleted one used to
+	// be removed outright - so 0 is correct with no backfill needed, the same reasoning as the v24
+	// step's DisposedAt. IF NOT EXISTS keeps this idempotent, same as the steps above.
+	if currentDbVersion < 29 {
+		_, err := p.exec(`ALTER TABLE FileBundles ADD COLUMN IF NOT EXISTS DeletedAt BIGINT NOT NULL DEFAULT 0;`)
 		helper.Check(err)
 	}
 }
@@ -530,6 +539,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			DownloadsRemaining	BIGINT NOT NULL DEFAULT 0,
 			UnlimitedDownloads	BOOLEAN NOT NULL DEFAULT false,
 			WindowOpenedAt	BIGINT NOT NULL DEFAULT 0,
+			DeletedAt	BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY(id)
 		);`
 	err := p.rawPostgres(sqlStmt)

@@ -857,6 +857,43 @@ func TestDatabaseProvider_UpgradeV18WipesSessions(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 }
 
+// TestDatabaseProvider_UpgradeV29AddsBundleDeletedAt is the upgrade path an instance already
+// running v28 takes. createNewDatabase writes the current schema, so the v28 shape is reproduced by
+// dropping the column again from a bundle that was saved with it - which also proves the ladder
+// runs against a table that really is missing the column, not one that merely claims to be. The
+// existing row must come back with DeletedAt at 0: it was never deleted, because a deleted folder
+// used to be removed outright.
+func TestDatabaseProvider_UpgradeV29AddsBundleDeletedAt(t *testing.T) {
+	instance, err := New(models.DbConnection{
+		HostUrl: "./test/newfolder/gokapi_v29deletedat.sqlite",
+		Type:    0, // dbabstraction.TypeSqlite
+	})
+	test.IsNil(t, err)
+	defer instance.Close()
+
+	instance.SaveFileBundle(models.FileBundle{
+		Id:           "v29bundle",
+		Name:         "v29bundle",
+		UserId:       5,
+		CreationDate: time.Now().Unix(),
+	})
+	test.IsNil(t, instance.rawSqlite(`ALTER TABLE FileBundles DROP COLUMN "DeletedAt"`))
+	test.IsEqualBool(t, instance.columnExists("FileBundles", "DeletedAt"), false)
+
+	instance.Upgrade(28)
+
+	test.IsEqualBool(t, instance.columnExists("FileBundles", "DeletedAt"), true)
+	bundle, ok := instance.GetFileBundle("v29bundle")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, bundle.Name, "v29bundle")
+	test.IsEqualInt64(t, bundle.DeletedAt, 0)
+
+	// Re-running the step, the crash-recovery replay the v17 step above documents, must also be
+	// safe.
+	instance.Upgrade(28)
+	test.IsEqualBool(t, instance.columnExists("FileBundles", "DeletedAt"), true)
+}
+
 func TestRawSql(t *testing.T) {
 	dbInstance.Close()
 	dbInstance.sqliteDb = nil

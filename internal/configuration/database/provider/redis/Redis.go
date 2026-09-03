@@ -21,7 +21,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 12
+const DatabaseSchemeVersion = 13
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -203,6 +203,10 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	if currentDbVersion < 11 {
 		p.backfillBundleSettingsFromMembers()
 	}
+	// v13 adds models.FileBundle.DeletedAt and needs no step of its own: a bundle hash written
+	// before that field existed simply lacks it, and redigo.ScanStruct returns 0 - which is
+	// exactly "this folder is live", true of every row that already exists, because a deleted
+	// folder used to be removed outright.
 }
 
 // backfillBundleSettingsFromMembers derives every existing bundle's PasswordHash, ExpireAt,

@@ -7,6 +7,10 @@ import (
 
 // FileBundleGracePeriod is the time window after creation within which a bundle is kept
 // even if it has no valid members (24 hours)
+//
+// It exists for a folder whose first upload has not finished yet, which has no member row to be
+// kept alive by. That cannot be true of a folder its owner has deleted, so the grace does not
+// apply to one - see FileBundle.DeletedAt and storage.CleanUp's cleanInvalidBundles.
 const FileBundleGracePeriod = 24 * 60 * 60
 
 // FileBundle contains information about a file bundle (folder)
@@ -54,6 +58,15 @@ type FileBundle struct {
 	// server config made visible, and the leeway that closes it is deliberately never reported
 	// per resource - see the muted policy line rendered from /pubapi/config instead.
 	WindowOpenedAt int64 `json:"-" redis:"WindowOpenedAt"`
+	// DeletedAt is the UTC timestamp the owner deleted this folder, 0 while it is live. A deleted
+	// folder is not removed at once: its members are disposed of, and a disposed file keeps its
+	// row for the metadata retention period so its owner still sees what was deleted (see
+	// storage.disposeFile), which leaves those rows with no folder to be grouped under if the
+	// folder goes first. The row is collected by the same rule that governs every other bundle -
+	// once no file row names it any more, in storage.CleanUp's cleanInvalidBundles - and this
+	// field is what exempts it from the creation grace period above, so an emptied folder goes
+	// with its last member row instead of lingering until it is a day old.
+	DeletedAt int64 `json:"deletedat" redis:"DeletedAt"`
 }
 
 // DownloadAccess returns the axes governing this folder, and with it every member of the folder:
