@@ -117,6 +117,15 @@ func (p DatabaseProvider) GetType() int {
 // Upgrade migrates the DB to a new Gokapi version, if required.
 // The Postgres provider was introduced at DatabaseSchemeVersion 15, so there is no pre-15
 // ladder; every step below covers a change made since.
+//
+// Every step below may only touch the schema as its OWN version defines it. That rules out
+// calling this provider's model-facing methods - GetAllMetadata, SaveFileBundle and the rest -
+// from a step, because those are written against the CURRENT schema and name every column it has,
+// including columns a LATER step in this same ladder has not added yet. Such a call works right up
+// until the next column is added and then fails on a database several versions behind, part way
+// through the ladder, with the earlier steps' DDL already committed. The same note above the
+// SQLite provider's Upgrade has the longer version. DeleteAllSessions is the single exception, as
+// it names no column at all.
 func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	if currentDbVersion > DatabaseSchemeVersion {
 		fmt.Printf("Error: Database scheme version is %d, but this Gokapi version only supports up to %d. Please update Gokapi.\n",
@@ -289,27 +298,54 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 // UnlimitedTime, DownloadsRemaining and UnlimitedDownloads from its current members and writes
 // them - see models.DeriveBundleSettingsFromMembers for the merge rule. Deterministic in its
 // members, so re-running this reproduces the same values rather than drifting.
+//
+// The member scan names only the columns FileMetaData has at v27 instead of calling
+// GetAllMetadata, which also selects WindowOpenedAt - a column the v28 step adds one step after
+// this one runs - and the write is an UPDATE of the five derived columns instead of a
+// SaveFileBundle round trip, so the bundle's name is not rewritten by a migration that has no
+// business touching it. See the note above Upgrade.
 func (p DatabaseProvider) backfillBundleSettingsFromMembers() {
-	allFiles := p.GetAllMetadata()
+	rows, err := p.query(`SELECT Id, BundleId, PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining,
+		UnlimitedDownloads, UploadDate, PendingDeletion, DisposedAt, UploadRequestId
+		FROM FileMetaData WHERE BundleId != ''`)
+	helper.Check(err)
 	membersByBundle := make(map[string][]models.File)
-	for _, file := range allFiles {
-		if file.BundleId == "" {
-			continue
-		}
+	for rows.Next() {
+		var file models.File
+		var unlimitedTime, unlimitedDownloads int
+		err = rows.Scan(&file.Id, &file.BundleId, &file.PasswordHash, &file.ExpireAt, &unlimitedTime,
+			&file.DownloadsRemaining, &unlimitedDownloads, &file.UploadDate, &file.PendingDeletion,
+			&file.DisposedAt, &file.UploadRequestId)
+		helper.Check(err)
+		file.UnlimitedTime = unlimitedTime == 1
+		file.UnlimitedDownloads = unlimitedDownloads == 1
 		if !file.IsBundleMember(file.BundleId) {
 			continue
 		}
 		membersByBundle[file.BundleId] = append(membersByBundle[file.BundleId], file)
 	}
-	for _, bundle := range p.GetAllFileBundles() {
+	helper.Check(rows.Err())
+	rows.Close()
+
+	bundleIds := make([]string, 0)
+	rows, err = p.query("SELECT id FROM FileBundles")
+	helper.Check(err)
+	for rows.Next() {
+		var bundleId string
+		err = rows.Scan(&bundleId)
+		helper.Check(err)
+		bundleIds = append(bundleIds, bundleId)
+	}
+	helper.Check(rows.Err())
+	rows.Close()
+
+	for _, bundleId := range bundleIds {
 		passwordHash, expireAt, unlimitedTime, downloadsRemaining, unlimitedDownloads :=
-			models.DeriveBundleSettingsFromMembers(membersByBundle[bundle.Id])
-		bundle.PasswordHash = passwordHash
-		bundle.ExpireAt = expireAt
-		bundle.UnlimitedTime = unlimitedTime
-		bundle.DownloadsRemaining = downloadsRemaining
-		bundle.UnlimitedDownloads = unlimitedDownloads
-		p.SaveFileBundle(bundle)
+			models.DeriveBundleSettingsFromMembers(membersByBundle[bundleId])
+		_, err = p.exec(`UPDATE FileBundles SET PasswordHash = $1, ExpireAt = $2, UnlimitedTime = $3,
+			DownloadsRemaining = $4, UnlimitedDownloads = $5 WHERE id = $6`,
+			passwordHash, expireAt, unlimitedTime, downloadsRemaining, unlimitedDownloads, bundleId)
+		helper.Check(err)
 	}
 }
 

@@ -110,10 +110,18 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 		newData.UnlimitedDownloads = 1
 	}
 
-	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO FileBundles
+	// ON CONFLICT DO UPDATE rather than INSERT OR REPLACE, and the legacy plaintext name column
+	// filled in on insert only - see legacyNameColumns for both reasons.
+	legacyColumns, legacyValues := p.legacyNameColumns("FileBundles", "name")
+	_, err = p.sqliteDb.Exec(`INSERT INTO FileBundles
    				 (id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
-   				  PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt)
-        			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+   				  PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt`+legacyColumns+`)
+        			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?`+legacyValues+`)
+			 ON CONFLICT(id) DO UPDATE SET NameEncrypted = excluded.NameEncrypted, userid = excluded.userid,
+					creationdate = excluded.creationdate, EncryptedSharePassword = excluded.EncryptedSharePassword,
+					PasswordHash = excluded.PasswordHash, ExpireAt = excluded.ExpireAt,
+					UnlimitedTime = excluded.UnlimitedTime, DownloadsRemaining = excluded.DownloadsRemaining,
+					UnlimitedDownloads = excluded.UnlimitedDownloads, WindowOpenedAt = excluded.WindowOpenedAt`,
 		newData.Id, newData.NameEncrypted, newData.UserId, newData.CreationDate, newData.EncryptedSharePassword,
 		newData.PasswordHash, newData.ExpireAt, newData.UnlimitedTime, newData.DownloadsRemaining, newData.UnlimitedDownloads,
 		newData.WindowOpenedAt)
