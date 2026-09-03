@@ -29,6 +29,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration/configupgrade"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/configuration/database/dbabstraction"
+	"github.com/forceu/gokapi/internal/configuration/database/provider/postgres"
 	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/helper"
@@ -428,6 +429,23 @@ func parseDatabaseSettings(result *models.Configuration, formObjects *[]jsonForm
 		query := url.Values{}
 		query.Set("sslmode", sslMode)
 		dbUrl.RawQuery = query.Encode()
+		connection := models.DbConnection{
+			HostUrl:         dbUrl.Host,
+			DatabaseName:    database,
+			Username:        pUser,
+			Password:        pPassword,
+			PostgresSslMode: sslMode,
+			Type:            dbabstraction.TypePostgres,
+		}
+		// Connecting here turns an unreachable server or a wrong password into a
+		// normal setup error. Without it the first connection happens while the
+		// configuration is loaded at the end of setup, where a failure panics the
+		// request instead of being shown in the form.
+		probe, err := postgres.New(connection)
+		if err != nil {
+			return errors.New("could not connect to the postgres database: " + err.Error())
+		}
+		probe.Close()
 		result.DatabaseUrl = dbUrl.String()
 		return nil
 	default:

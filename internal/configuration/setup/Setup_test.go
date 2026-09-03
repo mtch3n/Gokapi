@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -176,32 +177,31 @@ func TestParseDatabaseSettingsRequiresLocation(t *testing.T) {
 	test.IsNotNil(t, err)
 }
 
+// Uses the live server from GOKAPI_TEST_POSTGRES_URL, because saving these settings
+// now verifies that the database is reachable
 func TestParseDatabaseSettingsPostgres(t *testing.T) {
+	dsn := os.Getenv("GOKAPI_TEST_POSTGRES_URL")
+	if dsn == "" {
+		t.Skip("GOKAPI_TEST_POSTGRES_URL not set, skipping PostgreSQL setup test")
+	}
+	parsed, err := url.Parse(dsn)
+	test.IsNil(t, err)
+	password, _ := parsed.User.Password()
+
 	output := models.Configuration{}
 	input := generateDbFormValues(dbFormTest{
 		DatabaseType:     "2",
 		RedisUseSsl:      "0",
-		PostgresLocation: "db.example.com:5432",
-		PostgresDatabase: "gokapi",
-		PostgresUser:     "user",
-		PostgresPw:       "pw",
-		PostgresSsl:      "require",
+		PostgresLocation: parsed.Host,
+		PostgresDatabase: strings.TrimPrefix(parsed.Path, "/"),
+		PostgresUser:     parsed.User.Username(),
+		PostgresPw:       password,
+		PostgresSsl:      "disable",
 	})
-	err := parseDatabaseSettings(&output, &input)
+	err = parseDatabaseSettings(&output, &input)
 	test.IsNil(t, err)
-	test.IsEqualString(t, output.DatabaseUrl, "postgres://user:pw@db.example.com:5432/gokapi?sslmode=require")
-
-	// Every field is required, and the JSON form bypasses the HTML validation
-	for _, missing := range []dbFormTest{
-		{DatabaseType: "2", RedisUseSsl: "0", PostgresDatabase: "gokapi", PostgresUser: "user", PostgresPw: "pw", PostgresSsl: "require"},
-		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresUser: "user", PostgresPw: "pw", PostgresSsl: "require"},
-		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresDatabase: "gokapi", PostgresPw: "pw", PostgresSsl: "require"},
-		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresDatabase: "gokapi", PostgresUser: "user", PostgresSsl: "require"},
-	} {
-		input = generateDbFormValues(missing)
-		err = parseDatabaseSettings(&output, &input)
-		test.IsNotNil(t, err)
-	}
+	test.IsEqualString(t, output.DatabaseUrl, "postgres://"+parsed.User.Username()+":"+password+"@"+
+		parsed.Host+"/"+strings.TrimPrefix(parsed.Path, "/")+"?sslmode=disable")
 
 	// A remote database without TLS would send session IDs and API keys in the clear
 	input = generateDbFormValues(dbFormTest{
@@ -216,18 +216,46 @@ func TestParseDatabaseSettingsPostgres(t *testing.T) {
 	err = parseDatabaseSettings(&output, &input)
 	test.IsNotNil(t, err)
 
-	// Loopback never leaves the host, so it is exempt
+	// Every field is required, and the JSON form bypasses the HTML validation
+	for _, missing := range []dbFormTest{
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresDatabase: "gokapi", PostgresUser: "user", PostgresPw: "pw", PostgresSsl: "require"},
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresUser: "user", PostgresPw: "pw", PostgresSsl: "require"},
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresDatabase: "gokapi", PostgresPw: "pw", PostgresSsl: "require"},
+		{DatabaseType: "2", RedisUseSsl: "0", PostgresLocation: "db.example.com:5432", PostgresDatabase: "gokapi", PostgresUser: "user", PostgresSsl: "require"},
+	} {
+		input = generateDbFormValues(missing)
+		err = parseDatabaseSettings(&output, &input)
+		test.IsNotNil(t, err)
+	}
+
 	input = generateDbFormValues(dbFormTest{
 		DatabaseType:     "2",
 		RedisUseSsl:      "0",
-		PostgresLocation: "127.0.0.1:5432",
+		PostgresLocation: "db.example.com:5432",
+		PostgresDatabase: "gokapi",
+		PostgresUser:     "user",
+		PostgresPw:       "pw",
+		PostgresSsl:      "require",
+	})
+	err = parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
+}
+
+// An unreachable server has to come back as a setup error, not as a panic when
+// the configuration is loaded at the end of the wizard
+func TestParseDatabaseSettingsPostgresUnreachable(t *testing.T) {
+	output := models.Configuration{}
+	input := generateDbFormValues(dbFormTest{
+		DatabaseType:     "2",
+		RedisUseSsl:      "0",
+		PostgresLocation: "127.0.0.1:1",
 		PostgresDatabase: "gokapi",
 		PostgresUser:     "user",
 		PostgresPw:       "pw",
 		PostgresSsl:      "disable",
 	})
-	err = parseDatabaseSettings(&output, &input)
-	test.IsNil(t, err)
+	err := parseDatabaseSettings(&output, &input)
+	test.IsNotNil(t, err)
 }
 
 func TestVerifyPortNumber(t *testing.T) {
