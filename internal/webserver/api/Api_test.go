@@ -6121,3 +6121,60 @@ func TestDeleteUserStripsCollaborator(t *testing.T) {
 	database.DeleteFileRequest(stored)
 	database.DeleteFileRequest(reowned)
 }
+
+// TestApiShareInboxHidesSpentGrant proves that a share whose allowance is used up leaves the
+// recipient's inbox. It stayed listed before, offering an Open link that the resource then
+// refused - the row said the share was still available when it was over.
+func TestApiShareInboxHidesSpentGrant(t *testing.T) {
+	now := time.Now().Unix()
+	email := "inbox-spent@example.com"
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{Email: email, CreatedAt: now})
+	database.SaveMetaData(models.File{
+		Id: "inboxFileSpent", Name: "spent.txt", SHA1: "inboxshaspent",
+		UnlimitedDownloads: true, UnlimitedTime: true, UserId: idAdmin,
+	})
+	database.SetShareGrants(models.ShareResourceFile, "inboxFileSpent", []int{recipientId}, idAdmin, 1)
+
+	user := models.User{Id: 5011, Name: email}
+	w := httptest.NewRecorder()
+	apiShareInbox(w, nil, user, models.ApiKey{})
+	var response shareInboxResponseTest
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualInt(t, len(response.Items), 1)
+
+	// Spend the single download the recipient was granted.
+	test.IsEqualBool(t, database.IncreaseShareGrantDownloadCount(models.ShareResourceFile, "inboxFileSpent", recipientId), true)
+
+	w = httptest.NewRecorder()
+	apiShareInbox(w, nil, user, models.ApiKey{})
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualInt(t, len(response.Items), 0)
+}
+
+// TestApiShareInboxHidesUnavailableFolder proves that a folder share is filtered on the folder's
+// own expiry and allowance, the same test pubApiFolder applies. Only file shares were filtered
+// before, so an expired folder stayed listed next to files that had correctly disappeared.
+func TestApiShareInboxHidesUnavailableFolder(t *testing.T) {
+	now := time.Now().Unix()
+	email := "inbox-folder@example.com"
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{Email: email, CreatedAt: now})
+
+	database.SaveFileBundle(models.FileBundle{
+		Id: "inboxBundleLive", Name: "live folder", UserId: idAdmin, CreationDate: now,
+		UnlimitedTime: true, UnlimitedDownloads: true,
+	})
+	database.SaveFileBundle(models.FileBundle{
+		Id: "inboxBundleExpired", Name: "expired folder", UserId: idAdmin, CreationDate: now,
+		ExpireAt: now - 60, UnlimitedDownloads: true,
+	})
+	database.SetShareGrants(models.ShareResourceBundle, "inboxBundleLive", []int{recipientId}, idAdmin, 0)
+	database.SetShareGrants(models.ShareResourceBundle, "inboxBundleExpired", []int{recipientId}, idAdmin, 0)
+
+	user := models.User{Id: 5012, Name: email}
+	w := httptest.NewRecorder()
+	apiShareInbox(w, nil, user, models.ApiKey{})
+	var response shareInboxResponseTest
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualInt(t, len(response.Items), 1)
+	test.IsEqualString(t, response.Items[0].ResourceId, "inboxBundleLive")
+}
