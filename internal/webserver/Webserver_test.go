@@ -2864,7 +2864,7 @@ func TestFolderZipExhaustedBundleAllowanceStillRefusesWhole(t *testing.T) {
 	// Grant exactly one bundle download, then immediately spend it, so the recipient's bundle
 	// allowance is already exhausted by the time the request under test arrives.
 	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 1)
-	if !database.IncreaseShareGrantDownloadCount(models.ShareResourceBundle, bundle.Id, recipientId) {
+	if granted, _ := database.AcquireShareGrantDownload(models.ShareResourceBundle, bundle.Id, recipientId, time.Now().Unix(), 0); !granted {
 		t.Fatalf("Failed to pre-exhaust the bundle allowance for the test fixture")
 	}
 	t.Cleanup(func() {
@@ -3322,6 +3322,37 @@ func TestPublicApiConfig(t *testing.T) {
 		} else if int(maxSizeGuestUploadMB) != env.MaxSizeGuestUploadMb {
 			t.Errorf("Expected maxSizeGuestUploadMB %d, got %v", env.MaxSizeGuestUploadMb, maxSizeGuestUploadMB)
 		}
+
+		// downloadLeewaySeconds is the ONE surface GOKAPI_DOWNLOAD_LEEWAY has. It is published
+		// here so the recipient's download page can state the policy, and deliberately nowhere
+		// else - see TestDownloadLeewayIsNotOnAuthenticatedConfig for the other half.
+		downloadLeewaySeconds, ok := limits["downloadLeewaySeconds"].(float64)
+		if !ok {
+			t.Errorf("Missing or invalid downloadLeewaySeconds field in limits")
+		} else if int64(downloadLeewaySeconds) != int64(time.Duration(env.DownloadLeeway).Seconds()) {
+			t.Errorf("Expected downloadLeewaySeconds %d, got %v", int64(time.Duration(env.DownloadLeeway).Seconds()), downloadLeewaySeconds)
+		}
+	}
+}
+
+// TestDownloadLeewayIsNotOnAuthenticatedConfig pins the other half of the leeway's one surface:
+// it is server configuration, not a setting, so an authenticated caller - who could otherwise
+// reasonably expect to be able to change what they can see - is never shown it. The public
+// download page is told the policy; the uploader is not offered a control.
+func TestDownloadLeewayIsNotOnAuthenticatedConfig(t *testing.T) {
+	t.Parallel()
+	for _, url := range []string{"http://127.0.0.1:53843/api/info/config", "http://127.0.0.1:53843/api/features"} {
+		request, err := http.NewRequest("GET", url, nil)
+		test.IsNil(t, err)
+		request.Header.Set("apikey", "validkeyid7")
+		response, err := http.DefaultClient.Do(request)
+		test.IsNil(t, err)
+		body, err := io.ReadAll(response.Body)
+		test.IsNil(t, err)
+		response.Body.Close()
+		test.IsEqualInt(t, response.StatusCode, 200)
+		test.IsEqualBool(t, strings.Contains(strings.ToLower(string(body)), "leeway"), false)
+		test.IsEqualBool(t, strings.Contains(strings.ToLower(string(body)), "windowopenedat"), false)
 	}
 }
 

@@ -49,25 +49,47 @@ type FileBundle struct {
 	DownloadsRemaining int `json:"downloadsremaining" redis:"DownloadsRemaining"`
 	// UnlimitedDownloads is true if the folder has no download limit.
 	UnlimitedDownloads bool `json:"unlimiteddownloads" redis:"UnlimitedDownloads"`
+	// WindowOpenedAt is the UTC timestamp the folder's most recent download window opened, 0 if
+	// never. Hidden from JSON like PasswordHash above, and for a stricter reason: the window is
+	// server config made visible, and the leeway that closes it is deliberately never reported
+	// per resource - see the muted policy line rendered from /pubapi/config instead.
+	WindowOpenedAt int64 `json:"-" redis:"WindowOpenedAt"`
+}
+
+// DownloadAccess returns the axes governing this folder, and with it every member of the folder:
+// a member's own expiry and allowance are inert while it belongs to one (see
+// File.IsBundleMember), so the folder is what decides access, exhaustion and disposal for all of
+// them together.
+func (b *FileBundle) DownloadAccess(leeway int64) DownloadAccess {
+	return DownloadAccess{
+		ExpireAt:           b.ExpireAt,
+		UnlimitedTime:      b.UnlimitedTime,
+		DownloadsRemaining: b.DownloadsRemaining,
+		UnlimitedDownloads: b.UnlimitedDownloads,
+		WindowOpenedAt:     b.WindowOpenedAt,
+		Leeway:             leeway,
+	}
 }
 
 // IsExpired reports whether the folder's own expiry has passed. Mirrors storage.IsExpiredFile's
 // expiry half, but only that half: a memberless bundle is handled by its caller (see
 // webserver.bundleAvailability), not by this method.
 func (b *FileBundle) IsExpired(timeNow int64) bool {
-	return b.ExpireAt < timeNow && !b.UnlimitedTime
+	return b.DownloadAccess(0).IsExpired(timeNow)
 }
 
 // IsAvailable reports whether the folder itself may currently be opened at all: not expired, and
-// its own download allowance is not exhausted. It says nothing about membership - a bundle with
+// its own download allowance is not exhausted - which, with a leeway above 0, includes a folder
+// whose allowance is spent but whose download window is still open. It says nothing about membership - a bundle with
 // zero members is still "available" by this method alone; callers combine this with their own
 // membership check (see webserver.bundleAvailability) because what counts as a member differs by
 // caller (see models.File.IsBundleMember).
-func (b *FileBundle) IsAvailable(timeNow int64) bool {
-	if b.IsExpired(timeNow) {
+func (b *FileBundle) IsAvailable(timeNow, leeway int64) bool {
+	access := b.DownloadAccess(leeway)
+	if access.IsExpired(timeNow) {
 		return false
 	}
-	if !b.UnlimitedDownloads && b.DownloadsRemaining < 1 {
+	if access.IsExhausted(timeNow) {
 		return false
 	}
 	return true

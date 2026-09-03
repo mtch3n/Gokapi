@@ -2118,7 +2118,7 @@ func TestRestoreFile(t *testing.T) {
 	apiKey := testAuthorisation(t, "/files/restore", models.ApiPermDelete)
 	testRestoreFileCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
 	testRestoreFileCall(t, apiKey, "invalid", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided or file has already been deleted.","ErrorCode":5}`)
-	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename))
+	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(fileUser)))
 	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
 
 	storage.DeleteFileSchedule(fileUser.Id, 500, true)
@@ -2131,7 +2131,7 @@ func TestRestoreFile(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, file.PendingDeletion != 0, true)
 
-	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename))
+	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(fileUser)))
 	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
 
 	file, ok = database.GetMetaDataById(fileUser.Id)

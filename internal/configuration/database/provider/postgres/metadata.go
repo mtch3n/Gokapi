@@ -14,7 +14,7 @@ import (
 const metaDataColumns = `Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes, DownloadsRemaining, DownloadCount,
 	PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption, UnlimitedDownloads, UnlimitedTime,
 	UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId, EncryptedSharePassword,
-	DisposedAt, DisposalReason`
+	DisposedAt, DisposalReason, WindowOpenedAt`
 
 type schemaMetaData struct {
 	Id                     string
@@ -40,6 +40,7 @@ type schemaMetaData struct {
 	EncryptedSharePassword []byte
 	DisposedAt             int64
 	DisposalReason         int
+	WindowOpenedAt         int64
 }
 
 func (rowData schemaMetaData) ToFileModel() (models.File, error) {
@@ -68,6 +69,7 @@ func (rowData schemaMetaData) ToFileModel() (models.File, error) {
 		EncryptedSharePassword: rowData.EncryptedSharePassword,
 		DisposedAt:             rowData.DisposedAt,
 		DisposalReason:         rowData.DisposalReason,
+		WindowOpenedAt:         rowData.WindowOpenedAt,
 	}
 
 	buf := bytes.NewBuffer(rowData.Encryption)
@@ -82,7 +84,7 @@ func scanMetaData(scan func(dest ...any) error, rowData *schemaMetaData) error {
 		&rowData.ContentType, &rowData.AwsBucket, &rowData.Encryption, &rowData.UnlimitedDownloads,
 		&rowData.UnlimitedTime, &rowData.UserId, &rowData.UploadDate, &rowData.PendingDeletion,
 		&rowData.UploadRequestId, &rowData.BundleId, &rowData.EncryptedSharePassword,
-		&rowData.DisposedAt, &rowData.DisposalReason)
+		&rowData.DisposedAt, &rowData.DisposalReason, &rowData.WindowOpenedAt)
 }
 
 // GetAllMetadata returns a map of all available files
@@ -148,6 +150,7 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 		EncryptedSharePassword: file.EncryptedSharePassword,
 		DisposedAt:             file.DisposedAt,
 		DisposalReason:         file.DisposalReason,
+		WindowOpenedAt:         file.WindowOpenedAt,
 	}
 
 	if file.UnlimitedDownloads {
@@ -166,8 +169,8 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 	_, err = p.exec(`INSERT INTO FileMetaData (Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes,
 					DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
 					UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId,
-					EncryptedSharePassword, DisposedAt, DisposalReason)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+					EncryptedSharePassword, DisposedAt, DisposalReason, WindowOpenedAt)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 					ON CONFLICT (Id) DO UPDATE SET NameEncrypted = EXCLUDED.NameEncrypted, Size = EXCLUDED.Size, SHA1 = EXCLUDED.SHA1,
 						ExpireAt = EXCLUDED.ExpireAt, SizeBytes = EXCLUDED.SizeBytes,
 						DownloadsRemaining = EXCLUDED.DownloadsRemaining, DownloadCount = EXCLUDED.DownloadCount,
@@ -178,12 +181,13 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 						UploadDate = EXCLUDED.UploadDate, PendingDeletion = EXCLUDED.PendingDeletion,
 						UploadRequestId = EXCLUDED.UploadRequestId, BundleId = EXCLUDED.BundleId,
 						EncryptedSharePassword = EXCLUDED.EncryptedSharePassword,
-						DisposedAt = EXCLUDED.DisposedAt, DisposalReason = EXCLUDED.DisposalReason`,
+						DisposedAt = EXCLUDED.DisposedAt, DisposalReason = EXCLUDED.DisposalReason,
+						WindowOpenedAt = EXCLUDED.WindowOpenedAt`,
 		newData.Id, newData.NameEncrypted, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
 		newData.DownloadsRemaining, newData.DownloadCount, newData.PasswordHash, newData.HotlinkId, newData.ContentType,
 		newData.AwsBucket, newData.Encryption, newData.UnlimitedDownloads, newData.UnlimitedTime, newData.UserId,
 		newData.UploadDate, newData.PendingDeletion, newData.UploadRequestId, newData.BundleId, newData.EncryptedSharePassword,
-		newData.DisposedAt, newData.DisposalReason)
+		newData.DisposedAt, newData.DisposalReason, newData.WindowOpenedAt)
 	helper.Check(err)
 }
 
@@ -217,37 +221,58 @@ func (p DatabaseProvider) encryptNameForSave(file models.File) ([]byte, error) {
 	return storedName, err
 }
 
-// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
-// is true, the decrement is conditional on DownloadsRemaining > 0, so the database itself refuses to go
-// below zero; the return value reports whether this call actually consumed a remaining download. A false
-// return means DownloadsRemaining was already 0 and the caller must not serve the file.
-func (p DatabaseProvider) IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool {
-	if decreaseRemainingDownloads {
-		result, err := p.exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1,
-						DownloadsRemaining = DownloadsRemaining - 1 WHERE Id = $1 AND DownloadsRemaining > 0`, id)
-		helper.Check(err)
-		rowsAffected, err := result.RowsAffected()
-		helper.Check(err)
-		return rowsAffected > 0
+// AcquireDownload atomically lets one request through to a capped file's content, in three steps:
+// serve free inside an open window, otherwise open a window and spend an allowance, otherwise
+// re-check the window because a concurrent caller may have opened one in between. The decrement is
+// conditional on DownloadsRemaining > 0, so the database itself refuses to go below zero, and on
+// the window still being closed, so two callers cannot both open one.
+//
+// The third step is what makes two simultaneous first requests on a one-download file both
+// succeed: exactly one of them opens the window, the other loses the conditional UPDATE and finds
+// the winner's window on the re-check. Without it the loser would be refused, which is the failure
+// the window exists to remove.
+func (p DatabaseProvider) AcquireDownload(id string, timeNow, leeway int64) (bool, bool) {
+	windowOpenSince := timeNow - leeway
+	if p.isDownloadWindowOpen(id, windowOpenSince) {
+		return true, false
 	}
-	_, err := p.exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1 WHERE Id = $1`, id)
+	result, err := p.exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1,
+					DownloadsRemaining = DownloadsRemaining - 1, WindowOpenedAt = $1
+					WHERE Id = $2 AND DownloadsRemaining > 0 AND WindowOpenedAt <= $3`, timeNow, id, windowOpenSince)
 	helper.Check(err)
-	return true
+	rowsAffected, err := result.RowsAffected()
+	helper.Check(err)
+	if rowsAffected > 0 {
+		return true, true
+	}
+	return p.isDownloadWindowOpen(id, windowOpenSince), false
 }
 
-// GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads
-func (p DatabaseProvider) GetDownloadsRemaining(id string) int {
-	var downloadsRemaining int
-	row := p.queryRow("SELECT DownloadsRemaining FROM FileMetaData WHERE Id = $1", id)
-	err := row.Scan(&downloadsRemaining)
+// isDownloadWindowOpen reports whether the file's most recent download window is still open. Read
+// with a SELECT rather than the row count of a no-op UPDATE, because this runs on the free path of
+// every request inside a window and must not write: an UPDATE would leave a dead tuple behind per
+// request, for a check that changes nothing. Reading it separately from the UPDATE that follows is
+// safe because WindowOpenedAt only ever moves forward, so a window seen open cannot have closed
+// again by the time the caller acts on it.
+func (p DatabaseProvider) isDownloadWindowOpen(id string, windowOpenSince int64) bool {
+	var windowOpenedAt int64
+	row := p.queryRow("SELECT WindowOpenedAt FROM FileMetaData WHERE Id = $1", id)
+	err := row.Scan(&windowOpenedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0
+			return false
 		}
 		helper.Check(err)
-		return downloadsRemaining
+		return false
 	}
-	return downloadsRemaining
+	return windowOpenedAt > windowOpenSince
+}
+
+// IncreaseDownloadCount atomically increases the download count of a file, leaving its allowance
+// and its window untouched. Only for a file with UnlimitedDownloads set.
+func (p DatabaseProvider) IncreaseDownloadCount(id string) {
+	_, err := p.exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1 WHERE Id = $1`, id)
+	helper.Check(err)
 }
 
 // DeleteMetaData deletes information about a file

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/forceu/gokapi/internal/configuration/database/dbabstraction"
 	"github.com/forceu/gokapi/internal/configuration/database/dbcache"
@@ -175,7 +176,9 @@ func migrateShareAccess(dbOld, dbNew dbabstraction.Database) {
 				continue
 			}
 			for i := 0; i < grant.DownloadsUsed; i++ {
-				dbNew.IncreaseShareGrantDownloadCount(key.resourceType, key.resourceId, newId)
+				// leeway 0, so every one of these opens its own window and therefore actually
+				// spends one - a migration must reproduce the count, not a single window.
+				dbNew.AcquireShareGrantDownload(key.resourceType, key.resourceId, newId, time.Now().Unix(), 0)
 			}
 		}
 	}
@@ -334,17 +337,17 @@ func DeleteMetaData(id string) {
 	db.DeleteShareGrants(models.ShareResourceFile, id)
 }
 
-// IncreaseDownloadCount atomically increases the download count of a file. If decreaseRemainingDownloads
-// is true, DownloadsRemaining is only decremented if it is greater than 0, and the return value reports
-// whether this call actually consumed a remaining download. If it returns false, the caller must not
-// serve the file, as a concurrent caller already consumed the last remaining download.
-func IncreaseDownloadCount(id string, decreaseRemainingDownloads bool) bool {
-	return db.IncreaseDownloadCount(id, decreaseRemainingDownloads)
+// AcquireDownload atomically lets one request through to a capped file's content. granted is
+// false once the allowance is exhausted and no download window is open, in which case the caller
+// must not serve the file; opened reports that this call spent an allowance to open a window.
+func AcquireDownload(id string, timeNow, leeway int64) (bool, bool) {
+	return db.AcquireDownload(id, timeNow, leeway)
 }
 
-// GetDownloadsRemaining returns the remaining downloads of a file that does not implement UnlimitedDownloads
-func GetDownloadsRemaining(id string) int {
-	return db.GetDownloadsRemaining(id)
+// IncreaseDownloadCount atomically increases the download count of a file, leaving its allowance
+// and its window untouched. Only for a file with UnlimitedDownloads set.
+func IncreaseDownloadCount(id string) {
+	db.IncreaseDownloadCount(id)
 }
 
 // Session Section
@@ -454,10 +457,10 @@ func SetShareGrants(resourceType int, resourceId string, recipientIds []int, gra
 	db.SetShareGrants(resourceType, resourceId, recipientIds, grantedBy, downloadsAllowed)
 }
 
-// IncreaseShareGrantDownloadCount atomically records one download by this
-// recipient, returning false when their allowance is exhausted.
-func IncreaseShareGrantDownloadCount(resourceType int, resourceId string, recipientId int) bool {
-	return db.IncreaseShareGrantDownloadCount(resourceType, resourceId, recipientId)
+// AcquireShareGrantDownload atomically records one download by this recipient, returning
+// granted=false when their allowance is exhausted and no download window is open.
+func AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
+	return db.AcquireShareGrantDownload(resourceType, resourceId, recipientId, timeNow, leeway)
 }
 
 // GetShareGrants returns every grant on a resource.
@@ -609,10 +612,10 @@ func DeleteFileBundle(bundle models.FileBundle) {
 	db.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
 }
 
-// DecreaseBundleDownloadsRemaining atomically spends one of the bundle's own download allowance.
-// Returns false if it was already exhausted.
-func DecreaseBundleDownloadsRemaining(id string) bool {
-	return db.DecreaseBundleDownloadsRemaining(id)
+// AcquireBundleDownload atomically lets one visit through to a bundle's content. granted is false
+// once the bundle's own allowance is exhausted and no download window is open.
+func AcquireBundleDownload(id string, timeNow, leeway int64) (bool, bool) {
+	return db.AcquireBundleDownload(id, timeNow, leeway)
 }
 
 // Statistics

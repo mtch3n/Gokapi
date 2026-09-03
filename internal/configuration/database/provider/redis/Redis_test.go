@@ -256,7 +256,7 @@ func TestApiKeys(t *testing.T) {
 	test.IsEqualString(t, keyName, "publicTest")
 }
 
-func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
+func TestDatabaseProvider_AcquireDownload(t *testing.T) {
 	newFile := models.File{
 		Id:                 "newFileId",
 		Name:               "newFileName",
@@ -280,7 +280,7 @@ func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
 		UnlimitedTime:      true,
 	}
 	dbInstance.SaveMetaData(newFile)
-	dbInstance.IncreaseDownloadCount(newFile.Id, false)
+	dbInstance.IncreaseDownloadCount(newFile.Id)
 	retrievedFile, ok := dbInstance.GetMetaDataById(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, retrievedFile.DownloadCount, 3)
@@ -292,13 +292,17 @@ func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
 	retrievedFile.NameEncryptedRaw = nil
 	test.IsEqual(t, retrievedFile, newFile)
 
-	dbInstance.IncreaseDownloadCount(newFile.Id, true)
+	timeNow := time.Now().Unix()
+	granted, opened := dbInstance.AcquireDownload(newFile.Id, timeNow, 0)
+	test.IsEqualBool(t, granted, true)
+	test.IsEqualBool(t, opened, true)
 	retrievedFile, ok = dbInstance.GetMetaDataById(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, retrievedFile.DownloadCount, 4)
 	test.IsEqualInt(t, retrievedFile.DownloadsRemaining, 10)
 	newFile.DownloadCount = 4
 	newFile.DownloadsRemaining = 10
+	newFile.WindowOpenedAt = timeNow
 	retrievedFile.NameEncryptedRaw = nil
 	test.IsEqual(t, retrievedFile, newFile)
 	dbInstance.DeleteMetaData(newFile.Id)
@@ -609,8 +613,7 @@ func TestMetaData(t *testing.T) {
 	test.IsEqualBool(t, file.UnlimitedDownloads, false)
 	test.IsEqualBool(t, file.UnlimitedTime, true)
 	test.IsEqualInt(t, file.DownloadsRemaining, 4)
-	remaining := dbInstance.GetDownloadsRemaining(file.Id)
-	test.IsEqualInt(t, remaining, 4)
+	test.IsEqualInt64(t, file.WindowOpenedAt, 0)
 	dbInstance.Close()
 	defer test.ExpectPanic(t)
 	_ = dbInstance.GetAllMetadata()

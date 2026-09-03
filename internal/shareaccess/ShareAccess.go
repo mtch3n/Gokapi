@@ -263,10 +263,14 @@ func ValidateToken(rawToken string, resourceType int, resourceId string) (recipi
 }
 
 // ConsumeDownload records one download against the recipient's own allowance.
-// It returns ErrDownloadsExhausted when nothing is left, in which case the
-// caller must not serve the resource.
-func ConsumeDownload(resourceType int, resourceId string, recipientId int) error {
-	if database.IncreaseShareGrantDownloadCount(resourceType, resourceId, recipientId) {
+// It returns ErrDownloadsExhausted when nothing is left and no download window
+// is open, in which case the caller must not serve the resource. leeway is how
+// long a window stays open, in seconds; the caller resolves it for the resource
+// being served (see storage.LeewayFor) rather than this deciding it, so there
+// is one rule and only the window's length varies.
+func ConsumeDownload(resourceType int, resourceId string, recipientId int, leeway int64) error {
+	granted, _ := database.AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), leeway)
+	if granted {
 		return nil
 	}
 	return ErrDownloadsExhausted

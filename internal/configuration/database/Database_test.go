@@ -273,7 +273,10 @@ func TestMetaData(t *testing.T) {
 		DisposalReason:     models.DisposalReasonExpired,
 	}
 	runAllTypesNoOutput(t, func() { SaveMetaData(file) })
-	runAllTypesCompareOutput(t, func() any { return GetDownloadsRemaining(file.Id) }, 2)
+	runAllTypesCompareOutput(t, func() any {
+		result, _ := GetMetaDataById(file.Id)
+		return result.DownloadsRemaining
+	}, 2)
 	// NameEncryptedRaw is populated only on a read (see models.File.NameEncryptedRaw), so the
 	// hand-built expected File never carries it; stripped from the read results below so these
 	// comparisons stay about the fields the test actually cares about.
@@ -291,16 +294,22 @@ func TestMetaData(t *testing.T) {
 
 	runAllTypesCompareTwoOutputs(t, func() (any, any) {
 		SaveMetaData(file)
-		IncreaseDownloadCount(file.Id, false)
+		IncreaseDownloadCount(file.Id)
 		result, ok := GetMetaDataById(file.Id)
 		return withoutNameEncryptedRaw(result), ok
 	}, increasedDownload, true)
 
+	// A leeway of 0 gives every window zero length, so this behaves exactly like the
+	// unconditional decrement that preceded windows: one allowance spent per call.
+	acquiredAt := time.Now().Unix()
 	increasedDownload.DownloadCount = increasedDownload.DownloadCount + 1
 	increasedDownload.DownloadsRemaining = increasedDownload.DownloadsRemaining - 1
+	increasedDownload.WindowOpenedAt = acquiredAt
 
 	runAllTypesCompareTwoOutputs(t, func() (any, any) {
-		IncreaseDownloadCount(file.Id, true)
+		granted, opened := AcquireDownload(file.Id, acquiredAt, 0)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, true)
 		result, ok := GetMetaDataById(file.Id)
 		return withoutNameEncryptedRaw(result), ok
 	}, increasedDownload, true)
@@ -682,6 +691,125 @@ func TestDeleteMetaDataCascadesShareGrants(t *testing.T) {
 
 // The download allowance is per recipient, not per resource, so two recipients
 // on the same file each get their own budget rather than racing for one pool.
+// TestAcquireDownloadWindow proves the window rule at the provider level, across every database
+// type: with a leeway above 0 a second request inside the window is granted without spending a
+// second allowance, and once the window has closed an exhausted file is refused again. With a
+// leeway of 0 - the shipped default - the window has zero length, so every request opens its own
+// and the behaviour is the one that preceded windows entirely (see TestMetaData above).
+func TestAcquireDownloadWindow(t *testing.T) {
+	const leeway = 3600
+	runAllTypesNoOutput(t, func() {
+		timeNow := time.Now().Unix()
+		id := "windowed"
+		SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1})
+
+		granted, opened := AcquireDownload(id, timeNow, leeway)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, true)
+
+		// Inside the window: served, and nothing is spent. This is the retry or the resume of
+		// the same pickup, not a second one.
+		granted, opened = AcquireDownload(id, timeNow+60, leeway)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, false)
+		stored, ok := GetMetaDataById(id)
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+		test.IsEqualInt(t, stored.DownloadCount, 1)
+		test.IsEqualInt64(t, stored.WindowOpenedAt, timeNow)
+
+		// After the window, with nothing remaining, the file is refused.
+		granted, opened = AcquireDownload(id, timeNow+leeway+1, leeway)
+		test.IsEqualBool(t, granted, false)
+		test.IsEqualBool(t, opened, false)
+
+		// A file that still has an allowance opens a fresh window instead, so a folder or file
+		// allowed several pickups gets a window each rather than one shared fuse.
+		SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 2, WindowOpenedAt: timeNow})
+		granted, opened = AcquireDownload(id, timeNow+leeway+1, leeway)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, true)
+		stored, ok = GetMetaDataById(id)
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt(t, stored.DownloadsRemaining, 1)
+		test.IsEqualInt64(t, stored.WindowOpenedAt, timeNow+leeway+1)
+
+		DeleteMetaData(id)
+	})
+}
+
+// TestAcquireBundleDownloadWindow is TestAcquireDownloadWindow for a folder, whose window covers
+// every member of it at once - one visit, one window, one folder.
+func TestAcquireBundleDownloadWindow(t *testing.T) {
+	const leeway = 3600
+	runAllTypesNoOutput(t, func() {
+		timeNow := time.Now().Unix()
+		bundle := models.FileBundle{Id: "windowedbundle", Name: "windowedbundle", DownloadsRemaining: 1}
+		SaveFileBundle(bundle)
+
+		granted, opened := AcquireBundleDownload(bundle.Id, timeNow, leeway)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, true)
+
+		granted, opened = AcquireBundleDownload(bundle.Id, timeNow+60, leeway)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, false)
+		stored, ok := GetFileBundle(bundle.Id)
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+		test.IsEqualInt64(t, stored.WindowOpenedAt, timeNow)
+
+		granted, _ = AcquireBundleDownload(bundle.Id, timeNow+leeway+1, leeway)
+		test.IsEqualBool(t, granted, false)
+
+		DeleteFileBundle(bundle)
+	})
+}
+
+// TestAcquireShareGrantDownloadWindow is TestAcquireDownloadWindow for a recipient's own
+// allowance, which the grant's lastdownloadat has always recorded the start of.
+func TestAcquireShareGrantDownloadWindow(t *testing.T) {
+	const leeway = 3600
+	runShareTypes(t, func() {
+		const file = models.ShareResourceFile
+		mona := SaveShareRecipient(models.ShareRecipient{Email: "mona@example.com", CreatedAt: 1})
+		SetShareGrants(file, "res-window", []int{mona}, 1, 1)
+
+		timeNow := time.Now().Unix()
+		granted, opened := AcquireShareGrantDownload(file, "res-window", mona, timeNow, leeway)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, true)
+
+		granted, opened = AcquireShareGrantDownload(file, "res-window", mona, timeNow+60, leeway)
+		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, opened, false)
+		for _, grant := range GetShareGrants(file, "res-window") {
+			test.IsEqualInt(t, grant.DownloadsUsed, 1)
+		}
+
+		granted, _ = AcquireShareGrantDownload(file, "res-window", mona, timeNow+leeway+1, leeway)
+		test.IsEqualBool(t, granted, false)
+
+		DeleteShareGrants(file, "res-window")
+		DeleteShareRecipient(mona)
+	})
+}
+
+// acquireGrantDownload records one download against a recipient's allowance with a leeway of 0,
+// so every call opens its own window and therefore spends one - the behaviour that applied before
+// download windows existed.
+func acquireGrantDownload(resourceType int, resourceId string, recipientId int) bool {
+	granted, _ := AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), 0)
+	return granted
+}
+
+// acquireGrantDownloadOn is acquireGrantDownload against a specific provider rather than the
+// package-global one, for the migration test.
+func acquireGrantDownloadOn(provider dbabstraction.Database, resourceType int, resourceId string, recipientId int) bool {
+	granted, _ := provider.AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), 0)
+	return granted
+}
+
 func TestShareGrantDownloadCounter(t *testing.T) {
 	runShareTypes(t, func() {
 		const file = models.ShareResourceFile
@@ -691,13 +819,13 @@ func TestShareGrantDownloadCounter(t *testing.T) {
 		SetShareGrants(file, "res-count", []int{carol, dave}, 1, 2)
 
 		// Each recipient spends only their own allowance.
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", carol), true)
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", carol), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-count", carol), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-count", carol), true)
 		// Carol is now exhausted, and the database refuses rather than going
 		// past the limit.
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", carol), false)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-count", carol), false)
 		// Dave is untouched by Carol spending hers.
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", dave), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-count", dave), true)
 
 		for _, grant := range GetShareGrants(file, "res-count") {
 			if grant.RecipientId == carol {
@@ -714,11 +842,11 @@ func TestShareGrantDownloadCounter(t *testing.T) {
 		// An allowance of 0 means unlimited.
 		SetShareGrants(file, "res-unlimited", []int{carol}, 1, 0)
 		for i := 0; i < 5; i++ {
-			test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-unlimited", carol), true)
+			test.IsEqualBool(t, acquireGrantDownload(file, "res-unlimited", carol), true)
 		}
 
 		// A recipient with no grant is refused.
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-count", 4242), false)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-count", 4242), false)
 
 		DeleteShareRecipient(carol)
 		DeleteShareRecipient(dave)
@@ -828,11 +956,11 @@ func TestShareGrantDownloadCannotResurrectRevokedGrant(t *testing.T) {
 		const file = models.ShareResourceFile
 		id := SaveShareRecipient(models.ShareRecipient{Email: "revoked@example.com", CreatedAt: 1})
 		SetShareGrants(file, "res-revoke", []int{id}, 1, 5)
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-revoke", id), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-revoke", id), true)
 
 		DeleteShareGrants(file, "res-revoke")
 
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-revoke", id), false)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-revoke", id), false)
 		test.IsEqualBool(t, HasShareGrant(file, "res-revoke", id), false)
 		test.IsEqualBool(t, IsShareRestricted(file, "res-revoke"), false)
 		test.IsEqualInt(t, len(GetShareGrants(file, "res-revoke")), 0)
@@ -854,7 +982,7 @@ func TestSetShareGrantsKeepsResourceRestricted(t *testing.T) {
 
 		SetShareGrants(file, "res-replace", []int{first}, 1, 2)
 		test.IsEqualBool(t, IsShareRestricted(file, "res-replace"), true)
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-replace", first), true)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-replace", first), true)
 
 		// Replace with an overlapping list.
 		SetShareGrants(file, "res-replace", []int{first, second}, 1, 2)
@@ -870,7 +998,7 @@ func TestSetShareGrantsKeepsResourceRestricted(t *testing.T) {
 		SetShareGrants(file, "res-replace", []int{second}, 1, 2)
 		test.IsEqualBool(t, IsShareRestricted(file, "res-replace"), true)
 		test.IsEqualBool(t, HasShareGrant(file, "res-replace", first), false)
-		test.IsEqualBool(t, IncreaseShareGrantDownloadCount(file, "res-replace", first), false)
+		test.IsEqualBool(t, acquireGrantDownload(file, "res-replace", first), false)
 		test.IsEqualInt(t, len(GetShareGrantsForRecipient(first)), 0)
 
 		DeleteShareGrants(file, "res-replace")
@@ -914,7 +1042,7 @@ func TestMigrateCarriesShareAccess(t *testing.T) {
 	aliceId := source.SaveShareRecipient(models.ShareRecipient{Email: "m-alice@example.com", CreatedAt: 10})
 	bobId := source.SaveShareRecipient(models.ShareRecipient{Email: "m-bob@example.com", CreatedAt: 11})
 	source.SetShareGrants(file, "res-migrate", []int{aliceId, bobId}, 5, 4)
-	test.IsEqualBool(t, source.IncreaseShareGrantDownloadCount(file, "res-migrate", aliceId), true)
+	test.IsEqualBool(t, acquireGrantDownloadOn(source, file, "res-migrate", aliceId), true)
 	source.SaveShareLoginToken(models.ShareLoginToken{
 		TokenHash: "migrate-token", RecipientId: aliceId, ResourceType: file,
 		ResourceId: "res-migrate", CreatedAt: 12, ExpiresAt: 999999999999})

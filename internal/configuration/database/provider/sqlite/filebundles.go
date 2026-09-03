@@ -15,7 +15,7 @@ import (
 // fresh from the CREATE TABLE above - which SELECT * would silently scan into the wrong fields.
 // See metadata.go's metaDataColumns for the same hazard, hit and fixed there first.
 const fileBundleColumns = `id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
-	PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads`
+	PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt`
 
 type schemaFileBundles struct {
 	Id                     string
@@ -28,6 +28,7 @@ type schemaFileBundles struct {
 	UnlimitedTime          int
 	DownloadsRemaining     int
 	UnlimitedDownloads     int
+	WindowOpenedAt         int64
 }
 
 func (rowData schemaFileBundles) toFileBundleModel() models.FileBundle {
@@ -43,6 +44,7 @@ func (rowData schemaFileBundles) toFileBundleModel() models.FileBundle {
 		UnlimitedTime:          rowData.UnlimitedTime == 1,
 		DownloadsRemaining:     rowData.DownloadsRemaining,
 		UnlimitedDownloads:     rowData.UnlimitedDownloads == 1,
+		WindowOpenedAt:         rowData.WindowOpenedAt,
 	}
 }
 
@@ -54,7 +56,8 @@ func (p DatabaseProvider) GetFileBundle(id string) (models.FileBundle, bool) {
 	var rowResult schemaFileBundles
 	row := p.sqliteDb.QueryRow("SELECT "+fileBundleColumns+" FROM FileBundles WHERE id = ?", id)
 	err := row.Scan(&rowResult.Id, &rowResult.NameEncrypted, &rowResult.UserId, &rowResult.CreationDate, &rowResult.EncryptedSharePassword,
-		&rowResult.PasswordHash, &rowResult.ExpireAt, &rowResult.UnlimitedTime, &rowResult.DownloadsRemaining, &rowResult.UnlimitedDownloads)
+		&rowResult.PasswordHash, &rowResult.ExpireAt, &rowResult.UnlimitedTime, &rowResult.DownloadsRemaining, &rowResult.UnlimitedDownloads,
+		&rowResult.WindowOpenedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileBundle{}, false
@@ -76,7 +79,8 @@ func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
 	for rows.Next() {
 		rowData := schemaFileBundles{}
 		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.UserId, &rowData.CreationDate, &rowData.EncryptedSharePassword,
-			&rowData.PasswordHash, &rowData.ExpireAt, &rowData.UnlimitedTime, &rowData.DownloadsRemaining, &rowData.UnlimitedDownloads)
+			&rowData.PasswordHash, &rowData.ExpireAt, &rowData.UnlimitedTime, &rowData.DownloadsRemaining, &rowData.UnlimitedDownloads,
+			&rowData.WindowOpenedAt)
 		helper.Check(err)
 		result = append(result, rowData.toFileBundleModel())
 	}
@@ -97,6 +101,7 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 		PasswordHash:           bundle.PasswordHash,
 		ExpireAt:               bundle.ExpireAt,
 		DownloadsRemaining:     bundle.DownloadsRemaining,
+		WindowOpenedAt:         bundle.WindowOpenedAt,
 	}
 	if bundle.UnlimitedTime {
 		newData.UnlimitedTime = 1
@@ -107,23 +112,47 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 
 	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO FileBundles
    				 (id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
-   				  PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads)
-        			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+   				  PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt)
+        			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newData.Id, newData.NameEncrypted, newData.UserId, newData.CreationDate, newData.EncryptedSharePassword,
-		newData.PasswordHash, newData.ExpireAt, newData.UnlimitedTime, newData.DownloadsRemaining, newData.UnlimitedDownloads)
+		newData.PasswordHash, newData.ExpireAt, newData.UnlimitedTime, newData.DownloadsRemaining, newData.UnlimitedDownloads,
+		newData.WindowOpenedAt)
 	helper.Check(err)
 }
 
-// DecreaseBundleDownloadsRemaining atomically spends one of the bundle's own download allowance,
-// conditional on it being greater than 0 - mirrors metadata.go's IncreaseDownloadCount decrement
-// half. Returns false, and leaves the allowance untouched, if it was already exhausted.
-func (p DatabaseProvider) DecreaseBundleDownloadsRemaining(id string) bool {
-	result, err := p.sqliteDb.Exec(`UPDATE FileBundles SET DownloadsRemaining = DownloadsRemaining - 1
-		WHERE id = ? AND DownloadsRemaining > 0`, id)
+// AcquireBundleDownload atomically lets one visit through to a bundle's content - mirrors
+// metadata.go's AcquireDownload exactly, including its three steps and the reasoning behind each;
+// see that function. A bundle has no DownloadCount to increment alongside the allowance it spends.
+func (p DatabaseProvider) AcquireBundleDownload(id string, timeNow, leeway int64) (bool, bool) {
+	windowOpenSince := timeNow - leeway
+	if p.isBundleWindowOpen(id, windowOpenSince) {
+		return true, false
+	}
+	result, err := p.sqliteDb.Exec(`UPDATE FileBundles SET DownloadsRemaining = DownloadsRemaining - 1,
+		WindowOpenedAt = ? WHERE id = ? AND DownloadsRemaining > 0 AND WindowOpenedAt <= ?`, timeNow, id, windowOpenSince)
 	helper.Check(err)
 	rowsAffected, err := result.RowsAffected()
 	helper.Check(err)
-	return rowsAffected > 0
+	if rowsAffected > 0 {
+		return true, true
+	}
+	return p.isBundleWindowOpen(id, windowOpenSince), false
+}
+
+// isBundleWindowOpen reports whether the bundle's most recent download window is still open. See
+// metadata.go's isDownloadWindowOpen for why this is a SELECT.
+func (p DatabaseProvider) isBundleWindowOpen(id string, windowOpenSince int64) bool {
+	var windowOpenedAt int64
+	row := p.sqliteDb.QueryRow("SELECT WindowOpenedAt FROM FileBundles WHERE id = ?", id)
+	err := row.Scan(&windowOpenedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
+		helper.Check(err)
+		return false
+	}
+	return windowOpenedAt > windowOpenSince
 }
 
 // encryptBundleNameForSave returns the value to store in NameEncrypted for this bundle. Mirrors

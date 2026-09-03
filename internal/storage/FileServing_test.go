@@ -886,7 +886,7 @@ func TestServeFile(t *testing.T) {
 // has already consumed the last one and the database is authoritative at 0. This is exactly the shape
 // of the API and presigned-download call sites (Api.go apiDownloadSingle, Webserver.go
 // downloadPresigned), which call ServeFile with recheckExpiry == false and therefore never re-fetch
-// DownloadsRemaining before deciding whether to serve - they must rely on IncreaseDownloadCount's own
+// DownloadsRemaining before deciding whether to serve - they must rely on AcquireDownload's own
 // return value instead.
 func TestServeFileDeniedWhenExhaustedWithoutRecheck(t *testing.T) {
 	file := models.File{
@@ -909,7 +909,9 @@ func TestServeFileDeniedWhenExhaustedWithoutRecheck(t *testing.T) {
 	served := ServeFile(staleFile, w, r, false, true, false, false)
 	test.IsEqualBool(t, served, false)
 	test.IsEqualInt(t, w.Body.Len(), 0)
-	test.IsEqualInt(t, database.GetDownloadsRemaining(file.Id), 0)
+	stored, ok := database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
 }
 
 // TestServeFileAuditWriteFailureRefusesDownload verifies the fail-closed design: if the

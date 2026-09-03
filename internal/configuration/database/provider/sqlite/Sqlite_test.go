@@ -7,7 +7,9 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,8 +126,7 @@ func TestMetaData(t *testing.T) {
 	test.IsEqualBool(t, file.UnlimitedDownloads, false)
 	test.IsEqualBool(t, file.UnlimitedTime, true)
 	test.IsEqualInt(t, file.DownloadsRemaining, 4)
-	remaining := dbInstance.GetDownloadsRemaining(file.Id)
-	test.IsEqualInt(t, remaining, 4)
+	test.IsEqualInt64(t, file.WindowOpenedAt, 0)
 	dbInstance.Close()
 	defer test.ExpectPanic(t)
 	_ = dbInstance.GetAllMetadata()
@@ -173,7 +174,7 @@ func TestHotlink(t *testing.T) {
 	test.IsEqualInt(t, len(hotlinks), 3)
 }
 
-func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
+func TestDatabaseProvider_AcquireDownload(t *testing.T) {
 	newFile := models.File{
 		Id:                 "newFileId",
 		Name:               "newFileName",
@@ -197,7 +198,7 @@ func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
 		UnlimitedTime:      true,
 	}
 	dbInstance.SaveMetaData(newFile)
-	dbInstance.IncreaseDownloadCount(newFile.Id, false)
+	dbInstance.IncreaseDownloadCount(newFile.Id)
 	retrievedFile, ok := dbInstance.GetMetaDataById(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, retrievedFile.DownloadCount, 3)
@@ -209,16 +210,66 @@ func TestDatabaseProvider_IncreaseDownloadCount(t *testing.T) {
 	retrievedFile.NameEncryptedRaw = nil
 	test.IsEqual(t, retrievedFile, newFile)
 
-	dbInstance.IncreaseDownloadCount(newFile.Id, true)
+	timeNow := time.Now().Unix()
+	granted, opened := dbInstance.AcquireDownload(newFile.Id, timeNow, 0)
+	test.IsEqualBool(t, granted, true)
+	test.IsEqualBool(t, opened, true)
 	retrievedFile, ok = dbInstance.GetMetaDataById(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, retrievedFile.DownloadCount, 4)
 	test.IsEqualInt(t, retrievedFile.DownloadsRemaining, 10)
 	newFile.DownloadCount = 4
 	newFile.DownloadsRemaining = 10
+	newFile.WindowOpenedAt = timeNow
 	retrievedFile.NameEncryptedRaw = nil
 	test.IsEqual(t, retrievedFile, newFile)
 	dbInstance.DeleteMetaData(newFile.Id)
+}
+
+// TestAcquireDownloadConcurrentFirstRequests is the test for AcquireDownload's third step. Two
+// requests arriving together on a one-pickup file both find no window open; one wins the
+// conditional UPDATE and opens it, and the other's UPDATE matches nothing because the allowance
+// is now spent. Without the re-check that follows, that loser is refused - which is exactly the
+// "your download broke, and it cost you your only one" failure the window exists to remove, just
+// moved to a race instead of a dropped connection. Both must be granted, exactly one must report
+// having opened the window, and the allowance must land on 0 rather than going negative.
+//
+// Run over several iterations because the interleaving is not guaranteed on any single one.
+func TestAcquireDownloadConcurrentFirstRequests(t *testing.T) {
+	const iterations = 50
+	const workers = 8
+	const leeway = 3600
+
+	for i := 0; i < iterations; i++ {
+		id := "concurrentwindow" + strconv.Itoa(i)
+		dbInstance.SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1})
+		timeNow := time.Now().Unix()
+
+		var wg sync.WaitGroup
+		var grantedCount, openedCount int32
+		wg.Add(workers)
+		for j := 0; j < workers; j++ {
+			go func() {
+				defer wg.Done()
+				granted, opened := dbInstance.AcquireDownload(id, timeNow, leeway)
+				if granted {
+					atomic.AddInt32(&grantedCount, 1)
+				}
+				if opened {
+					atomic.AddInt32(&openedCount, 1)
+				}
+			}()
+		}
+		wg.Wait()
+
+		test.IsEqualInt(t, int(grantedCount), workers)
+		test.IsEqualInt(t, int(openedCount), 1)
+		stored, ok := dbInstance.GetMetaDataById(id)
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+		test.IsEqualInt(t, stored.DownloadCount, 1)
+		dbInstance.DeleteMetaData(id)
+	}
 }
 
 func TestApiKey(t *testing.T) {
