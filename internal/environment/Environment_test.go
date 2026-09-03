@@ -3,7 +3,9 @@ package environment
 import (
 	"github.com/forceu/gokapi/internal/test"
 	"os"
+	"reflect"
 	"testing"
+	"time"
 )
 
 var returnCode = 0
@@ -62,6 +64,92 @@ func TestEnvLoad(t *testing.T) {
 	New()
 	test.IsEqualInt(t, returnCode, 1)
 	os.Unsetenv("GOKAPI_MAX_FILESIZE")
+}
+
+// TestDefaultExpiry pins GOKAPI_DEFAULT_EXPIRY. Every expected value below is a duration
+// literal rather than a value read back out of ExpiryOptions, so none of these assertions can
+// keep passing if the built-in default or the built-in option list is changed.
+func TestDefaultExpiry(t *testing.T) {
+	const hour = int64(time.Hour)
+	const day = int64(24 * time.Hour)
+
+	// Unset, against the shipped six-preset list: 7d, and not the longest preset.
+	os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
+	os.Unsetenv("GOKAPI_MAX_EXPIRY")
+	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1h,1d,7d,14d,30d,365d")
+	env := New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+	test.IsEqualBool(t, int64(env.DefaultExpiry) == 365*day, false)
+
+	// Unset, against a shortened three-preset list: still 7d, and still not the longest preset.
+	// This is the case a client-side rule sized against the six-preset list gets wrong.
+	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1d,7d,14d")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+	test.IsEqualBool(t, int64(env.DefaultExpiry) == 14*day, false)
+
+	// A set value is honoured.
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "1d")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), day)
+
+	// A value matching no preset snaps down to the longest preset below it.
+	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1h,1d,7d,14d,30d,365d")
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "10d")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+
+	// A value shorter than every preset takes the shortest preset instead.
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "30m")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), hour)
+
+	// Above GOKAPI_MAX_EXPIRY: 14d and up are dropped from the options, so the default snaps
+	// down onto 7d, the longest preset that survives.
+	os.Setenv("GOKAPI_MAX_EXPIRY", "7d")
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "30d")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+
+	// A maximum shorter than every preset empties the option list, which is then restored
+	// wholesale, so snapping alone cannot honour the maximum here. The default is clamped to it.
+	os.Setenv("GOKAPI_MAX_EXPIRY", "30m")
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "30d")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), int64(30*time.Minute))
+
+	// 0 does not mean unlimited here, and a negative value is not honoured either: both fall
+	// back to 7d, which then snaps onto the 7d preset.
+	os.Unsetenv("GOKAPI_MAX_EXPIRY")
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "0")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "-5d")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), 7*day)
+
+	os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
+	os.Unsetenv("GOKAPI_EXPIRY_OPTIONS")
+}
+
+// TestDefaultExpiryIsNotPersistent pins that GOKAPI_DEFAULT_EXPIRY is re-read from the
+// environment on every parse, the way GOKAPI_MAX_EXPIRY and GOKAPI_METADATA_RETENTION are,
+// instead of being written into the config file on the first start and ignored afterwards.
+func TestDefaultExpiryIsNotPersistent(t *testing.T) {
+	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1h,1d,7d,14d,30d,365d")
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "1d")
+	env := New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), int64(24*time.Hour))
+	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "30d")
+	env = New()
+	test.IsEqualInt64(t, int64(env.DefaultExpiry), int64(30*24*time.Hour))
+
+	field, ok := reflect.TypeOf(Environment{}).FieldByName("DefaultExpiry")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, field.Tag.Get("persistent"), "")
+
+	os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
+	os.Unsetenv("GOKAPI_EXPIRY_OPTIONS")
 }
 
 func TestEncryptionKeyB64(t *testing.T) {

@@ -2312,6 +2312,14 @@ func pubApiConfig(w http.ResponseWriter, r *http.Request) {
 			// same "0 means uncapped" convention used throughout this API for expiry values.
 			"maxExpirySeconds":     int64(time.Duration(env.MaxExpiry).Seconds()),
 			"expiryOptionsSeconds": expiryOptionsSeconds(env.ExpiryOptions),
+			// defaultExpirySeconds is GOKAPI_DEFAULT_EXPIRY: which of expiryOptionsSeconds a
+			// client preselects for a new upload. environment.New has already snapped it to one
+			// of those options and clamped it to maxExpirySeconds, so a client selects it as
+			// given instead of deriving one from the list itself - a client-side rule cannot
+			// know what the operator considers a sensible default and, sized against a list the
+			// operator has shortened, picks the longest option. Always positive: 0 does not
+			// carry the "uncapped" meaning here that it does for its neighbours.
+			"defaultExpirySeconds": int64(time.Duration(env.DefaultExpiry).Seconds()),
 			// maxFilesGuestUpload/maxSizeGuestUploadMB mirror GOKAPI_MAX_FILES_GUESTUPLOAD and
 			// GOKAPI_MAX_SIZE_GUESTUPLOAD, the caps isUserAllowedUnlimited (Api.go) enforces on a
 			// non-admin file request owner. 0 means uncapped, the same convention maxExpirySeconds

@@ -27,6 +27,12 @@ var defaultExpiryOptions = []Duration{
 	Duration(365 * 24 * time.Hour),
 }
 
+// defaultExpiryFallback is used when GOKAPI_DEFAULT_EXPIRY is unset or not usable. It mirrors
+// the envDefault tag on Environment.DefaultExpiry, kept as a separate literal for the same
+// reason defaultExpiryOptions is: normalizeDefaultExpiry must have a fallback that does not
+// depend on parsing succeeding.
+const defaultExpiryFallback = Duration(7 * 24 * time.Hour)
+
 // DefaultPort for the webserver
 const DefaultPort = 53842
 
@@ -108,6 +114,18 @@ type Environment struct {
 	// positive, a duplicate, or greater than GOKAPI_MAX_EXPIRY is dropped; if that empties
 	// the list, the default list above is used instead
 	ExpiryOptions []Duration `env:"EXPIRY_OPTIONS" envSeparator:"," envDefault:"1h,1d,7d,14d,30d,365d"`
+	// Sets which of the GOKAPI_EXPIRY_OPTIONS presets a client preselects for a new upload,
+	// e.g. "7d". Same format as GOKAPI_MAX_EXPIRY. The value is snapped down to the longest
+	// preset that does not exceed it, so the preselection is always one of the presets on
+	// offer; if no preset is that short, the shortest preset is used. It is also clamped to
+	// GOKAPI_MAX_EXPIRY, so the preselection is never a value the server would refuse. A
+	// value that is not positive is replaced by the default: unlike elsewhere in Gokapi, 0
+	// does not mean unlimited here, because an unlimited default would hand every upload
+	// that does not choose otherwise the longest lifetime the instance permits. Not
+	// persistent, for the same reason as GOKAPI_MAX_EXPIRY: it is re-read from the
+	// environment on every start, so an operator can change the default without a
+	// reconfiguration, but it must therefore be present on every start
+	DefaultExpiry Duration `env:"DEFAULT_EXPIRY" envDefault:"7d"`
 	// Sets the maximum number of files that can be uploaded per file requests created by
 	// non-admin users
 	// Set to 0 to allow unlimited file count for all users
@@ -190,6 +208,7 @@ func New() Environment {
 	}
 	result = parseFlags(result)
 	normalizeExpiryOptions(&result)
+	normalizeDefaultExpiry(&result)
 	result.ActiveDeprecations = deprecation.GetActive()
 
 	return result
@@ -223,6 +242,40 @@ func normalizeExpiryOptions(result *Environment) {
 		options = append([]Duration{}, defaultExpiryOptions...)
 	}
 	result.ExpiryOptions = options
+}
+
+// normalizeDefaultExpiry pins DefaultExpiry to a value a client can select and the server will
+// then accept. It runs after normalizeExpiryOptions, so ExpiryOptions is already de-duplicated,
+// sorted ascending and never empty.
+//
+// A value of 0 or less is replaced by defaultExpiryFallback rather than rejected: a typo in
+// deploy config must not take an instance down, and there is a safe value to fall back to.
+//
+// The value is then snapped down to the longest option that does not exceed it. A default
+// matching no option would leave a client preselecting a value none of its presets offer, and
+// snapping down rather than up keeps the failure direction safe - the result is never longer
+// than what was configured. If no option is that short, the shortest option is used, which is
+// the safe direction again.
+//
+// Snapping to an option usually satisfies MaxExpiry on its own, because normalizeExpiryOptions
+// has already dropped every option above it. The exception is a maximum shorter than every
+// configured option, where that pass restores the full built-in option list instead of leaving
+// a client with none; the final clamp covers that case.
+func normalizeDefaultExpiry(result *Environment) {
+	if result.DefaultExpiry <= 0 {
+		fmt.Printf("Warning: GOKAPI_DEFAULT_EXPIRY must be positive, %s is used instead\n", time.Duration(defaultExpiryFallback))
+		result.DefaultExpiry = defaultExpiryFallback
+	}
+	selected := result.ExpiryOptions[0]
+	for _, opt := range result.ExpiryOptions {
+		if opt <= result.DefaultExpiry {
+			selected = opt
+		}
+	}
+	result.DefaultExpiry = selected
+	if result.MaxExpiry > 0 && result.DefaultExpiry > result.MaxExpiry {
+		result.DefaultExpiry = result.MaxExpiry
+	}
 }
 
 func parseEnvVars(result Environment) Environment {
