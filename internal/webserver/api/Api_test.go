@@ -6183,3 +6183,51 @@ func TestApiShareInboxHidesUnavailableFolder(t *testing.T) {
 	test.IsEqualInt(t, len(response.Items), 1)
 	test.IsEqualString(t, response.Items[0].ResourceId, "inboxBundleLive")
 }
+
+// TestFolderListPublishesPasswordFlag proves /folder/list tells a client whether a folder is
+// password protected, and that it publishes only the boolean. A file has carried
+// IsPasswordProtected since long before folders existed; without the same field a client cannot
+// distinguish a protected folder from an open one, which is what drove the Files page to request
+// a share key for every row and take a 404 for the ones that could never have had one.
+func TestFolderListPublishesPasswordFlag(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermView)
+	database.SaveApiKey(apiKey)
+
+	open := filebundle.Create("folderlist-open", idUser)
+	protected := filebundle.Create("folderlist-protected", idUser)
+	protected.PasswordHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	database.SaveFileBundle(protected)
+	t.Cleanup(func() {
+		database.DeleteFileBundle(models.FileBundle{Id: open.Id})
+		database.DeleteFileBundle(models.FileBundle{Id: protected.Id})
+	})
+
+	w, r := getRecorder("/folder/list", apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var listed []struct {
+		Id                  string `json:"id"`
+		IsPasswordProtected bool   `json:"ispasswordprotected"`
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &listed))
+
+	seenOpen, seenProtected := false, false
+	for _, item := range listed {
+		if item.Id == open.Id {
+			seenOpen = true
+			test.IsEqualBool(t, item.IsPasswordProtected, false)
+		}
+		if item.Id == protected.Id {
+			seenProtected = true
+			test.IsEqualBool(t, item.IsPasswordProtected, true)
+		}
+	}
+	test.IsEqualBool(t, seenOpen, true)
+	test.IsEqualBool(t, seenProtected, true)
+
+	// The hash itself must never travel, only the fact that one exists.
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), false)
+	test.IsEqualBool(t, strings.Contains(w.Body.String(), "PasswordHash"), false)
+}
