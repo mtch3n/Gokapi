@@ -2270,11 +2270,11 @@
                       },
                       "membercount": {
                         "type": "integer",
-                        "description": "Number of files currently in this bundle that a recipient would actually receive. Excludes files pending deletion and files whose content has already been disposed of (expired or download allowance exhausted); those still appear in a file listing as history, but are not counted here."
+                        "description": "Number of member files this bundle still has rows for, including files pending deletion and files whose content has already been disposed of (expired or download allowance exhausted). Those rows remain in a file listing as history for the metadata retention period, with a status saying the content is gone, so the folder summarising them counts the same rows. This is the listing view and is NOT what a recipient would receive."
                       },
                       "totalsizebytes": {
                         "type": "integer",
-                        "description": "Combined size in bytes of the files counted in membercount. Excludes pending-deletion and disposed members for the same reason membercount does."
+                        "description": "Combined size in bytes of the files counted in membercount, using each row's recorded size. A disposed member keeps its recorded size here, matching the size the file listing shows for that same row; the member status, not this figure, is what says whether the bytes are still stored."
                       }
                     }
                   }

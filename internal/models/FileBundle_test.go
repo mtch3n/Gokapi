@@ -106,3 +106,23 @@ func TestDeriveBundleSettingsFromMembersNoMembers(t *testing.T) {
 	test.IsEqualInt(t, downloadsRemaining, 0)
 	test.IsEqualBool(t, unlimitedDownloads, false)
 }
+
+func TestRetainedTotalsCountsDisposedMembers(t *testing.T) {
+	bundle := FileBundle{Id: "retained"}
+	files := map[string]File{
+		"live":     {Id: "live", BundleId: "retained", SizeBytes: 100},
+		"disposed": {Id: "disposed", BundleId: "retained", SizeBytes: 200, DisposedAt: 5},
+		"other":    {Id: "other", BundleId: "somewhereelse", SizeBytes: 400},
+	}
+
+	// Populate is the serving view and drops the disposed member.
+	_, servingSize, servingCount := bundle.Populate(files)
+	test.IsEqualInt(t, int(servingSize), 100)
+	test.IsEqualInt(t, servingCount, 1)
+
+	// RetainedTotals is the listing view and keeps it, because the file list still shows that
+	// row and its size.
+	listingSize, listingCount := bundle.RetainedTotals(files)
+	test.IsEqualInt(t, int(listingSize), 300)
+	test.IsEqualInt(t, listingCount, 2)
+}

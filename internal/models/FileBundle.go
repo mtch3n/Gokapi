@@ -144,7 +144,8 @@ func DeriveBundleSettingsFromMembers(members []File) (passwordHash string, expir
 // Populate scans all files and returns those belonging to this bundle. The count and total size
 // it returns count only current members (see File.IsBundleMember) - a disposed member's bytes are
 // no longer stored, so counting it here would tell the owner the folder holds more than a
-// recipient can actually receive.
+// recipient can actually receive. That makes these totals the SERVING view; the owner's file
+// list is a different question and must use RetainedTotals instead.
 func (b *FileBundle) Populate(files map[string]File) ([]File, int64, int) {
 	var memberFiles []File
 	var totalSize int64
@@ -159,6 +160,32 @@ func (b *FileBundle) Populate(files map[string]File) ([]File, int64, int) {
 	}
 
 	return memberFiles, totalSize, count
+}
+
+// RetainedTotals returns the size and count of every member row this bundle still has, disposed
+// or not. This is the owner's LISTING view, and it exists because Populate's totals are the
+// serving view and the two answer different questions.
+//
+// A disposed file keeps its row, and its recorded SizeBytes with it, for the metadata retention
+// period - the file list shows that row and that size, with a Deleted badge saying the content
+// is gone. A folder summing only live members therefore reported 0 B directly above children
+// that each still showed their own size. The badge already carries "the bytes are gone"; the
+// size column carries "this is what was transferred", and both views must say the same thing
+// about the same rows.
+//
+// Never use this to decide what a recipient may receive - that is Populate and IsBundleMember.
+func (b *FileBundle) RetainedTotals(files map[string]File) (int64, int) {
+	var totalSize int64
+	count := 0
+
+	for _, file := range files {
+		if file.BundleId == b.Id && !file.IsFileRequest() {
+			totalSize += file.SizeBytes
+			count++
+		}
+	}
+
+	return totalSize, count
 }
 
 // IsOlderThanGracePeriod returns true if the bundle was created more than 24 hours ago
