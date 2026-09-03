@@ -34,7 +34,21 @@ func (p DatabaseProvider) GetType() int {
 	return 0 // dbabstraction.Sqlite
 }
 
-// Upgrade migrates the DB to a new Gokapi version, if required
+// Upgrade migrates the DB to a new Gokapi version, if required.
+//
+// Every step below may only touch the schema as its OWN version defines it. That rules out
+// calling this provider's model-facing methods - GetAllMetadata, GetAllUsers, SaveMetaData,
+// SaveFileBundle and the rest - from a step, because those are written against the CURRENT schema
+// and name every column it has, including columns a LATER step in this same ladder has not added
+// yet. Such a call works right up until the next column is added and then fails at the worst
+// possible moment: on a database several versions behind, part way through the ladder, with the
+// earlier steps' DDL already committed and the older binary therefore no longer able to read it
+// either. Every step below consequently issues its own statements, naming only columns that exist
+// at its version; the steps that need to read data have a helper further down carrying their
+// version in its name. DeleteAllSessions is the single exception, as it names no column at all.
+//
+// TestUpgradeFromEverySchemaVersion is what keeps this true: it builds a database at every
+// version this ladder still accepts and runs the whole ladder against it.
 func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	// < v2.0.0
 	if currentDbVersion < 10 {
@@ -65,18 +79,8 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 			PRIMARY KEY("id")
 		);`)
 		helper.Check(err)
-		grantUploadPerm := environment.New().PermRequestGrantedByDefault
-		for _, user := range p.GetAllUsers() {
-			if grantUploadPerm || user.IsAdmin() {
-				user.GrantPermission(models.UserPermGuestUploads)
-				p.SaveUser(user, false)
-			}
-		}
-		for _, apiKey := range p.GetAllApiKeys() {
-			if apiKey.IsSystemKey {
-				p.DeleteApiKey(apiKey.Id)
-			}
-		}
+		p.grantGuestUploadPermissionV12(environment.New().PermRequestGrantedByDefault)
+		p.deleteSystemApiKeysV12()
 	}
 	// < v2.2.0-rc2
 	if currentDbVersion < 13 {
@@ -92,23 +96,7 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	// < v2.2.3
 	if currentDbVersion < 14 {
 		// Remove all hotlinks for SVG files
-		for _, hotlink := range p.GetAllHotlinks() {
-			fileId, ok := p.GetHotlink(hotlink)
-			if !ok {
-				p.DeleteHotlink(hotlink)
-				continue
-			}
-			file, ok := p.GetMetaDataById(fileId)
-			if !ok {
-				p.DeleteHotlink(hotlink)
-				continue
-			}
-			if strings.HasSuffix(strings.ToLower(file.Name), ".svg") || strings.HasPrefix(strings.ToLower(file.ContentType), "image/svg") {
-				p.DeleteHotlink(hotlink)
-				file.HotlinkId = ""
-				p.SaveMetaData(file)
-			}
-		}
+		p.deleteSvgHotlinksV14()
 	}
 	// < v2.2.5
 	if currentDbVersion < 15 {
@@ -353,34 +341,165 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 	}
 }
 
+// grantGuestUploadPermissionV12 grants models.UserPermGuestUploads to every user the v12 step
+// covers: all of them if the instance is configured to hand the permission out by default,
+// otherwise only the admins. Written against the Users table as it stood at v12 rather than
+// through GetAllUsers and SaveUser, which name the AuthProvider and OidcSubject columns the v17
+// step adds five steps later - see the note above Upgrade.
+func (p DatabaseProvider) grantGuestUploadPermissionV12(grantToEveryUser bool) {
+	if grantToEveryUser {
+		//goland:noinspection SqlWithoutWhere
+		_, err := p.sqliteDb.Exec("UPDATE Users SET Permissions = Permissions | ?", models.UserPermGuestUploads)
+		helper.Check(err)
+		return
+	}
+	_, err := p.sqliteDb.Exec("UPDATE Users SET Permissions = Permissions | ? WHERE Userlevel = ? OR Userlevel = ?",
+		models.UserPermGuestUploads, models.UserLevelSuperAdmin, models.UserLevelAdmin)
+	helper.Check(err)
+}
+
+// deleteSystemApiKeysV12 removes the system API keys that the v12 step retires. The expiry
+// condition is the one GetAllApiKeys applies, kept verbatim so that an already expired system key
+// is left in place here exactly as it was before - it is invisible to the application either way
+// and cleanApiKeys collects it later.
+func (p DatabaseProvider) deleteSystemApiKeysV12() {
+	_, err := p.sqliteDb.Exec("DELETE FROM ApiKeys WHERE IsSystemKey = 1 AND (Expiry == 0 OR Expiry > ?)",
+		currentTime().Unix())
+	helper.Check(err)
+}
+
+// deleteSvgHotlinksV14 deletes every hotlink that points at an SVG file or at no file at all, and
+// clears the HotlinkId of the files it unlinks - the v14 step. Reads FileMetaData.Name, which at
+// v14 is still the plaintext column the v22 step replaces with NameEncrypted, rather than going
+// through GetMetaDataById and SaveMetaData, which name every column the current schema has - see
+// the note above Upgrade. Every row is collected before anything is written, so the read is not
+// left open across the writes.
+func (p DatabaseProvider) deleteSvgHotlinksV14() {
+	rows, err := p.sqliteDb.Query(`SELECT Hotlinks.Id, Hotlinks.FileId, FileMetaData.Name, FileMetaData.ContentType
+		FROM Hotlinks LEFT JOIN FileMetaData ON FileMetaData.Id = Hotlinks.FileId`)
+	helper.Check(err)
+	var hotlinksToDelete, filesToUnlink []string
+	for rows.Next() {
+		var hotlinkId, fileId string
+		var name, contentType sql.NullString
+		err = rows.Scan(&hotlinkId, &fileId, &name, &contentType)
+		helper.Check(err)
+		// The join found no file, so the hotlink is dangling and goes regardless of its name.
+		if !name.Valid {
+			hotlinksToDelete = append(hotlinksToDelete, hotlinkId)
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(name.String), ".svg") ||
+			strings.HasPrefix(strings.ToLower(contentType.String), "image/svg") {
+			hotlinksToDelete = append(hotlinksToDelete, hotlinkId)
+			filesToUnlink = append(filesToUnlink, fileId)
+		}
+	}
+	helper.Check(rows.Err())
+	rows.Close()
+
+	for _, hotlinkId := range hotlinksToDelete {
+		_, err = p.sqliteDb.Exec("DELETE FROM Hotlinks WHERE Id = ?", hotlinkId)
+		helper.Check(err)
+	}
+	for _, fileId := range filesToUnlink {
+		_, err = p.sqliteDb.Exec("UPDATE FileMetaData SET HotlinkId = '' WHERE Id = ?", fileId)
+		helper.Check(err)
+	}
+}
+
 // backfillBundleSettingsFromMembers derives every existing bundle's PasswordHash, ExpireAt,
 // UnlimitedTime, DownloadsRemaining and UnlimitedDownloads from its current members and writes
 // them - see models.DeriveBundleSettingsFromMembers for the merge rule. Deterministic in its
 // members, so re-running this (e.g. a crash-recovery replay of the v27 step, the same scenario
 // TestDatabaseProvider_UpgradeV17Idempotent covers for the v17 step) reproduces the same values
 // rather than drifting.
+//
+// The member scan names only the columns FileMetaData has at v27 instead of calling
+// GetAllMetadata, which also selects WindowOpenedAt - a column the v28 step adds one step after
+// this one runs - and the write is an UPDATE of the five derived columns instead of a
+// SaveFileBundle round trip, so the bundle's name is not rewritten by a migration that has no
+// business touching it. See the note above Upgrade.
 func (p DatabaseProvider) backfillBundleSettingsFromMembers() {
-	allFiles := p.GetAllMetadata()
+	rows, err := p.sqliteDb.Query(`SELECT Id, BundleId, PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining,
+		UnlimitedDownloads, UploadDate, PendingDeletion, DisposedAt, UploadRequestId
+		FROM FileMetaData WHERE BundleId != ''`)
+	helper.Check(err)
 	membersByBundle := make(map[string][]models.File)
-	for _, file := range allFiles {
-		if file.BundleId == "" {
-			continue
-		}
+	for rows.Next() {
+		var file models.File
+		var unlimitedTime, unlimitedDownloads int
+		err = rows.Scan(&file.Id, &file.BundleId, &file.PasswordHash, &file.ExpireAt, &unlimitedTime,
+			&file.DownloadsRemaining, &unlimitedDownloads, &file.UploadDate, &file.PendingDeletion,
+			&file.DisposedAt, &file.UploadRequestId)
+		helper.Check(err)
+		file.UnlimitedTime = unlimitedTime == 1
+		file.UnlimitedDownloads = unlimitedDownloads == 1
 		if !file.IsBundleMember(file.BundleId) {
 			continue
 		}
 		membersByBundle[file.BundleId] = append(membersByBundle[file.BundleId], file)
 	}
-	for _, bundle := range p.GetAllFileBundles() {
-		passwordHash, expireAt, unlimitedTime, downloadsRemaining, unlimitedDownloads :=
-			models.DeriveBundleSettingsFromMembers(membersByBundle[bundle.Id])
-		bundle.PasswordHash = passwordHash
-		bundle.ExpireAt = expireAt
-		bundle.UnlimitedTime = unlimitedTime
-		bundle.DownloadsRemaining = downloadsRemaining
-		bundle.UnlimitedDownloads = unlimitedDownloads
-		p.SaveFileBundle(bundle)
+	helper.Check(rows.Err())
+	rows.Close()
+
+	bundleIds := make([]string, 0)
+	rows, err = p.sqliteDb.Query("SELECT id FROM FileBundles")
+	helper.Check(err)
+	for rows.Next() {
+		var bundleId string
+		err = rows.Scan(&bundleId)
+		helper.Check(err)
+		bundleIds = append(bundleIds, bundleId)
 	}
+	helper.Check(rows.Err())
+	rows.Close()
+
+	for _, bundleId := range bundleIds {
+		passwordHash, expireAt, unlimitedTime, downloadsRemaining, unlimitedDownloads :=
+			models.DeriveBundleSettingsFromMembers(membersByBundle[bundleId])
+		_, err = p.sqliteDb.Exec(`UPDATE FileBundles SET PasswordHash = ?, ExpireAt = ?, UnlimitedTime = ?,
+			DownloadsRemaining = ?, UnlimitedDownloads = ? WHERE id = ?`,
+			passwordHash, expireAt, boolToInt(unlimitedTime), downloadsRemaining, boolToInt(unlimitedDownloads), bundleId)
+		helper.Check(err)
+	}
+}
+
+// boolToInt maps a bool onto the 0/1 integer SQLite stores it as.
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// legacyNameColumns returns the additional column and value lists an INSERT has to carry for the
+// given table's pre-encryption plaintext name columns, for as long as those columns are still
+// present.
+//
+// FileMetaData.Name and FileBundles.name were created TEXT NOT NULL with no default, and
+// MigratePlaintextFileNames only reads and drops them once the instance has been unsealed - which
+// at an Input encryption level happens long after the first write of a boot, and never at all on
+// an instance that is left sealed. A row inserted before that point therefore has to supply a
+// value for them, and an empty string is the only honest one: the row's real name is already in
+// the encrypted column, and the migration only ever reads a plaintext name for rows whose
+// encrypted column is still NULL.
+//
+// Rows that already exist are not touched, because the saves that use this insert with
+// ON CONFLICT DO UPDATE over the columns they own rather than INSERT OR REPLACE. INSERT OR REPLACE
+// deletes the old row and writes a new one, which blanks exactly these columns - and for a row
+// that has not been migrated yet, the plaintext column is the only copy of the name there is.
+// SaveFileRequest cannot use this, because UploadRequests has a second unique column; see the
+// comment there.
+func (p DatabaseProvider) legacyNameColumns(table string, columns ...string) (string, string) {
+	var extraColumns, extraValues string
+	for _, column := range columns {
+		if p.columnExists(table, column) {
+			extraColumns = extraColumns + `, "` + column + `"`
+			extraValues = extraValues + `, ''`
+		}
+	}
+	return extraColumns, extraValues
 }
 
 // tableExists returns true if the given table is present. Used to make a

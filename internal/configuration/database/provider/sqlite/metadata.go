@@ -169,11 +169,25 @@ func (p DatabaseProvider) SaveMetaData(file models.File) {
 	helper.Check(err)
 	newData.Encryption = buf.Bytes()
 
-	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO FileMetaData (Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes,
+	// ON CONFLICT DO UPDATE rather than INSERT OR REPLACE, and the legacy plaintext name column
+	// filled in on insert only - see legacyNameColumns for both reasons.
+	legacyColumns, legacyValues := p.legacyNameColumns("FileMetaData", "Name")
+	_, err = p.sqliteDb.Exec(`INSERT INTO FileMetaData (Id, NameEncrypted, Size, SHA1, ExpireAt, SizeBytes,
                                    DownloadsRemaining, DownloadCount, PasswordHash, HotlinkId, ContentType, AwsBucket, Encryption,
                                    UnlimitedDownloads, UnlimitedTime, UserId, UploadDate, PendingDeletion, UploadRequestId, BundleId,
-                                   EncryptedSharePassword, DisposedAt, DisposalReason, WindowOpenedAt)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                   EncryptedSharePassword, DisposedAt, DisposalReason, WindowOpenedAt`+legacyColumns+`)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?`+legacyValues+`)
+          ON CONFLICT(Id) DO UPDATE SET NameEncrypted = excluded.NameEncrypted, Size = excluded.Size, SHA1 = excluded.SHA1,
+                                   ExpireAt = excluded.ExpireAt, SizeBytes = excluded.SizeBytes,
+                                   DownloadsRemaining = excluded.DownloadsRemaining, DownloadCount = excluded.DownloadCount,
+                                   PasswordHash = excluded.PasswordHash, HotlinkId = excluded.HotlinkId,
+                                   ContentType = excluded.ContentType, AwsBucket = excluded.AwsBucket,
+                                   Encryption = excluded.Encryption, UnlimitedDownloads = excluded.UnlimitedDownloads,
+                                   UnlimitedTime = excluded.UnlimitedTime, UserId = excluded.UserId,
+                                   UploadDate = excluded.UploadDate, PendingDeletion = excluded.PendingDeletion,
+                                   UploadRequestId = excluded.UploadRequestId, BundleId = excluded.BundleId,
+                                   EncryptedSharePassword = excluded.EncryptedSharePassword, DisposedAt = excluded.DisposedAt,
+                                   DisposalReason = excluded.DisposalReason, WindowOpenedAt = excluded.WindowOpenedAt`,
 		newData.Id, newData.NameEncrypted, newData.Size, newData.SHA1, newData.ExpireAt, newData.SizeBytes,
 		newData.DownloadsRemaining, newData.DownloadCount, newData.PasswordHash, newData.HotlinkId, newData.ContentType,
 		newData.AwsBucket, newData.Encryption, newData.UnlimitedDownloads, newData.UnlimitedTime, newData.UserId, newData.UploadDate,

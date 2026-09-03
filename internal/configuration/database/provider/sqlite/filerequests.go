@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/helper"
@@ -115,12 +116,46 @@ func (p DatabaseProvider) SaveFileRequest(request models.FileRequest) {
 		ClosedAt:      request.ClosedAt,
 	}
 
-	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO UploadRequests
-   				 (id, NameEncrypted, userid, expiry, maxFiles, maxSize, creation, apiKey, NoteEncrypted, closed, Collaborators, ClosedAt)
-         			 VALUES  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		newData.Id, newData.NameEncrypted, newData.UserId, newData.Expiry, newData.MaxFiles, newData.MaxSize,
-		newData.Creation, newData.ApiKey, newData.NoteEncrypted, newData.Closed, newData.Collaborators, newData.ClosedAt)
+	// This table keeps INSERT OR REPLACE, unlike the other two, because apiKey is unique here
+	// alongside id: a save has always been allowed to take a key away from whichever other row was
+	// holding it, and an upsert keyed on id alone refuses that rather than reproducing it. REPLACE
+	// deletes the row it replaces, though, so anything this statement does not name is lost - and
+	// until MigratePlaintextFileNames has run, the plaintext name and note columns hold the only
+	// copy of those two values there is. They are therefore read back and written out again rather
+	// than left to be blanked. See legacyNameColumns for the same hazard on FileMetaData and
+	// FileBundles, where id is the only unique column and a plain upsert covers it.
+	columns := `id, NameEncrypted, userid, expiry, maxFiles, maxSize, creation, apiKey, NoteEncrypted, closed,
+   				  Collaborators, ClosedAt`
+	placeholders := `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?`
+	arguments := []any{newData.Id, newData.NameEncrypted, newData.UserId, newData.Expiry, newData.MaxFiles,
+		newData.MaxSize, newData.Creation, newData.ApiKey, newData.NoteEncrypted, newData.Closed,
+		newData.Collaborators, newData.ClosedAt}
+	for _, column := range []string{"name", "note"} {
+		if !p.columnExists("UploadRequests", column) {
+			continue
+		}
+		columns = columns + `, "` + column + `"`
+		placeholders = placeholders + `, ?`
+		arguments = append(arguments, p.legacyRequestValue(column, newData.Id))
+	}
+
+	_, err = p.sqliteDb.Exec(`INSERT OR REPLACE INTO UploadRequests (`+columns+`)
+         			 VALUES  (`+placeholders+`)`, arguments...)
 	helper.Check(err)
+}
+
+// legacyRequestValue returns what a pre-encryption plaintext column currently holds for the given
+// request, or an empty string if the request is new. Only used to write that value straight back,
+// so that replacing the row does not drop it.
+func (p DatabaseProvider) legacyRequestValue(column, id string) string {
+	var value string
+	row := p.sqliteDb.QueryRow(fmt.Sprintf(`SELECT "%s" FROM UploadRequests WHERE id = ?`, column), id)
+	err := row.Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	helper.Check(err)
+	return value
 }
 
 // encryptRequestNameForSave returns the value to store in NameEncrypted for this request. Mirrors
