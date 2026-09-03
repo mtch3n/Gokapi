@@ -114,3 +114,55 @@ func TestRecordUnsealFailureAlertsAtThreshold(t *testing.T) {
 		t.Fatal("expected RecordUnsealSuccess to clear the consecutive-failure counter")
 	}
 }
+
+// TestWaitForNewUuidAllowsAWholeSelection is the failing-first test for the multi-file upload
+// fix: reserving a uuid used to allow a burst of four and reject the rest outright, so a guest
+// picking a normal number of files in one go saw "Too many reservations" and only got through by
+// retrying. A whole selection must now be admitted without a rejection.
+func TestWaitForNewUuidAllowsAWholeSelection(t *testing.T) {
+	SetUnitTestMode(false)
+	defer SetUnitTestMode(true)
+
+	// A literal, not NewUuidBurst: a test sized by the constant it is testing passes at any
+	// value of that constant, including the burst of four that made this fail in the first
+	// place. Twenty is an ordinary selection in a file dialog.
+	const selectionSize = 20
+	const requestId = "selectiontest"
+
+	start := time.Now()
+	for i := 0; i < selectionSize; i++ {
+		if !WaitForNewUuid(requestId) {
+			t.Fatalf("reservation %d of a %d-file selection was refused", i+1, selectionSize)
+		}
+	}
+	// Granted without waiting on the refill, otherwise the upload is merely slow instead of
+	// broken and the fix has not achieved anything.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("a selection of %d took %s, expected it to be granted immediately", selectionSize, elapsed)
+	}
+}
+
+// TestWaitForNewUuidStillThrottles guards the other half: the limiter is what bounds an
+// unlimited file request, which has no other ceiling (chunkreservation.NewIfUnder only caps a
+// request that declared a maximum). Past the burst, reservations must be paced by the refill
+// rather than granted freely.
+func TestWaitForNewUuidStillThrottles(t *testing.T) {
+	SetUnitTestMode(false)
+	defer SetUnitTestMode(true)
+
+	const requestId = "throttletest"
+	for i := 0; i < NewUuidBurst; i++ {
+		if !WaitForNewUuid(requestId) {
+			t.Fatalf("reservation %d within the burst was refused", i+1)
+		}
+	}
+
+	start := time.Now()
+	if !WaitForNewUuid(requestId) {
+		t.Fatal("the reservation after the burst was refused rather than paced")
+	}
+	minWait := time.Second / time.Duration(NewUuidRefill+1)
+	if elapsed := time.Since(start); elapsed < minWait {
+		t.Fatalf("the reservation after the burst returned in %s, expected it to wait for the refill", elapsed)
+	}
+}
