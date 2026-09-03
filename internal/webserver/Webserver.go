@@ -1249,8 +1249,8 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	// than resolving the member on its own. Checked against the raw metadata row, not
 	// storage.GetFile below, specifically so the member's own now-inert ExpireAt/DownloadsRemaining
 	// never gets a chance to refuse it here for a reason the bundle itself has already overridden.
-	if rawFile, ok := database.GetMetaDataById(id); ok && rawFile.BundleId != "" && rawFile.IsBundleMember(rawFile.BundleId) {
-		redirect(w, r, "/pubapi/folderzip?id="+rawFile.BundleId+"&ids="+rawFile.Id)
+	if bundleId, ok := governingFolderOf(id); ok {
+		redirect(w, r, "/pubapi/folderzip?id="+bundleId+"&ids="+id)
 		return
 	}
 
@@ -1400,8 +1400,8 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 
 	// A bundle member's own link redirects to its folder - see the identical, more fully
 	// commented check at the top of serveFile.
-	if rawFile, ok := database.GetMetaDataById(keyId); ok && rawFile.BundleId != "" && rawFile.IsBundleMember(rawFile.BundleId) {
-		http.Redirect(w, r, "/pubapi/folder?id="+rawFile.BundleId, http.StatusTemporaryRedirect)
+	if bundleId, ok := governingFolderOf(keyId); ok {
+		http.Redirect(w, r, "/pubapi/folder?id="+bundleId, http.StatusTemporaryRedirect)
 		return
 	}
 
@@ -1514,8 +1514,8 @@ func pubApiFilePassword(w http.ResponseWriter, r *http.Request) {
 
 	// A bundle member's own link redirects to its folder - see the identical, more fully
 	// commented check at the top of serveFile.
-	if rawFile, ok := database.GetMetaDataById(keyId); ok && rawFile.BundleId != "" && rawFile.IsBundleMember(rawFile.BundleId) {
-		http.Redirect(w, r, "/pubapi/folderpassword?id="+rawFile.BundleId, http.StatusTemporaryRedirect)
+	if bundleId, ok := governingFolderOf(keyId); ok {
+		http.Redirect(w, r, "/pubapi/folderpassword?id="+bundleId, http.StatusTemporaryRedirect)
 		return
 	}
 
@@ -2116,6 +2116,27 @@ func serveBundleFile(w http.ResponseWriter, r *http.Request, file models.File) {
 			return
 		}
 	}
+}
+
+// governingFolderOf reports the folder a member's own link should be answered by, and false when
+// the file has none. All three member links - the download, the public metadata and the password
+// submit - resolve it here, so a member cannot be redirected by one of them and served by another.
+//
+// The folder is LOOKED UP, not inferred from the member's BundleId alone. Nothing enforces that
+// reference: a folder deleted by an older build left its members' rows behind still naming it, and
+// redirecting those to a folder that is not there answered a live file with a not-found from the
+// folder endpoint. A member whose folder is gone is served as the standalone file it now is, which
+// is also what storage.downloadAccessOf already does with it - governingBundle falls back to the
+// file's own axes when the same lookup fails.
+func governingFolderOf(fileId string) (string, bool) {
+	file, ok := database.GetMetaDataById(fileId)
+	if !ok || file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
+		return "", false
+	}
+	if _, ok := database.GetFileBundle(file.BundleId); !ok {
+		return "", false
+	}
+	return file.BundleId, true
 }
 
 // bundleMembers returns every file that belongs to a bundle for listing/serving purposes (see
