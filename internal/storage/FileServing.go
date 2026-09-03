@@ -786,13 +786,30 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		}
 		file.DownloadsRemaining = current.DownloadsRemaining
 		file.WindowOpenedAt = current.WindowOpenedAt
-		if IsExpiredFile(file, time.Now().Unix()) {
+		access := DownloadAccessOf(file)
+		// Only the expiry is re-tested when another counter governs. That counter was spent
+		// atomically by the caller that gated this request - the recipient's own grant, the
+		// folder's visit allowance - so re-testing it here would find the download acquired for
+		// this very request already accounted for, and refuse to deliver what was just paid for.
+		// Where this function is the one that spends, it re-tests both, exactly as before.
+		if access.IsExpired(time.Now().Unix()) {
+			apimutex.Unlock(apimutex.TypeMetaData, file.Id)
+			return false
+		}
+		if access.SpendsFileCounter && access.IsExhausted(time.Now().Unix()) {
 			apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 			return false
 		}
 	}
 	if increaseCounter {
-		if !file.UnlimitedDownloads {
+		// Which counter a download spends is downloadAccessOf's decision, not this function's.
+		// A file governed by its folder, or by the per-recipient grants of a share restricted to
+		// named recipients, has already had that counter spent by whoever gated the request, and
+		// its own must be left untouched - otherwise a file limited to three downloads and
+		// shared with three people would still stop after three, locking out the two recipients
+		// who never got theirs. All that is left to record here is that it was downloaded.
+		access := DownloadAccessOf(file)
+		if access.SpendsFileCounter && !access.UnlimitedDownloads {
 			granted, opened := database.AcquireDownload(file.Id, time.Now().Unix(), int64(LeewayFor(file).Seconds()))
 			if !granted {
 				// The allowance is exhausted and no download window is open (or the atomic,
@@ -1399,39 +1416,75 @@ func LeewayFor(file models.File) time.Duration {
 }
 
 // DownloadAccessOf resolves the axes that decide whether this file may still be downloaded and
-// when its content is disposed of, reading its folder from the database when it belongs to one.
+// when its content is disposed of, reading its folder from the database when it belongs to one
+// and the recipient grants of whichever resource governs it.
 // See models.DownloadAccess and downloadAccessOf.
 func DownloadAccessOf(file models.File) models.DownloadAccess {
-	if file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
-		return downloadAccessOf(file, models.FileBundle{}, false)
-	}
-	bundle, ok := database.GetFileBundle(file.BundleId)
-	return downloadAccessOf(file, bundle, ok)
+	bundle, hasBundle := governingBundle(file)
+	resourceType, resourceId := governingShareResource(file, bundle, hasBundle)
+	return downloadAccessOf(file, bundle, hasBundle, database.GetShareGrants(resourceType, resourceId))
 }
 
 // DownloadAccessResolver answers DownloadAccessOf's question for many files against one read of
-// the folder table. A caller that walks every file - the owner's file list, the CleanUp sweep -
-// would otherwise read the same folder once per member of it.
+// the folder table and one of the grant table. A caller that walks every file - the owner's file
+// list, the CleanUp sweep - would otherwise read the same folder once per member of it, and the
+// grants of every file it passes one at a time.
 type DownloadAccessResolver struct {
 	bundles map[string]models.FileBundle
+	grants  map[shareResourceKey][]models.ShareGrant
 }
 
-// NewDownloadAccessResolver reads every folder once, for the resolver to answer from.
+// shareResourceKey identifies the resource a set of grants was written against, so that one read
+// of the whole grant table can be indexed by it.
+type shareResourceKey struct {
+	resourceType int
+	resourceId   string
+}
+
+// NewDownloadAccessResolver reads every folder and every grant once, for the resolver to answer
+// from.
 func NewDownloadAccessResolver() DownloadAccessResolver {
 	bundles := make(map[string]models.FileBundle)
 	for _, bundle := range database.GetAllFileBundles() {
 		bundles[bundle.Id] = bundle
 	}
-	return DownloadAccessResolver{bundles: bundles}
+	grants := make(map[shareResourceKey][]models.ShareGrant)
+	for _, grant := range database.GetAllShareGrants() {
+		key := shareResourceKey{resourceType: grant.ResourceType, resourceId: grant.ResourceId}
+		grants[key] = append(grants[key], grant)
+	}
+	return DownloadAccessResolver{bundles: bundles, grants: grants}
 }
 
 // Of returns the axes governing this file, the same answer DownloadAccessOf gives.
 func (r DownloadAccessResolver) Of(file models.File) models.DownloadAccess {
-	if file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
-		return downloadAccessOf(file, models.FileBundle{}, false)
+	var bundle models.FileBundle
+	hasBundle := false
+	if file.BundleId != "" && file.IsBundleMember(file.BundleId) {
+		bundle, hasBundle = r.bundles[file.BundleId]
 	}
-	bundle, ok := r.bundles[file.BundleId]
-	return downloadAccessOf(file, bundle, ok)
+	resourceType, resourceId := governingShareResource(file, bundle, hasBundle)
+	return downloadAccessOf(file, bundle, hasBundle,
+		r.grants[shareResourceKey{resourceType: resourceType, resourceId: resourceId}])
+}
+
+// governingBundle returns the folder this file is judged by, if it belongs to one.
+func governingBundle(file models.File) (models.FileBundle, bool) {
+	if file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
+		return models.FileBundle{}, false
+	}
+	return database.GetFileBundle(file.BundleId)
+}
+
+// governingShareResource names the resource whose recipient grants govern this file: its folder
+// when it belongs to one, the file itself otherwise. That is the same precedence downloadAccessOf
+// applies to the expiry and the allowance - the folder is the unit of sharing - so a member is
+// never gated by one resource's recipients while being metered against another's.
+func governingShareResource(file models.File, bundle models.FileBundle, hasBundle bool) (int, string) {
+	if hasBundle {
+		return models.ShareResourceBundle, bundle.Id
+	}
+	return models.ShareResourceFile, file.Id
 }
 
 // downloadAccessOf is the one place that decides which axes govern a file. A member's own expiry
@@ -1441,12 +1494,26 @@ func (r DownloadAccessResolver) Of(file models.File) models.DownloadAccess {
 // allowance runs out takes all of its members with it on the next sweep, and a member whose own
 // stale counter reached zero long ago is not disposed of while its folder still has allowance.
 //
+// A recipient list then supersedes the download allowance of whichever of the two governs, the
+// same way models.File.AccessMode makes it supersede the passcode: the owner's one number is
+// each recipient's own budget, so what is left is the sum of what the recipients have left and
+// the resource's own counter neither gates nor exhausts it. See models.DownloadAccess.
+// WithShareGrants. The expiry is untouched by this - a share still cannot outlive what it points
+// at - so access ends at whichever comes first, the expiry or the last recipient's last
+// download, and that is the only rule there is.
+//
 // A folder is never a secret, so its window is always the configured leeway.
-func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool) models.DownloadAccess {
+func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool, grants []models.ShareGrant) models.DownloadAccess {
+	var access models.DownloadAccess
 	if hasBundle {
-		return bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
+		access = bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
+	} else {
+		access = file.DownloadAccess(int64(LeewayFor(file).Seconds()))
 	}
-	return file.DownloadAccess(int64(LeewayFor(file).Seconds()))
+	if len(grants) == 0 {
+		return access
+	}
+	return access.WithShareGrants(grants)
 }
 
 // IsExpiredFile returns true if the file can no longer be served: the expiry timestamp passed, or

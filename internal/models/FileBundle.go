@@ -59,7 +59,8 @@ type FileBundle struct {
 // DownloadAccess returns the axes governing this folder, and with it every member of the folder:
 // a member's own expiry and allowance are inert while it belongs to one (see
 // File.IsBundleMember), so the folder is what decides access, exhaustion and disposal for all of
-// them together.
+// them together. SpendsFileCounter is therefore left false: the counter spent for a visit is the
+// folder's, never the member's.
 func (b *FileBundle) DownloadAccess(leeway int64) DownloadAccess {
 	return DownloadAccess{
 		ExpireAt:           b.ExpireAt,

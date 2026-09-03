@@ -140,7 +140,8 @@ func GrantAccess(resource Resource, emails []string, actor models.User, download
 	// Grants are written before any mail goes out. A link that arrives before
 	// its grant exists would be refused, which is the one ordering that
 	// produces a support call; the reverse merely means a resend is needed.
-	database.SetShareGrants(resource.Type, resource.Id, recipientIds, actor.Id, downloadsAllowed)
+	database.SetShareGrants(resource.Type, resource.Id, recipientIds, actor.Id,
+		resolveDownloadsAllowed(resource, downloadsAllowed))
 
 	for i, recipient := range recipients {
 		if err := issueAndSend(resource, recipient, baseUrl, "", now, actor, "grant"); err != nil {
@@ -148,6 +149,41 @@ func GrantAccess(resource Resource, emails []string, actor models.User, download
 		}
 	}
 	return results, nil
+}
+
+// resolveDownloadsAllowed returns the per-recipient budget a grant on this resource is written
+// with. A caller that names a number of its own is narrowing the share and is honoured; a caller
+// that names none - which is every caller today, because there is no control for it - gets the
+// resource's own current limit.
+//
+// That is what makes the owner's one number mean what they meant by it: a file limited to three
+// downloads and shared with three people gives each of them three, nine in total. Resolving it
+// here, at the single entry point that creates grants, is deliberate. Storing the resolved value
+// rather than reading the resource's limit back at download time is also deliberate: the grant
+// row is the record of what this recipient was given, and it has to say so on its own.
+//
+// A resource that is itself unlimited yields an unlimited grant, and so does a file request,
+// which has no download allowance to inherit.
+func resolveDownloadsAllowed(resource Resource, requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	switch resource.Type {
+	case models.ShareResourceFile:
+		file, ok := database.GetMetaDataById(resource.Id)
+		if !ok || file.UnlimitedDownloads {
+			return 0
+		}
+		return file.DownloadsRemaining
+	case models.ShareResourceBundle:
+		bundle, ok := database.GetFileBundle(resource.Id)
+		if !ok || bundle.UnlimitedDownloads {
+			return 0
+		}
+		return bundle.DownloadsRemaining
+	default:
+		return 0
+	}
 }
 
 // ResendLink issues a replacement access link for one recipient.

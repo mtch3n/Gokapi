@@ -185,6 +185,22 @@ func (p DatabaseProvider) GetShareGrants(resourceType int, resourceId string) []
 	return result
 }
 
+// GetAllShareGrants returns every grant in the database, ordered by resource then recipient.
+func (p DatabaseProvider) GetAllShareGrants() []models.ShareGrant {
+	result := make([]models.ShareGrant, 0)
+	rows, err := p.query("SELECT " + shareGrantColumns +
+		" FROM ShareGrants ORDER BY resourcetype, resourceid, recipientid")
+	helper.Check(err)
+	defer rows.Close()
+	for rows.Next() {
+		grant, err := scanShareGrant(rows)
+		helper.Check(err)
+		result = append(result, grant)
+	}
+	helper.Check(rows.Err())
+	return result
+}
+
 // HasShareGrant reports whether this recipient may reach this resource. The
 // recipient must also not be blocked: blocking is meant to take effect at
 // once, without hunting down existing grants or live sessions.
