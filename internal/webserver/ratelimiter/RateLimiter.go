@@ -129,10 +129,33 @@ func WaitOnFailedId(r *http.Request) {
 	_ = failedIdLimiter.Get(ip, 1, 10).Wait(context.Background())
 }
 
-// IsAllowedNewUuid returns true if a new uuid is not rate-limited
-// Four initial requests are allowed without rate limiting, thereafter one every second
-func IsAllowedNewUuid(key string) bool {
-	return newUuidLimiter.Get(key, 1, 4).Allow()
+// NewUuidBurst is how many uuids may be reserved for one file request at once, and
+// NewUuidRefill how many per second are granted after that.
+//
+// A guest who picks twenty files in the file dialog issues twenty reservations at the same
+// moment. The previous burst of four rejected the rest outright, so an ordinary multi-file
+// upload failed and only went through on retry. How many files a request may actually receive
+// is not this limiter's job - chunkreservation.NewIfUnder enforces that cap atomically, and a
+// limited request can never exceed it however fast it asks. This limiter exists to bound how
+// fast an UNLIMITED request can accrue reservations, which is the only case with no other
+// ceiling.
+const (
+	NewUuidBurst  = 25
+	NewUuidRefill = 5
+	// newUuidMaxWait bounds how long one reservation may block waiting for a token. Longer than
+	// a real file dialog needs, short enough that a client that has gone away does not hold a
+	// goroutine indefinitely - this handler has no request context to cancel on.
+	newUuidMaxWait = 10 * time.Second
+)
+
+// WaitForNewUuid blocks until a uuid may be reserved for this file request, and returns false if
+// no token became available within newUuidMaxWait. Waiting rather than rejecting is what lets a
+// whole selection through in one go; see NewUuidBurst for why the cap itself is enforced
+// elsewhere.
+func WaitForNewUuid(key string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), newUuidMaxWait)
+	defer cancel()
+	return newUuidLimiter.Get(key, NewUuidRefill, NewUuidBurst).Wait(ctx) == nil
 }
 
 // Get returns the rate limiter for the given key

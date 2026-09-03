@@ -962,7 +962,7 @@ func apiChunkReserve(w http.ResponseWriter, r requestParser, _ models.User, apik
 		sendError(w, status, errorCode, errorMsg)
 		return
 	}
-	if !ratelimiter.IsAllowedNewUuid(fileRequest.Id) {
+	if !ratelimiter.WaitForNewUuid(fileRequest.Id) {
 		sendError(w, http.StatusTooManyRequests, errorcodes.RateLimited, "Too many reservations for this file request. Please wait a few seconds before reserving a new uuid.")
 		return
 	}
