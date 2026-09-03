@@ -4120,34 +4120,47 @@ func TestApiChunkReserveUnlimitedReservesFreely(t *testing.T) {
 	}
 }
 
-// TestApiChunkReserveRateLimitAppliesToCappedRequest is the failing-first regression test for bug
-// 1 in apiChunkReserve: the rate limit check used to sit inside the `IsUnlimitedFiles()` branch,
-// so a file request WITH a MaxFiles cap got no rate limiting on /uploadrequest/chunk/reserve at
-// all - the one case with a finite budget worth protecting went unthrottled, while the unlimited
-// case (nothing to exhaust) was the only one throttled. Real rate limiting is disabled for this
-// whole test binary (see TestMain), so it is switched on only for the duration of this test,
-// against a file request id no other test uses, so as not to disturb - or be disturbed by -
-// shared limiter state.
+// TestApiChunkReserveRateLimitAppliesToCappedRequest is the regression test for bug 1 in
+// apiChunkReserve: the rate limit check used to sit inside the `IsUnlimitedFiles()` branch, so a
+// file request WITH a MaxFiles cap got no rate limiting on /uploadrequest/chunk/reserve at all -
+// the one case with a finite budget worth protecting went unthrottled, while the unlimited case
+// (nothing to exhaust) was the only one throttled. That is still what this test guards.
+//
+// What changed is the SHAPE of the throttle, not whether it reaches a capped request. Reserving
+// used to reject the surplus outright, so this test could look for a 429. A guest who picks
+// twenty files in one dialog issues twenty reservations at once and saw "Too many reservations",
+// which made an ordinary multi-file upload fail and only succeed on retry, so reserving now
+// waits for a token instead of refusing one. A caller is therefore PACED rather than refused, and
+// pacing is what this asserts: past the burst, reservations can only arrive as fast as the
+// refill. An unthrottled capped request would finish all of these immediately.
+//
+// Real rate limiting is disabled for this whole test binary (see TestMain), so it is switched on
+// only for the duration of this test, against a file request id no other test uses, so as not to
+// disturb - or be disturbed by - shared limiter state.
 func TestApiChunkReserveRateLimitAppliesToCappedRequest(t *testing.T) {
 	ratelimiter.SetUnitTestMode(false)
 	t.Cleanup(func() { ratelimiter.SetUnitTestMode(true) })
 
-	// MaxFiles is well above the rate limiter's burst of 4, so the file cap itself never
-	// triggers first and any 429 seen below can only come from the rate limiter.
-	frId, publicKey := newCappedFileRequest(t, "rate-limit-capped-request", 50)
+	// Literals, not the limiter's own constants: a test sized by the very constant it is testing
+	// passes at any value of that constant, including a burst wide enough to throttle nothing.
+	// reserveCount must exceed the burst for any pacing to happen at all.
+	const reserveCount = 40
+	const minPaced = 500 * time.Millisecond
 
-	sawRateLimited := false
-	for i := 0; i < 20; i++ {
+	// MaxFiles is above reserveCount, so the file cap itself never triggers first and the only
+	// thing that can slow these down is the rate limiter.
+	frId, publicKey := newCappedFileRequest(t, "rate-limit-capped-request", 100)
+
+	start := time.Now()
+	for i := 0; i < reserveCount; i++ {
 		w := reserveChunk(publicKey, frId)
-		if w.Code == http.StatusTooManyRequests {
-			sawRateLimited = true
-			break
-		}
 		test.IsEqualInt(t, w.Code, 200)
 	}
+	elapsed := time.Since(start)
 
-	if !sawRateLimited {
-		t.Fatal("expected a burst of reserve calls against a capped file request to eventually be rate-limited with 429")
+	if elapsed < minPaced {
+		t.Fatalf("%d reserve calls against a capped file request finished in %s, expected the rate limiter to pace them - a capped request must not be exempt from throttling",
+			reserveCount, elapsed)
 	}
 }
 
