@@ -73,7 +73,7 @@ func TestDefaultExpiry(t *testing.T) {
 	const hour = int64(time.Hour)
 	const day = int64(24 * time.Hour)
 
-	// Unset, against the shipped six-preset list: 1d, and not the longest preset.
+	// Unset, against a six-preset list set here rather than inherited: 1d, and not the longest.
 	os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
 	os.Unsetenv("GOKAPI_MAX_EXPIRY")
 	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1h,1d,7d,14d,30d,365d")
@@ -82,7 +82,8 @@ func TestDefaultExpiry(t *testing.T) {
 	test.IsEqualBool(t, int64(env.DefaultExpiry) == 365*day, false)
 
 	// Unset, against a shortened three-preset list: still 1d, and still not the longest preset.
-	// This is the case a client-side rule sized against the six-preset list gets wrong.
+	// This is the case a client-side rule sized against a six-preset list gets wrong, and it is
+	// also what this fork actually ships.
 	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1d,7d,14d")
 	env = New()
 	test.IsEqualInt64(t, int64(env.DefaultExpiry), day)

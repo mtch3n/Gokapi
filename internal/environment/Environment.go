@@ -19,12 +19,9 @@ import (
 // separate literal, rather than parsed from the tag, so normalizeExpiryOptions has a fallback
 // that does not depend on parsing succeeding.
 var defaultExpiryOptions = []Duration{
-	Duration(time.Hour),
 	Duration(24 * time.Hour),
 	Duration(7 * 24 * time.Hour),
 	Duration(14 * 24 * time.Hour),
-	Duration(30 * 24 * time.Hour),
-	Duration(365 * 24 * time.Hour),
 }
 
 // defaultExpiryFallback is used when GOKAPI_DEFAULT_EXPIRY is unset or not usable. It mirrors
@@ -115,7 +112,7 @@ type Environment struct {
 	// Comma separated, same format as GOKAPI_MAX_EXPIRY per entry. An entry that is not
 	// positive, a duplicate, or greater than GOKAPI_MAX_EXPIRY is dropped; if that empties
 	// the list, the default list above is used instead
-	ExpiryOptions []Duration `env:"EXPIRY_OPTIONS" envSeparator:"," envDefault:"1h,1d,7d,14d,30d,365d"`
+	ExpiryOptions []Duration `env:"EXPIRY_OPTIONS" envSeparator:"," envDefault:"1d,7d,14d"`
 	// Sets which of the GOKAPI_EXPIRY_OPTIONS presets a client preselects for a new upload,
 	// e.g. "7d". Same format as GOKAPI_MAX_EXPIRY. The value is snapped down to the longest
 	// preset that does not exceed it, so the preselection is always one of the presets on

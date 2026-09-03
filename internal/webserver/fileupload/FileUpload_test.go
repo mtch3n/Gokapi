@@ -104,6 +104,13 @@ func TestParseConfigUsesDefaultExpiry(t *testing.T) {
 		expiryDays:       "invalid",
 		password:         "",
 	}
+	// The option list is set here rather than inherited from the shipped default, so this test
+	// keeps testing the fallback rather than quietly re-testing whatever presets ship. Each
+	// default below is a member of it, so nothing is snapped and the assertions are about
+	// parseConfig alone.
+	os.Setenv("GOKAPI_EXPIRY_OPTIONS", "1h,1d,7d,14d,30d")
+	defer os.Unsetenv("GOKAPI_EXPIRY_OPTIONS")
+
 	os.Setenv("GOKAPI_DEFAULT_EXPIRY", "1d")
 	defer os.Unsetenv("GOKAPI_DEFAULT_EXPIRY")
 	config, err := parseConfig(data)

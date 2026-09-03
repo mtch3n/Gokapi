@@ -152,7 +152,7 @@ Available environment variables
 |                                     |                                                                                                                         |                 |                             |
 |                                     | uses a stored key                                                                                                       |                 |                             |
 +-------------------------------------+-------------------------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+
-| GOKAPI_EXPIRY_OPTIONS               | Sets the expiry presets a client offers for a new upload, e.g. "1h,1d,7d,14d,30d,365d".                                 | No              | 1h,1d,7d,14d,30d,365d       |
+| GOKAPI_EXPIRY_OPTIONS               | Sets the expiry presets a client offers for a new upload, e.g. "1h,1d,7d,14d,30d,365d".                                 | No              | 1d,7d,14d                   |
 |                                     |                                                                                                                         |                 |                             |
 |                                     | Comma separated, same format as GOKAPI_MAX_EXPIRY per entry. An entry that is not                                       |                 |                             |
 |                                     |                                                                                                                         |                 |                             |
