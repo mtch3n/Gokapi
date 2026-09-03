@@ -776,18 +776,18 @@ func TestAcquireShareGrantDownloadWindow(t *testing.T) {
 		SetShareGrants(file, "res-window", []int{mona}, 1, 1)
 
 		timeNow := time.Now().Unix()
-		granted, opened := AcquireShareGrantDownload(file, "res-window", mona, timeNow, leeway)
+		granted, opened := AcquireShareGrantDownload(file, "res-window", mona, timeNow, leeway, 1)
 		test.IsEqualBool(t, granted, true)
 		test.IsEqualBool(t, opened, true)
 
-		granted, opened = AcquireShareGrantDownload(file, "res-window", mona, timeNow+60, leeway)
+		granted, opened = AcquireShareGrantDownload(file, "res-window", mona, timeNow+60, leeway, 1)
 		test.IsEqualBool(t, granted, true)
 		test.IsEqualBool(t, opened, false)
 		for _, grant := range GetShareGrants(file, "res-window") {
 			test.IsEqualInt(t, grant.DownloadsUsed, 1)
 		}
 
-		granted, _ = AcquireShareGrantDownload(file, "res-window", mona, timeNow+leeway+1, leeway)
+		granted, _ = AcquireShareGrantDownload(file, "res-window", mona, timeNow+leeway+1, leeway, 1)
 		test.IsEqualBool(t, granted, false)
 
 		DeleteShareGrants(file, "res-window")
@@ -797,17 +797,31 @@ func TestAcquireShareGrantDownloadWindow(t *testing.T) {
 
 // acquireGrantDownload records one download against a recipient's allowance with a leeway of 0,
 // so every call opens its own window and therefore spends one - the behaviour that applied before
-// download windows existed.
+// download windows existed. The allowance passed is the one stored on the grant: the ids used in
+// this package's tests name no real file or folder, so there is no owner limit to resolve against
+// (that resolution is storage.GrantAllowanceOf's, and is tested there).
 func acquireGrantDownload(resourceType int, resourceId string, recipientId int) bool {
-	granted, _ := AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), 0)
+	granted, _ := AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), 0,
+		storedGrantAllowance(GetShareGrants(resourceType, resourceId), recipientId))
 	return granted
 }
 
 // acquireGrantDownloadOn is acquireGrantDownload against a specific provider rather than the
 // package-global one, for the migration test.
 func acquireGrantDownloadOn(provider dbabstraction.Database, resourceType int, resourceId string, recipientId int) bool {
-	granted, _ := provider.AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), 0)
+	granted, _ := provider.AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), 0,
+		storedGrantAllowance(provider.GetShareGrants(resourceType, resourceId), recipientId))
 	return granted
+}
+
+// storedGrantAllowance returns the allowance stored on this recipient's grant.
+func storedGrantAllowance(grants []models.ShareGrant, recipientId int) int {
+	for _, grant := range grants {
+		if grant.RecipientId == recipientId {
+			return grant.DownloadsAllowed
+		}
+	}
+	return 0
 }
 
 func TestShareGrantDownloadCounter(t *testing.T) {
@@ -830,12 +844,12 @@ func TestShareGrantDownloadCounter(t *testing.T) {
 		for _, grant := range GetShareGrants(file, "res-count") {
 			if grant.RecipientId == carol {
 				test.IsEqualInt(t, grant.DownloadsUsed, 2)
-				test.IsEqualBool(t, grant.HasDownloadsLeft(), false)
+				test.IsEqualBool(t, grant.HasDownloadsLeft(2), false)
 				test.IsEqualBool(t, grant.LastDownloadAt > 0, true)
 			}
 			if grant.RecipientId == dave {
 				test.IsEqualInt(t, grant.DownloadsUsed, 1)
-				test.IsEqualBool(t, grant.HasDownloadsLeft(), true)
+				test.IsEqualBool(t, grant.HasDownloadsLeft(2), true)
 			}
 		}
 

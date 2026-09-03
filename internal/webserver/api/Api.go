@@ -2029,11 +2029,15 @@ func apiListShareRecipients(w http.ResponseWriter, r requestParser, user models.
 	}
 
 	type recipientOutput struct {
-		Email            string `json:"email"`
-		DownloadsUsed    int    `json:"downloadsUsed"`
-		DownloadsAllowed int    `json:"downloadsAllowed"`
-		LastDownloadAt   int64  `json:"lastDownloadAt"`
-		IsBlocked        bool   `json:"isBlocked"`
+		Email         string `json:"email"`
+		DownloadsUsed int    `json:"downloadsUsed"`
+		// DownloadsAllowed is the recipient's EFFECTIVE allowance, resolved against the owner's
+		// own limit on the resource (see storage.GrantAllowanceOf), not the raw number stored on
+		// the grant. Reporting the stored one showed "unlimited" for a recipient of a file the
+		// owner limited to a single download.
+		DownloadsAllowed int   `json:"downloadsAllowed"`
+		LastDownloadAt   int64 `json:"lastDownloadAt"`
+		IsBlocked        bool  `json:"isBlocked"`
 	}
 	output := make([]recipientOutput, 0)
 	for _, grant := range database.GetShareGrants(request.ResourceType, request.ResourceId) {
@@ -2044,7 +2048,7 @@ func apiListShareRecipients(w http.ResponseWriter, r requestParser, user models.
 		output = append(output, recipientOutput{
 			Email:            recipient.Email,
 			DownloadsUsed:    grant.DownloadsUsed,
-			DownloadsAllowed: grant.DownloadsAllowed,
+			DownloadsAllowed: storage.GrantAllowanceOf(grant),
 			LastDownloadAt:   grant.LastDownloadAt,
 			IsBlocked:        recipient.IsBlocked,
 		})
@@ -2062,11 +2066,15 @@ func apiListShareRecipients(w http.ResponseWriter, r requestParser, user models.
 // and grants are already indexed by recipient.
 func apiShareRecipientsSummary(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
 	type recipientOutput struct {
-		Email            string `json:"email"`
-		DownloadsUsed    int    `json:"downloadsUsed"`
-		DownloadsAllowed int    `json:"downloadsAllowed"`
-		LastDownloadAt   int64  `json:"lastDownloadAt"`
-		IsBlocked        bool   `json:"isBlocked"`
+		Email         string `json:"email"`
+		DownloadsUsed int    `json:"downloadsUsed"`
+		// DownloadsAllowed is the recipient's EFFECTIVE allowance, resolved against the owner's
+		// own limit on the resource (see storage.GrantAllowanceOf), not the raw number stored on
+		// the grant. Reporting the stored one showed "unlimited" for a recipient of a file the
+		// owner limited to a single download.
+		DownloadsAllowed int   `json:"downloadsAllowed"`
+		LastDownloadAt   int64 `json:"lastDownloadAt"`
+		IsBlocked        bool  `json:"isBlocked"`
 	}
 	type shareOutput struct {
 		ResourceType int               `json:"resourceType"`
@@ -2096,7 +2104,7 @@ func apiShareRecipientsSummary(w http.ResponseWriter, _ requestParser, user mode
 			grouped[key] = append(grouped[key], recipientOutput{
 				Email:            recipient.Email,
 				DownloadsUsed:    grant.DownloadsUsed,
-				DownloadsAllowed: grant.DownloadsAllowed,
+				DownloadsAllowed: storage.GrantAllowanceOf(grant),
 				LastDownloadAt:   grant.LastDownloadAt,
 				IsBlocked:        recipient.IsBlocked,
 			})
@@ -2142,16 +2150,20 @@ func apiShareRecipientsSummary(w http.ResponseWriter, _ requestParser, user mode
 // deletes deliberately. Requires API permission VIEW.
 func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ models.ApiKey) {
 	type inboxItem struct {
-		ResourceType     int    `json:"resourceType"`
-		ResourceId       string `json:"resourceId"`
-		Name             string `json:"name"`
-		SharedBy         string `json:"sharedBy"`
-		SharedAt         int64  `json:"sharedAt"`
-		ExpiresAt        int64  `json:"expiresAt"`
-		DownloadsUsed    int    `json:"downloadsUsed"`
-		DownloadsAllowed int    `json:"downloadsAllowed"`
-		LastDownloadAt   int64  `json:"lastDownloadAt"`
-		Size             int64  `json:"size"`
+		ResourceType  int    `json:"resourceType"`
+		ResourceId    string `json:"resourceId"`
+		Name          string `json:"name"`
+		SharedBy      string `json:"sharedBy"`
+		SharedAt      int64  `json:"sharedAt"`
+		ExpiresAt     int64  `json:"expiresAt"`
+		DownloadsUsed int    `json:"downloadsUsed"`
+		// DownloadsAllowed is the recipient's EFFECTIVE allowance, resolved against the owner's
+		// own limit on the resource (see storage.GrantAllowanceOf), not the raw number stored on
+		// the grant. Reporting the stored one showed "unlimited" for a recipient of a file the
+		// owner limited to a single download.
+		DownloadsAllowed int   `json:"downloadsAllowed"`
+		LastDownloadAt   int64 `json:"lastDownloadAt"`
+		Size             int64 `json:"size"`
 	}
 
 	items := make([]inboxItem, 0)
@@ -2216,7 +2228,7 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			SharedAt:         grant.GrantedAt,
 			ExpiresAt:        expiresAt,
 			DownloadsUsed:    grant.DownloadsUsed,
-			DownloadsAllowed: grant.DownloadsAllowed,
+			DownloadsAllowed: storage.GrantAllowanceOf(grant),
 			LastDownloadAt:   grant.LastDownloadAt,
 			Size:             size,
 		})

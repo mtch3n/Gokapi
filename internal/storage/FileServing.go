@@ -1434,6 +1434,50 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 	return file.DownloadAccess(int64(LeewayFor(file).Seconds()))
 }
 
+// GrantAllowanceOf returns how many downloads a recipient's share grant may actually take: the
+// number the owner typed into the share dialog, bounded by the owner's own limit on the resource,
+// so a share can narrow what the owner allowed but never widen it. A grant of 0 - the dialog's
+// default, "unlimited" - therefore resolves to the resource's limit whenever the resource has
+// one. See models.DownloadAccess.GrantAllowance for the arithmetic.
+//
+// Resolved on every read and every download rather than snapshotted into the grant row when it is
+// created, because the owner's limit can change afterwards: PUT /api/files/modify and PUT
+// /api/folder/modify both change it, and a snapshot would leave an already-granted recipient
+// holding a budget the owner has since withdrawn. This is the one place that answers the
+// question; the recipient path must not grow a second notion of how many downloads are left.
+func GrantAllowanceOf(grant models.ShareGrant) int {
+	switch grant.ResourceType {
+	case models.ShareResourceFile:
+		file, ok := database.GetMetaDataById(grant.ResourceId)
+		if !ok {
+			return grant.DownloadsAllowed
+		}
+		return DownloadAccessOf(file).GrantAllowance(grant.DownloadsAllowed, grant.DownloadsUsed)
+	case models.ShareResourceBundle:
+		bundle, ok := database.GetFileBundle(grant.ResourceId)
+		if !ok {
+			return grant.DownloadsAllowed
+		}
+		access := bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
+		return access.GrantAllowance(grant.DownloadsAllowed, grant.DownloadsUsed)
+	}
+	// A file request collects uploads rather than handing out downloads, so it has no allowance
+	// of its own to bound the grant with.
+	return grant.DownloadsAllowed
+}
+
+// GrantAllowanceFor is GrantAllowanceOf for a caller that holds the resource and the recipient
+// rather than the grant itself. A recipient with no grant on the resource has no allowance to
+// resolve, which the false return reports.
+func GrantAllowanceFor(resourceType int, resourceId string, recipientId int) (int, bool) {
+	for _, grant := range database.GetShareGrants(resourceType, resourceId) {
+		if grant.RecipientId == recipientId {
+			return GrantAllowanceOf(grant), true
+		}
+	}
+	return 0, false
+}
+
 // bundlesById returns every folder keyed by its id, for downloadAccessIn.
 func bundlesById() map[string]models.FileBundle {
 	result := make(map[string]models.FileBundle)

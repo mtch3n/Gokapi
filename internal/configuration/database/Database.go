@@ -178,7 +178,8 @@ func migrateShareAccess(dbOld, dbNew dbabstraction.Database) {
 			for i := 0; i < grant.DownloadsUsed; i++ {
 				// leeway 0, so every one of these opens its own window and therefore actually
 				// spends one - a migration must reproduce the count, not a single window.
-				dbNew.AcquireShareGrantDownload(key.resourceType, key.resourceId, newId, time.Now().Unix(), 0)
+				dbNew.AcquireShareGrantDownload(key.resourceType, key.resourceId, newId, time.Now().Unix(), 0,
+					grant.DownloadsAllowed)
 			}
 		}
 	}
@@ -458,9 +459,11 @@ func SetShareGrants(resourceType int, resourceId string, recipientIds []int, gra
 }
 
 // AcquireShareGrantDownload atomically records one download by this recipient, returning
-// granted=false when their allowance is exhausted and no download window is open.
-func AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
-	return db.AcquireShareGrantDownload(resourceType, resourceId, recipientId, timeNow, leeway)
+// granted=false when their allowance is exhausted and no download window is open. allowed is the
+// recipient's effective allowance, resolved by the caller (see storage.GrantAllowanceOf); 0 means
+// unlimited.
+func AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64, allowed int) (bool, bool) {
+	return db.AcquireShareGrantDownload(resourceType, resourceId, recipientId, timeNow, leeway, allowed)
 }
 
 // GetShareGrants returns every grant on a resource.

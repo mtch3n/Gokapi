@@ -7,6 +7,7 @@ import (
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/shareaccess"
+	"github.com/forceu/gokapi/internal/storage"
 )
 
 // shareTokenParam is the query parameter carrying an access token. It is kept as a fallback
@@ -144,7 +145,11 @@ func consumeShareDownload(r *http.Request, resourceType int, resourceId string, 
 		// read-only access check.
 		return false
 	}
-	return shareaccess.ConsumeDownload(resourceType, resourceId, recipientId, leeway) == nil
+	allowed, hasGrant := storage.GrantAllowanceFor(resourceType, resourceId, recipientId)
+	if !hasGrant {
+		return false
+	}
+	return shareaccess.ConsumeDownload(resourceType, resourceId, recipientId, leeway, allowed) == nil
 }
 
 // accessibleBundleMembers narrows a bundle's member list to the files the current

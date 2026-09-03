@@ -1316,8 +1316,11 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		// to this recipient rather than recorded as anonymous.
 		r = attachRecipient(r, recipientId)
 		// The allowance is spent per recipient, so one recipient exhausting
-		// theirs does not consume anyone else's.
-		if shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, recipientId, int64(storage.LeewayFor(savedFile).Seconds())) != nil {
+		// theirs does not consume anyone else's - bounded by the owner's own limit on the file,
+		// which storage.GrantAllowanceFor resolves.
+		allowed, hasGrant := storage.GrantAllowanceFor(models.ShareResourceFile, savedFile.Id, recipientId)
+		if !hasGrant || shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, recipientId,
+			int64(storage.LeewayFor(savedFile).Seconds()), allowed) != nil {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"recipient download allowance exhausted"); err != nil {
 				respondAuditWriteFailed(w)

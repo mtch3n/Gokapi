@@ -268,8 +268,16 @@ func ValidateToken(rawToken string, resourceType int, resourceId string) (recipi
 // long a window stays open, in seconds; the caller resolves it for the resource
 // being served (see storage.LeewayFor) rather than this deciding it, so there
 // is one rule and only the window's length varies.
-func ConsumeDownload(resourceType int, resourceId string, recipientId int, leeway int64) error {
-	granted, _ := database.AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), leeway)
+//
+// allowed is the recipient's effective allowance and is resolved the same way,
+// by storage.GrantAllowanceOf, so that the owner's own limit on the resource
+// bounds the grant: the owner may give a recipient less than the resource
+// allows, never more, and the share dialog's "unlimited" means "no limit of my
+// own" rather than "no limit at all". Resolving it here, once, is what keeps
+// the recipient path from growing a second notion of how many downloads are
+// left.
+func ConsumeDownload(resourceType int, resourceId string, recipientId int, leeway int64, allowed int) error {
+	granted, _ := database.AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), leeway, allowed)
 	if granted {
 		return nil
 	}

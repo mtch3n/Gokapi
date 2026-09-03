@@ -2864,7 +2864,7 @@ func TestFolderZipExhaustedBundleAllowanceStillRefusesWhole(t *testing.T) {
 	// Grant exactly one bundle download, then immediately spend it, so the recipient's bundle
 	// allowance is already exhausted by the time the request under test arrives.
 	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 1)
-	if granted, _ := database.AcquireShareGrantDownload(models.ShareResourceBundle, bundle.Id, recipientId, time.Now().Unix(), 0); !granted {
+	if granted, _ := database.AcquireShareGrantDownload(models.ShareResourceBundle, bundle.Id, recipientId, time.Now().Unix(), 0, 1); !granted {
 		t.Fatalf("Failed to pre-exhaust the bundle allowance for the test fixture")
 	}
 	t.Cleanup(func() {

@@ -364,3 +364,138 @@ func TestCleanUpUnbundledFileIsUnchanged(t *testing.T) {
 	test.IsEqualInt(t, stored.DisposalReason, models.DisposalReasonDownloaded)
 	test.FileDoesNotExist(t, configuration.Get().DataDir+"/"+sha1)
 }
+
+// --- The owner's limit bounds a recipient's grant ---
+//
+// A share is one of the paths the one rule has to cover, and it was the one door where the
+// owner's own limit did not apply at all: the share dialog sends 0 for "unlimited" unless the
+// owner types a number, and that 0 used to mean "no limit" outright, so a file the owner limited
+// to a single download handed its recipient an unlimited budget. The owner may narrow what they
+// allowed; they may not be made to widen it.
+
+// saveGrantedFile stores a file with the given allowance, shares it with one recipient at the
+// given granted allowance, and returns the resolved grant.
+func saveGrantedFile(t *testing.T, allowedDownloads int, unlimited bool, granted int) models.ShareGrant {
+	t.Helper()
+	id := "granted_" + helper.GenerateRandomString(8)
+	database.SaveMetaData(models.File{
+		Id:                 id,
+		Name:               "granted.txt",
+		SHA1:               writeBlob(t, "granted"),
+		DownloadsRemaining: allowedDownloads,
+		UnlimitedDownloads: unlimited,
+		UnlimitedTime:      true,
+	})
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "recipient_" + helper.GenerateRandomString(8) + "@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, id, []int{recipientId}, 1, granted)
+	grants := database.GetShareGrants(models.ShareResourceFile, id)
+	test.IsEqualInt(t, len(grants), 1)
+	return grants[0]
+}
+
+// TestGrantAllowanceUnlimitedGrantResolvesToTheOwnersLimit is the case Ming reported: a file
+// limited to one download, shared with someone, showing "Unlimited" as their budget.
+func TestGrantAllowanceUnlimitedGrantResolvesToTheOwnersLimit(t *testing.T) {
+	grant := saveGrantedFile(t, 1, false, 0)
+	test.IsEqualInt(t, GrantAllowanceOf(grant), 1)
+}
+
+// TestGrantAllowanceOwnerMayNarrow: a grant below the owner's limit is the owner's own decision
+// and stands.
+func TestGrantAllowanceOwnerMayNarrow(t *testing.T) {
+	grant := saveGrantedFile(t, 5, false, 2)
+	test.IsEqualInt(t, GrantAllowanceOf(grant), 2)
+}
+
+// TestGrantAllowanceOwnerMayNotWiden: a grant above the owner's limit is capped at it.
+func TestGrantAllowanceOwnerMayNotWiden(t *testing.T) {
+	grant := saveGrantedFile(t, 2, false, 5)
+	test.IsEqualInt(t, GrantAllowanceOf(grant), 2)
+}
+
+// TestGrantAllowanceUnlimitedFileStaysUnlimited: there is no limit to inherit, so "no limit of my
+// own" really is no limit.
+func TestGrantAllowanceUnlimitedFileStaysUnlimited(t *testing.T) {
+	grant := saveGrantedFile(t, 0, true, 0)
+	test.IsEqualInt(t, GrantAllowanceOf(grant), 0)
+}
+
+// TestGrantAllowanceFollowsALaterChangeToTheOwnersLimit pins the snapshot-versus-live decision.
+// The allowance is resolved on every read and every download, not written into the grant row when
+// it is made, so an owner who lowers a file's limit afterwards - through PUT /api/files/modify or
+// PUT /api/folder/modify - lowers what an already-granted recipient may still take. A snapshot
+// would have left the recipient holding a budget the owner has since withdrawn.
+func TestGrantAllowanceFollowsALaterChangeToTheOwnersLimit(t *testing.T) {
+	grant := saveGrantedFile(t, 5, false, 0)
+	test.IsEqualInt(t, GrantAllowanceOf(grant), 5)
+
+	file, ok := database.GetMetaDataById(grant.ResourceId)
+	test.IsEqualBool(t, ok, true)
+	file.DownloadsRemaining = 1
+	database.SaveMetaData(file)
+
+	test.IsEqualInt(t, GrantAllowanceOf(grant), 1)
+}
+
+// TestGrantAllowanceIsSpentAgainstTheOwnersLimit is the same rule at download time rather than at
+// display time. What the recipient has already taken is added back to what the file has left, so
+// the budget does not shrink as it is used: a recipient granted the whole of a five-download file
+// gets five, and the sixth is refused.
+func TestGrantAllowanceIsSpentAgainstTheOwnersLimit(t *testing.T) {
+	grant := saveGrantedFile(t, 5, false, 0)
+	for i := 0; i < 5; i++ {
+		allowed, ok := GrantAllowanceFor(models.ShareResourceFile, grant.ResourceId, grant.RecipientId)
+		test.IsEqualBool(t, ok, true)
+		granted, _ := database.AcquireShareGrantDownload(models.ShareResourceFile, grant.ResourceId,
+			grant.RecipientId, time.Now().Unix(), 0, allowed)
+		test.IsEqualBool(t, granted, true)
+		// The file's own allowance is spent alongside the grant's, as a real download would.
+		file, found := database.GetMetaDataById(grant.ResourceId)
+		test.IsEqualBool(t, found, true)
+		file.DownloadsRemaining = file.DownloadsRemaining - 1
+		database.SaveMetaData(file)
+	}
+
+	allowed, ok := GrantAllowanceFor(models.ShareResourceFile, grant.ResourceId, grant.RecipientId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, allowed, 5)
+	granted, _ := database.AcquireShareGrantDownload(models.ShareResourceFile, grant.ResourceId,
+		grant.RecipientId, time.Now().Unix(), 0, allowed)
+	test.IsEqualBool(t, granted, false)
+}
+
+// TestGrantAllowanceOnAFolderMemberComesFromTheFolder: a member's own allowance is inert, so the
+// folder's is what bounds a grant on it, exactly as it bounds access and disposal.
+func TestGrantAllowanceOnAFolderMemberComesFromTheFolder(t *testing.T) {
+	bundle := models.FileBundle{
+		Id:                 "grantbundle_" + helper.GenerateRandomString(8),
+		Name:               "grantbundle",
+		CreationDate:       time.Now().Unix(),
+		DownloadsRemaining: 2,
+		ExpireAt:           time.Now().Add(365 * 24 * time.Hour).Unix(),
+	}
+	database.SaveFileBundle(bundle)
+	t.Cleanup(func() { database.DeleteFileBundle(bundle) })
+
+	id := "grantmember_" + helper.GenerateRandomString(8)
+	database.SaveMetaData(models.File{
+		Id:                 id,
+		Name:               "member.txt",
+		SHA1:               writeBlob(t, "member"),
+		DownloadsRemaining: 99,
+		ExpireAt:           time.Now().Add(365 * 24 * time.Hour).Unix(),
+		BundleId:           bundle.Id,
+	})
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "member_" + helper.GenerateRandomString(8) + "@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, id, []int{recipientId}, 1, 0)
+
+	allowed, ok := GrantAllowanceFor(models.ShareResourceFile, id, recipientId)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, allowed, 2)
+}

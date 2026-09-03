@@ -66,18 +66,26 @@ type ShareGrant struct {
 	// makes the audit answer "who downloaded, how often" rather than only
 	// "the file was downloaded nine times".
 	DownloadsUsed int `json:"downloadsUsed" redis:"DownloadsUsed"`
-	// DownloadsAllowed caps that budget. Zero means unlimited.
+	// DownloadsAllowed is what the owner asked for when the grant was made, and zero means "no
+	// limit of my own". It is NOT the allowance that applies: the owner's own limit on the
+	// resource bounds a grant, so a recipient of a file limited to one download gets one
+	// download whatever this says, and the owner can change that limit after the grant was
+	// written. storage.GrantAllowanceOf resolves the effective value, and is the only thing that
+	// should be reported or enforced.
 	DownloadsAllowed int `json:"downloadsAllowed" redis:"DownloadsAllowed"`
 	// LastDownloadAt is zero until the recipient first downloads.
 	LastDownloadAt int64 `json:"lastDownloadAt" redis:"LastDownloadAt"`
 }
 
-// HasDownloadsLeft reports whether the recipient may still download. It is a
-// convenience for display only. Enforcement goes through the database, which
-// applies the same test atomically; deciding here and acting later would let
-// two concurrent requests both pass.
-func (g ShareGrant) HasDownloadsLeft() bool {
-	return g.DownloadsAllowed == 0 || g.DownloadsUsed < g.DownloadsAllowed
+// HasDownloadsLeft reports whether the recipient may still download, given the effective
+// allowance the caller resolved (storage.GrantAllowanceOf); 0 means unlimited. It takes that as a
+// parameter rather than reading DownloadsAllowed itself precisely so there is no second answer to
+// "how many downloads are left" - the field is the owner's request, not the applicable limit.
+//
+// A convenience for display only. Enforcement goes through the database, which applies the same
+// test atomically; deciding here and acting later would let two concurrent requests both pass.
+func (g ShareGrant) HasDownloadsLeft(allowed int) bool {
+	return allowed == 0 || g.DownloadsUsed < allowed
 }
 
 // ShareLoginToken is the magic link mailed to one recipient for one resource.
