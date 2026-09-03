@@ -665,6 +665,18 @@ func LogFolderCreate(bundle models.FileBundle, user models.User) {
 	})
 }
 
+// LogFolderEdit adds a log entry when a folder was edited. Non-Blocking
+func LogFolderEdit(bundle models.FileBundle, user models.User) {
+	createLogEntry(categoryEdit, fmt.Sprintf("Folder %s edited by %s (user #%d)", bundle.Id, user.Name, user.Id), false)
+	appendAuditEntryAsync(AuditEntry{
+		Category: categoryEdit,
+		Action:   "folder.edited",
+		Outcome:  OutcomeSuccess,
+		BundleId: bundle.Id,
+		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
+	})
+}
+
 // LogFolderDeleteBatch adds log entries for a folder deletion and all of its member files as a
 // single durable batch. Fail-closed like LogDelete: every entry is fsync'd to durable local
 // storage before this returns, and the caller must not delete anything (the files and the folder

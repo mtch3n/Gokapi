@@ -322,6 +322,12 @@ var routes = []apiRoute{
 		RequestParser: &paramFolderDelete{},
 	},
 	{
+		Url:           "/folder/modify",
+		ApiPerm:       models.ApiPermEdit,
+		execution:     apiFolderModify,
+		RequestParser: &paramFolderModify{},
+	},
+	{
 		// /folder/{id}/sharekey - the ID sits in the middle of the URL, same as
 		// /files/{id}/sharekey (see paramFilesShareKey). Registered after every other exact
 		// /folder/* route so those are always tried first (see getRouting) - this one only ever
@@ -1177,6 +1183,46 @@ type paramFolderDelete struct {
 }
 
 func (p *paramFolderDelete) ProcessParameter(_ *http.Request) error {
+	return nil
+}
+
+// paramFolderModify is paramFilesModify for a folder: same header names, the same "absent header
+// leaves the field untouched" and "present header with a zero value means unlimited" conventions,
+// and the same explicit RemovePassword signal, so a caller that already knows how to edit a file's
+// own settings needs nothing new to learn. See paramFilesModify's comment for the password
+// reasoning, which applies here unchanged.
+//
+// Unlike paramFolderCreate, name is optional: a request that only changes the expiry must not have
+// to resend the name it is not touching. An empty value is not a rename to nothing - a folder can
+// never legitimately have an empty name (see models.FileBundle.DisplayName) - and is refused in
+// apiFolderModify.
+type paramFolderModify struct {
+	Id                 string `header:"id" required:"true"`
+	Name               string `header:"name" supportBase64:"true"`
+	AllowedDownloads   int    `header:"allowedDownloads"`
+	ExpiryTimestamp    int64  `header:"expiryTimestamp"`
+	Password           string `header:"password" supportBase64:"true"`
+	GeneratedPassword  bool   `header:"generatedpassword"`
+	RemovePassword     bool   `header:"removePassword"`
+	UnlimitedDownloads bool
+	UnlimitedExpiry    bool
+	IsNameSet          bool
+	IsPasswordSet      bool
+	foundHeaders       map[string]bool
+}
+
+func (p *paramFolderModify) ProcessParameter(_ *http.Request) error {
+	if p.foundHeaders["allowedDownloads"] && p.AllowedDownloads == 0 {
+		p.UnlimitedDownloads = true
+	}
+	if p.foundHeaders["expiryTimestamp"] && p.ExpiryTimestamp == 0 {
+		p.UnlimitedExpiry = true
+	}
+	p.IsNameSet = p.foundHeaders["name"]
+	p.IsPasswordSet = p.foundHeaders["password"]
+	if p.IsPasswordSet && p.RemovePassword {
+		return errors.New("cannot set both password and removePassword")
+	}
 	return nil
 }
 

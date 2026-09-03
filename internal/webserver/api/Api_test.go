@@ -4769,6 +4769,409 @@ func testFolderDeleteCall(t *testing.T, apiKey models.ApiKey, folderId string, r
 	}
 }
 
+// TestFolderModify covers PUT /folder/modify changing each of a folder's settings on its own.
+// The folder owns the password, expiry and download allowance now (see models.FileBundle), so
+// this is the only way to change them after creation - PUT /files/modify refuses them on a member
+// file and points here instead (see apiEditFile).
+func TestFolderModify(t *testing.T) {
+	apiKey := testAuthorisation(t, "/folder/modify", models.ApiPermEdit)
+
+	// Test missing id header
+	w, r := getRecorder("/folder/modify", apiKey.Id, []test.Header{})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
+
+	// Test a folder id that does not exist
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{{Name: "id", Value: "invalid"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"Folder does not exist","ErrorCode":5}`)
+
+	folder := filebundle.Create("TestFolderModify_Folder", idUser)
+
+	// A rename touches nothing else
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "name", Value: "TestFolderModify_Renamed"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	var response struct {
+		Result     string
+		FileBundle struct {
+			Id   string
+			Name string
+		}
+	}
+	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
+	test.IsEqualString(t, response.Result, "OK")
+	test.IsEqualString(t, response.FileBundle.Id, folder.Id)
+	test.IsEqualString(t, response.FileBundle.Name, "TestFolderModify_Renamed")
+
+	stored, ok := database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, "TestFolderModify_Renamed")
+	test.IsEqualBool(t, stored.UnlimitedDownloads, true)
+	test.IsEqualBool(t, stored.UnlimitedTime, true)
+	test.IsEqualString(t, stored.PasswordHash, "")
+
+	// A base64 encoded name is decoded before it is stored, same as on /folder/create
+	nameUtf8 := "TestFolderModify_UTF8_éàü"
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "name", Value: "base64:" + base64.StdEncoding.EncodeToString([]byte(nameUtf8))},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, nameUtf8)
+
+	// The download allowance changes on its own, leaving the name and the expiry as they were
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "allowedDownloads", Value: "5"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 5)
+	test.IsEqualBool(t, stored.UnlimitedDownloads, false)
+	test.IsEqualString(t, stored.Name, nameUtf8)
+	test.IsEqualBool(t, stored.UnlimitedTime, true)
+
+	// The expiry changes on its own, leaving the allowance just set as it was
+	expiry := time.Now().Add(48 * time.Hour).Unix()
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "expiryTimestamp", Value: strconv.FormatInt(expiry, 10)},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt64(t, stored.ExpireAt, expiry)
+	test.IsEqualBool(t, stored.UnlimitedTime, false)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 5)
+	test.IsEqualBool(t, stored.UnlimitedDownloads, false)
+
+	// A zero value on either header means unlimited, exactly as on /files/modify
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "allowedDownloads", Value: "0"},
+		{Name: "expiryTimestamp", Value: "0"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.UnlimitedDownloads, true)
+	test.IsEqualBool(t, stored.UnlimitedTime, true)
+
+	// A request with no settings header at all changes nothing
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{{Name: "id", Value: folder.Id}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, nameUtf8)
+	test.IsEqualBool(t, stored.UnlimitedDownloads, true)
+	test.IsEqualBool(t, stored.UnlimitedTime, true)
+}
+
+// TestFolderModifyPassword covers setting, changing and removing a folder's own password. The
+// stored share key must always belong to the password currently in force, and any folder password
+// cookie handed out for the old one must stop working - see writeFolderPwCookie in Webserver.go.
+func TestFolderModifyPassword(t *testing.T) {
+	withMasterKey(t)
+	withStoreShareKeys(t, true)
+
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermEdit)
+	database.SaveApiKey(apiKey)
+
+	folder := filebundle.Create("TestFolderModifyPassword_Folder", idUser)
+
+	// Setting a password on a previously open folder
+	w, r := getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "password", Value: "AValidFolderPw1!"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok := database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	firstHash := stored.PasswordHash
+	test.IsEqualBool(t, firstHash != "", true)
+	shareKey, ok := storage.GetBundleSharePassword(stored)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, shareKey, "AValidFolderPw1!")
+
+	// Changing the password replaces the stored share key with the new one and invalidates every
+	// cookie issued for the old one
+	oldToken := downloadPasswordToken.Generate("bundle:" + folder.Id)
+	test.IsEqualBool(t, downloadPasswordToken.IsValid(oldToken, "bundle:"+folder.Id), true)
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "password", Value: "AnotherFolderPw2!"},
+		{Name: "generatedpassword", Value: "true"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.IsEqualBool(t, downloadPasswordToken.IsValid(oldToken, "bundle:"+folder.Id), false)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.PasswordHash != firstHash, true)
+	test.IsEqualBool(t, stored.PasswordHash != "", true)
+	shareKey, ok = storage.GetBundleSharePassword(stored)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, shareKey, "AnotherFolderPw2!")
+
+	// An unrelated edit leaves the password alone: an absent password header is never a removal
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "allowedDownloads", Value: "2"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.PasswordHash != "", true)
+	shareKey, ok = storage.GetBundleSharePassword(stored)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, shareKey, "AnotherFolderPw2!")
+
+	// Removing the password drops the stored share key with it
+	removedToken := downloadPasswordToken.Generate("bundle:" + folder.Id)
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "removePassword", Value: "true"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	test.IsEqualBool(t, downloadPasswordToken.IsValid(removedToken, "bundle:"+folder.Id), false)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.PasswordHash, "")
+	test.IsEqualInt(t, len(stored.EncryptedSharePassword), 0)
+	_, ok = storage.GetBundleSharePassword(stored)
+	test.IsEqualBool(t, ok, false)
+}
+
+// TestFolderModifyRejectsInvalidInput collects the validation failures, each of which must leave
+// the folder exactly as it was rather than applying a partial update.
+func TestFolderModifyRejectsInvalidInput(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermEdit)
+	database.SaveApiKey(apiKey)
+
+	folder := filebundle.Create("TestFolderModifyInvalid_Folder", idUser)
+	folder.PasswordHash = "existinghash"
+	database.SaveFileBundle(folder)
+
+	// An empty name is not a rename to nothing
+	w, r := getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "name", Value: ""},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"Folder name must not be empty","ErrorCode":4}`)
+
+	// A name longer than the 256 character cap /folder/create enforces
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "name", Value: strings.Repeat("a", 257)},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"Folder name is too long (maximum 256 characters)","ErrorCode":4}`)
+
+	// A password below the server minimum, and one that is whitespace only
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "name", Value: "TestFolderModifyInvalid_Renamed"},
+		{Name: "password", Value: "short1"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "password", Value: "   "},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+
+	// Setting and removing a password in one request is contradictory
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "password", Value: "AValidFolderPw1!"},
+		{Name: "removePassword", Value: "true"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 400)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"cannot set both password and removePassword","ErrorCode":4}`)
+
+	// None of the above may have changed anything, including the rename that shared a request
+	// with the rejected password
+	stored, ok := database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, "TestFolderModifyInvalid_Folder")
+	test.IsEqualString(t, stored.PasswordHash, "existinghash")
+}
+
+// TestFolderModifyClampsExpiry proves the folder's expiry is held to GOKAPI_MAX_EXPIRY, the same
+// way apiEditFile holds a single file's ExpireAt to it - this endpoint writes the expiry straight
+// onto the bundle rather than going through an upload config, so nothing else would enforce it.
+func TestFolderModifyClampsExpiry(t *testing.T) {
+	os.Setenv("GOKAPI_MAX_EXPIRY", "7d")
+	defer os.Unsetenv("GOKAPI_MAX_EXPIRY")
+	latest := time.Now().Add(7 * 24 * time.Hour).Unix()
+
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermEdit)
+	database.SaveApiKey(apiKey)
+
+	folder := filebundle.Create("TestFolderModifyClamp_Folder", idUser)
+
+	// A far future expiry is clamped down to the maximum
+	w, r := getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "expiryTimestamp", Value: strconv.FormatInt(time.Now().Add(365*24*time.Hour).Unix(), 10)},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok := database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.UnlimitedTime, false)
+	test.IsEqualBool(t, stored.ExpireAt <= latest+2 && stored.ExpireAt >= latest-2, true)
+
+	// An unlimited (0) expiry is likewise refused and pinned to the maximum
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "expiryTimestamp", Value: "0"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folder.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, stored.UnlimitedTime, false)
+	test.IsEqualBool(t, stored.ExpireAt <= latest+2 && stored.ExpireAt >= latest-2, true)
+}
+
+// TestFolderModifyExtendsMemberRetention guards the one place a member's own now-inert ExpireAt
+// still decides something: storage.CleanUp disposes of a member's content on it, and a disposed
+// member stops counting as a member. Extending a folder past its members' own expiry would
+// otherwise leave an unexpired folder that pubApiFolder refuses for having nothing in it.
+func TestFolderModifyExtendsMemberRetention(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermEdit)
+	database.SaveApiKey(apiKey)
+
+	folder := filebundle.Create("TestFolderModifyRetention_Folder", idUser)
+	shortLived := time.Now().Add(time.Hour).Unix()
+	database.SaveMetaData(models.File{
+		Id:                 "foldermodifymember1",
+		Name:               "foldermodifymember1.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           shortLived,
+		DownloadsRemaining: 1,
+		UserId:             idUser,
+		BundleId:           folder.Id,
+	})
+	database.SaveMetaData(models.File{
+		Id:                 "foldermodifymember2",
+		Name:               "foldermodifymember2.dat",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		UnlimitedTime:      true,
+		DownloadsRemaining: 1,
+		UserId:             idUser,
+		BundleId:           folder.Id,
+	})
+	t.Cleanup(func() {
+		database.DeleteMetaData("foldermodifymember1")
+		database.DeleteMetaData("foldermodifymember2")
+	})
+
+	extended := time.Now().Add(72 * time.Hour).Unix()
+	w, r := getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "expiryTimestamp", Value: strconv.FormatInt(extended, 10)},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	member, ok := database.GetMetaDataById("foldermodifymember1")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt64(t, member.ExpireAt, extended)
+	// A member that never expires on its own is left exactly as it was
+	member, ok = database.GetMetaDataById("foldermodifymember2")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, member.UnlimitedTime, true)
+
+	// Shortening the folder does not cut a member's retention short - the folder's own gate
+	// already refuses an expired folder, and the owner's file list still lists the member
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "expiryTimestamp", Value: strconv.FormatInt(shortLived, 10)},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	member, ok = database.GetMetaDataById("foldermodifymember1")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt64(t, member.ExpireAt, extended)
+
+	// A folder given an unlimited lifetime hands that on to every member that had one of its own
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folder.Id},
+		{Name: "expiryTimestamp", Value: "0"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	member, ok = database.GetMetaDataById("foldermodifymember1")
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, member.UnlimitedTime, true)
+}
+
+// TestFolderModifyPermission is the authz test for PUT /folder/modify: another user's folder is
+// refused unless the caller holds the edit-other-uploads permission, matching what apiEditFile
+// requires for another user's file.
+func TestFolderModifyPermission(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermEdit)
+	database.SaveApiKey(apiKey)
+
+	folderOther := filebundle.Create("TestFolderModifyPermission_OtherUserFolder", idSuperAdmin)
+
+	w, r := getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folderOther.Id},
+		{Name: "name", Value: "TestFolderModifyPermission_Renamed"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 401)
+	test.ResponseBodyIs(t, w, `{"Result":"error","ErrorMessage":"No permission to edit this folder","ErrorCode":6}`)
+	stored, ok := database.GetFileBundle(folderOther.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, "TestFolderModifyPermission_OtherUserFolder")
+
+	grantUserPermission(t, idUser, models.UserPermEditOtherUploads)
+	defer removeUserPermission(t, idUser, models.UserPermEditOtherUploads)
+
+	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
+		{Name: "id", Value: folderOther.Id},
+		{Name: "name", Value: "TestFolderModifyPermission_Renamed"},
+	})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+	stored, ok = database.GetFileBundle(folderOther.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, "TestFolderModifyPermission_Renamed")
+}
+
 // TestChunkCompleteBundleOwnershipRejected tests that /api/chunk/complete rejects
 // attempts to upload to a bundle owned by a different user. The bundleid header
 // must belong to the authenticated user.
