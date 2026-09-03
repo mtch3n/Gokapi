@@ -1420,8 +1420,22 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	// An identity-restricted file exchanges a token in the URL for a cookie
 	// here, so a recipient arriving from the mailed link is recognised before
 	// the page has made any other request.
-	isAuthorisedRecipient := accessMode != models.AccessModeIdentity ||
-		recipientFor(w, r, models.ShareResourceFile, keyId) != 0
+	isAuthorisedRecipient := true
+	if accessMode == models.AccessModeIdentity {
+		recipientId := recipientFor(w, r, models.ShareResourceFile, keyId)
+		isAuthorisedRecipient = recipientId != 0
+		// A recipient who has spent their own allowance, and whose download window has closed
+		// with it, is finished with this file: they are no longer entitled to its name, its size
+		// or even its existence, however much budget the other recipients still have. Refused as
+		// "not found", exactly as an unknown id is - never as "forbidden" - and through
+		// respondPubApiNotFound so the rate limiter's delay applies too, or a real-but-finished
+		// id would answer faster than an invented one and say so.
+		if isAuthorisedRecipient && shareaccess.IsExhausted(models.ShareResourceFile, keyId,
+			recipientId, int64(storage.LeewayFor(file).Seconds())) {
+			respondPubApiNotFound(w, r)
+			return
+		}
+	}
 	// A file that is a member of a restricted bundle carries no grant of its own; the
 	// bundle's recipient ACL must cascade here too, or holding the member's individual file id
 	// would bypass the bundle restriction and leak its metadata. This is additive to the

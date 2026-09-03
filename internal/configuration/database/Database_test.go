@@ -830,12 +830,12 @@ func TestShareGrantDownloadCounter(t *testing.T) {
 		for _, grant := range GetShareGrants(file, "res-count") {
 			if grant.RecipientId == carol {
 				test.IsEqualInt(t, grant.DownloadsUsed, 2)
-				test.IsEqualBool(t, grant.HasDownloadsLeft(), false)
+				test.IsEqualBool(t, grant.IsExhausted(time.Now().Unix(), 0), true)
 				test.IsEqualBool(t, grant.LastDownloadAt > 0, true)
 			}
 			if grant.RecipientId == dave {
 				test.IsEqualInt(t, grant.DownloadsUsed, 1)
-				test.IsEqualBool(t, grant.HasDownloadsLeft(), true)
+				test.IsEqualBool(t, grant.IsExhausted(time.Now().Unix(), 0), false)
 			}
 		}
 

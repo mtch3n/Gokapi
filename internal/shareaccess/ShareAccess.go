@@ -312,6 +312,24 @@ func ConsumeDownload(resourceType int, resourceId string, recipientId int, leewa
 	return ErrDownloadsExhausted
 }
 
+// IsExhausted reports whether this recipient has finished with the resource:
+// their own allowance is spent and the download window that spending it opened
+// has closed, so they may no longer see it at all. leeway is how long that
+// window stays open, in seconds; the caller resolves it for the resource in
+// question (see storage.LeewayFor), the same way ConsumeDownload takes it.
+//
+// A recipient holding no grant at all is not exhausted - that is a membership
+// question, which HasShareGrant answers. This is only about someone who was
+// given access and has used it up.
+func IsExhausted(resourceType int, resourceId string, recipientId int, leeway int64) bool {
+	for _, grant := range database.GetShareGrants(resourceType, resourceId) {
+		if grant.RecipientId == recipientId {
+			return grant.IsExhausted(time.Now().Unix(), leeway)
+		}
+	}
+	return false
+}
+
 // normaliseEmails lower-cases, trims, validates and de-duplicates an address
 // list. A malformed address is rejected outright rather than silently dropped,
 // so an uploader who mistypes is told, instead of believing a share went to
