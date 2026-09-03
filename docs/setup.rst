@@ -143,7 +143,7 @@ By default Gokapi uses SQLite, which is fine for most deployments. Use Redis if:
 * you expect high download/upload traffic, or
 * your SQLite database lives on a slow disk (e.g. a network share or SD card).
 
-Use PostgreSQL if you already operate a PostgreSQL server, or if Gokapi runs in a container with no persistent local storage.
+Use PostgreSQL if you already operate a PostgreSQL server, or if Gokapi runs in a container with no persistent local storage. PostgreSQL 14 or newer is required.
 
 Settings:
 

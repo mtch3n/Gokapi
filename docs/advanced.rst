@@ -192,7 +192,7 @@ Databases
 
 By default, Gokapi uses an SQLite database for data storage, which should suffice for most use cases. However if you are using a slow media for storing the database or expect to have a lot of files uploaded or downloaded it is highly recommended to use Redis instead.
 
-PostgreSQL is also supported. It is a good fit if you already run a PostgreSQL server, or if you deploy Gokapi as a container without persistent local storage for an SQLite file.
+PostgreSQL is also supported and requires **PostgreSQL 14 or newer**. It is a good fit if you already run a PostgreSQL server, or if you deploy Gokapi as a container without persistent local storage for an SQLite file.
 
 
 

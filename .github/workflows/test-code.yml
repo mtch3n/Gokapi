@@ -8,6 +8,27 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # Oldest PostgreSQL release still supported upstream. The provider tests are
+    # skipped when GOKAPI_TEST_POSTGRES_URL is unset, so without this service they
+    # would never run.
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: gokapi
+          POSTGRES_PASSWORD: gokapi
+          POSTGRES_DB: gokapi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gokapi -d gokapi_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      GOKAPI_TEST_POSTGRES_URL: "postgres://gokapi:gokapi@127.0.0.1:5432/gokapi_test?sslmode=disable"
+
     steps:
       - name: checkout code
         uses: actions/checkout@v4
