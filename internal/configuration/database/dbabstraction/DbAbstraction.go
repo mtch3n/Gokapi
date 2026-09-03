@@ -139,6 +139,12 @@ type Database interface {
 	SetShareGrants(resourceType int, resourceId string, recipientIds []int, grantedBy int, downloadsAllowed int)
 	// GetShareGrants returns every grant on a resource.
 	GetShareGrants(resourceType int, resourceId string) []models.ShareGrant
+	// GetAllShareGrants returns every grant in the database. It exists for the
+	// callers that resolve the access axes of every file in one pass - the
+	// owner's file list, the CleanUp sweep - which would otherwise read the
+	// grant table once per file, the same read amplification GetAllFileBundles
+	// removed for folders.
+	GetAllShareGrants() []models.ShareGrant
 	// HasShareGrant reports whether this recipient may reach this resource.
 	HasShareGrant(resourceType int, resourceId string, recipientId int) bool
 	// GetShareGrantsForRecipient returns every grant the recipient holds.

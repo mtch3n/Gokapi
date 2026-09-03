@@ -2292,16 +2292,13 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 	grantedByNames := make(map[int]string)
 
 	for _, grant := range database.GetShareGrantsForRecipient(recipient.Id) {
-		// A grant that has spent its allowance is over, and the resource behind it refuses the
-		// download. Listing it anyway offered an Open link that could only fail - see
-		// models.ShareGrant.HasDownloadsLeft, which exists for exactly this display.
-		if !grant.HasDownloadsLeft() {
-			continue
-		}
-
 		var name string
 		var expiresAt int64
 		var size int64
+		// grantLeeway is how long a download window stays open for this resource, which is what
+		// decides when a recipient who has spent their allowance actually stops seeing it - see
+		// the filter below. A secret has none, so it leaves the inbox the moment it is read.
+		grantLeeway := leeway
 
 		switch grant.ResourceType {
 		case models.ShareResourceFile:
@@ -2312,13 +2309,14 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			name = file.Name
 			expiresAt = shareExpiry(file.UnlimitedTime, file.ExpireAt)
 			size = file.SizeBytes
+			grantLeeway = int64(storage.LeewayFor(file).Seconds())
 		case models.ShareResourceBundle:
 			bundle, ok := database.GetFileBundle(grant.ResourceId)
-			// A folder is the unit of sharing, so its own expiry and allowance decide whether
-			// there is anything left to open - the same test pubApiFolder applies. Without this
-			// an exhausted or expired folder stayed listed alongside the files, which are
-			// filtered just below.
-			if !ok || !bundle.IsAvailable(timeNow, leeway) {
+			// A folder is the unit of sharing, so the expiry and allowance governing it decide
+			// whether there is anything left to open - the same test pubApiFolder applies.
+			// Without this an exhausted or expired folder stayed listed alongside the files,
+			// which are filtered just below.
+			if !ok || !storage.IsAvailableBundle(bundle, timeNow) {
 				continue
 			}
 			name = bundle.DisplayName()
@@ -2331,6 +2329,15 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			name = fileRequest.DisplayName()
 			expiresAt = fileRequest.Expiry
 		default:
+			continue
+		}
+
+		// A recipient who has spent their own allowance is finished with this resource and stops
+		// seeing it entirely, while every other recipient's own budget carries on. Listing it
+		// anyway offered an Open link that could only fail - see models.ShareGrant.IsExhausted,
+		// which is the same rule the download itself is refused by, window included: a broken
+		// transfer can still be retried while that window is open, so the row survives with it.
+		if grant.IsExhausted(timeNow, grantLeeway) {
 			continue
 		}
 

@@ -100,6 +100,14 @@ type DownloadAccess struct {
 	UnlimitedDownloads bool
 	WindowOpenedAt     int64
 	Leeway             int64
+	// SpendsOwnCounter is true when spending one download here means decrementing the resource's
+	// own stored counter - the file's DownloadsRemaining, the folder's. It is false when another
+	// counter governs: the folder a file belongs to, or the per-recipient grants of a share
+	// restricted to named recipients, in which case whoever gated the request has already spent
+	// that counter and the resource's own must be left alone. Which counter it is is
+	// storage.DownloadAccessOf's decision, exactly like the axes above, so that no caller has to
+	// work it out for itself.
+	SpendsOwnCounter bool
 }
 
 // IsExpired reports whether the expiry timestamp has passed.
@@ -114,6 +122,44 @@ func (a DownloadAccess) IsExhausted(timeNow int64) bool {
 	return a.DownloadsRemaining < 1 && !a.UnlimitedDownloads && a.WindowOpenedAt+a.Leeway <= timeNow
 }
 
+// WithShareGrants replaces the download axes with the ones the resource's recipient grants
+// impose, keeping its expiry and its window length. It is what makes a recipient list supersede
+// the resource's own download allowance, exactly as AccessMode above makes it supersede the
+// passcode, and for the same reason: access is already bound to an identity, so metering it a
+// second time against a counter the recipients share buys nothing and locks out everyone after
+// the first.
+//
+// The owner sets one number and it is EACH recipient's budget rather than a pool they share, so
+// what is left on the resource is the sum of what its recipients have left - a file limited to
+// three downloads, shared with three people, is nine downloads. Two consequences follow and both
+// are intended: the resource is not exhausted while any one recipient still has budget, however
+// many downloads have already happened in total, and a recipient who never collects keeps it
+// alive until it expires, which is the whole point of having shared it with them.
+//
+// WindowOpenedAt is the most recent window any recipient opened, so a resource is never disposed
+// of while somebody's broken transfer could still be retried - the same rule a resource without
+// recipients follows, with only the counter it reads differing.
+func (a DownloadAccess) WithShareGrants(grants []ShareGrant) DownloadAccess {
+	downloadsRemaining := 0
+	unlimitedDownloads := false
+	windowOpenedAt := int64(0)
+	for _, grant := range grants {
+		if grant.DownloadsAllowed == 0 {
+			unlimitedDownloads = true
+		} else if grant.DownloadsUsed < grant.DownloadsAllowed {
+			downloadsRemaining = downloadsRemaining + grant.DownloadsAllowed - grant.DownloadsUsed
+		}
+		if grant.LastDownloadAt > windowOpenedAt {
+			windowOpenedAt = grant.LastDownloadAt
+		}
+	}
+	a.DownloadsRemaining = downloadsRemaining
+	a.UnlimitedDownloads = unlimitedDownloads
+	a.WindowOpenedAt = windowOpenedAt
+	a.SpendsOwnCounter = false
+	return a
+}
+
 // DownloadAccess returns the axes governing this file itself. Only correct for a file that
 // belongs to no bundle - a member is governed by its folder instead, which is what
 // storage.DownloadAccessOf resolves.
@@ -125,6 +171,7 @@ func (f *File) DownloadAccess(leeway int64) DownloadAccess {
 		UnlimitedDownloads: f.UnlimitedDownloads,
 		WindowOpenedAt:     f.WindowOpenedAt,
 		Leeway:             leeway,
+		SpendsOwnCounter:   true,
 	}
 }
 

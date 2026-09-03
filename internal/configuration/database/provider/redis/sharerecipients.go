@@ -216,6 +216,26 @@ func (p DatabaseProvider) GetShareGrants(resourceType int, resourceId string) []
 	return result
 }
 
+// GetAllShareGrants returns every grant in the database, ordered by resource then recipient.
+func (p DatabaseProvider) GetAllShareGrants() []models.ShareGrant {
+	result := make([]models.ShareGrant, 0)
+	for _, values := range p.getAllHashesWithPrefix(prefixShareGrant) {
+		var grant models.ShareGrant
+		helper.Check(redigo.ScanStruct(values, &grant))
+		result = append(result, grant)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ResourceType != result[j].ResourceType {
+			return result[i].ResourceType < result[j].ResourceType
+		}
+		if result[i].ResourceId != result[j].ResourceId {
+			return result[i].ResourceId < result[j].ResourceId
+		}
+		return result[i].RecipientId < result[j].RecipientId
+	})
+	return result
+}
+
 // HasShareGrant reports whether this recipient may reach this resource. A
 // blocked recipient is refused even while the grant row survives, so that
 // blocking takes effect immediately.

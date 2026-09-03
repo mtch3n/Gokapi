@@ -1260,6 +1260,13 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
 		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
 		// recording on their own (PLAN.md), not just outright denials against a real file.
+		//
+		// A share whose recipients have every one of them spent their allowance is over, and is
+		// refused here rather than at the per-recipient check below, exactly as an expired one
+		// is. The recipient asking for it is attached first, or the last denial of a share's life
+		// would be the one entry in its trail with nobody's name on it. Costs nothing for an
+		// ordinary probe: with no token and no cookie, recipientFor answers from memory.
+		r = attachRecipient(r, recipientFor(w, r, models.ShareResourceFile, id))
 		if err := logging.LogDownloadDenied(models.File{Id: id}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
 			respondAuditWriteFailed(w)
 			return
@@ -1420,8 +1427,22 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	// An identity-restricted file exchanges a token in the URL for a cookie
 	// here, so a recipient arriving from the mailed link is recognised before
 	// the page has made any other request.
-	isAuthorisedRecipient := accessMode != models.AccessModeIdentity ||
-		recipientFor(w, r, models.ShareResourceFile, keyId) != 0
+	isAuthorisedRecipient := true
+	if accessMode == models.AccessModeIdentity {
+		recipientId := recipientFor(w, r, models.ShareResourceFile, keyId)
+		isAuthorisedRecipient = recipientId != 0
+		// A recipient who has spent their own allowance, and whose download window has closed
+		// with it, is finished with this file: they are no longer entitled to its name, its size
+		// or even its existence, however much budget the other recipients still have. Refused as
+		// "not found", exactly as an unknown id is - never as "forbidden" - and through
+		// respondPubApiNotFound so the rate limiter's delay applies too, or a real-but-finished
+		// id would answer faster than an invented one and say so.
+		if isAuthorisedRecipient && shareaccess.IsExhausted(models.ShareResourceFile, keyId,
+			recipientId, int64(storage.LeewayFor(file).Seconds())) {
+			respondPubApiNotFound(w, r)
+			return
+		}
+	}
 	// A file that is a member of a restricted bundle carries no grant of its own; the
 	// bundle's recipient ACL must cascade here too, or holding the member's individual file id
 	// would bypass the bundle restriction and leak its metadata. This is additive to the
@@ -1931,7 +1952,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// rather than leaking, through the 400 that resolution can produce, whether an id names a
 	// member of it - which also stops the answer depending on whether a CleanUp sweep has caught
 	// up with disposing the members of a folder that just became unavailable.
-	if !bundle.IsAvailable(time.Now().Unix(), int64(storage.DownloadLeeway().Seconds())) {
+	if !storage.IsAvailableBundle(bundle, time.Now().Unix()) {
 		respondPubApiNotFound(w, r)
 		return
 	}
@@ -2065,7 +2086,13 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 // serve, once the allowance is exhausted and that window has closed; always true for an unlimited
 // bundle.
 func consumeBundleDownload(bundle models.FileBundle) bool {
-	if bundle.UnlimitedDownloads {
+	// Which counter a visit spends is storage.DownloadAccessOfBundle's decision, not this
+	// function's: a folder restricted to named recipients is metered by their grants, and its own
+	// counter would otherwise cap all of them together at the number the owner meant each of them
+	// to have. There is nothing to spend here then, exactly as there is nothing to spend for a
+	// folder with no limit at all.
+	access := storage.DownloadAccessOfBundle(bundle)
+	if !access.SpendsOwnCounter || access.UnlimitedDownloads {
 		return true
 	}
 	granted, _ := database.AcquireBundleDownload(bundle.Id, time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
@@ -2108,13 +2135,13 @@ func bundleMembers(bundleId string, allFiles map[string]models.File) []models.Fi
 
 // bundleAvailability reports whether the bundle can currently be served at all: it has at least
 // one member (the requester's full, access-filtered membership), and the bundle itself - not any
-// member - is not expired and has not exhausted its own download allowance. See
-// models.FileBundle.IsAvailable and bundleMembers.
+// member - is not expired and has not exhausted the allowance governing it. See
+// storage.IsAvailableBundle and bundleMembers.
 func bundleAvailability(bundle models.FileBundle, members []models.File) bool {
 	if len(members) == 0 {
 		return false
 	}
-	return bundle.IsAvailable(time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
+	return storage.IsAvailableBundle(bundle, time.Now().Unix())
 }
 
 // isValidFolderPassword reports whether the folder's own password gate (see

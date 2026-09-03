@@ -468,6 +468,12 @@ func GetShareGrants(resourceType int, resourceId string) []models.ShareGrant {
 	return db.GetShareGrants(resourceType, resourceId)
 }
 
+// GetAllShareGrants returns every grant in the database, for the callers that resolve every
+// file's access axes in one pass rather than one resource at a time.
+func GetAllShareGrants() []models.ShareGrant {
+	return db.GetAllShareGrants()
+}
+
 // HasShareGrant reports whether this recipient may reach this resource.
 func HasShareGrant(resourceType int, resourceId string, recipientId int) bool {
 	return db.HasShareGrant(resourceType, resourceId, recipientId)

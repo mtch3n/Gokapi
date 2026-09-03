@@ -72,12 +72,31 @@ type ShareGrant struct {
 	LastDownloadAt int64 `json:"lastDownloadAt" redis:"LastDownloadAt"`
 }
 
-// HasDownloadsLeft reports whether the recipient may still download. It is a
-// convenience for display only. Enforcement goes through the database, which
-// applies the same test atomically; deciding here and acting later would let
-// two concurrent requests both pass.
-func (g ShareGrant) HasDownloadsLeft() bool {
-	return g.DownloadsAllowed == 0 || g.DownloadsUsed < g.DownloadsAllowed
+// IsExhausted reports whether this recipient is finished with the resource:
+// their own allowance is spent and the download window that spending it opened
+// has closed. leeway is how long that window stays open, in seconds, resolved
+// by the caller for the resource in question (see storage.LeewayFor) exactly as
+// shareaccess.ConsumeDownload takes it, so there is one rule and only the
+// window's length varies.
+//
+// It is the recipient-level twin of DownloadAccess.IsExhausted and defers to it
+// rather than restating the test, so that "may this recipient still see it" and
+// "may this resource still be served" can never drift apart.
+//
+// Exhaustion is strictly per recipient and revokes only that recipient: they
+// stop seeing the resource at all - in their inbox and in the public metadata
+// alike - while every other recipient's budget, and the resource's own
+// lifetime, are untouched. Enforcing a download still goes through the
+// database, which applies the same test atomically; deciding here and acting
+// later would let two concurrent requests both pass.
+func (g ShareGrant) IsExhausted(timeNow, leeway int64) bool {
+	access := DownloadAccess{
+		DownloadsRemaining: g.DownloadsAllowed - g.DownloadsUsed,
+		UnlimitedDownloads: g.DownloadsAllowed == 0,
+		WindowOpenedAt:     g.LastDownloadAt,
+		Leeway:             leeway,
+	}
+	return access.IsExhausted(timeNow)
 }
 
 // ShareLoginToken is the magic link mailed to one recipient for one resource.
