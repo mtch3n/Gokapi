@@ -1184,8 +1184,14 @@ func cleanExpiredFileRequests() {
 	}
 }
 
-// cleanInvalidBundles removes bundles older than 24 hours that have no live members left, every
-// member being either pending deletion or already disposed of.
+// cleanInvalidBundles removes bundles older than 24 hours that no file row refers to any more.
+//
+// A disposed member still has its row, and keeps its bundle alive with it. Metadata retention
+// deliberately outlives the content it describes, so a deleted file stays listed for its owner
+// (see disposeFile and GOKAPI_METADATA_RETENTION); deleting the folder as soon as its last
+// member was disposed of left those rows pointing at a bundle that no longer existed, and the
+// file list had nothing left to group them under. The bundle goes when the last member row is
+// purged, not when the last member's content is.
 func cleanInvalidBundles() {
 	bundles := database.GetAllFileBundles()
 	files := database.GetAllMetadata()
@@ -1194,14 +1200,14 @@ func cleanInvalidBundles() {
 		if !bundle.IsOlderThanGracePeriod() {
 			continue
 		}
-		hasValidMember := false
+		hasMember := false
 		for _, file := range files {
-			if file.BundleId == bundle.Id && !file.IsPendingForDeletion() && !file.IsDisposed() {
-				hasValidMember = true
+			if file.BundleId == bundle.Id {
+				hasMember = true
 				break
 			}
 		}
-		if !hasValidMember {
+		if !hasMember {
 			database.DeleteFileBundle(bundle)
 		}
 	}

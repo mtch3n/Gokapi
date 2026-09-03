@@ -1574,3 +1574,48 @@ func TestServeFilesAsZipSealedRefusesDownload(t *testing.T) {
 
 	test.IsEqualInt(t, w.Code, http.StatusServiceUnavailable)
 }
+
+func TestCleanUpKeepsBundleWithDisposedMember(t *testing.T) {
+	bundle := models.FileBundle{
+		Id:                 "cleanupbundlekeep",
+		Name:               "cleanupbundlekeep",
+		CreationDate:       time.Now().Unix() - models.FileBundleGracePeriod - 1,
+		UnlimitedTime:      true,
+		UnlimitedDownloads: true,
+	}
+	database.SaveFileBundle(bundle)
+	// A disposed member keeps its row, and that row is what keeps the bundle alive: the file
+	// list still shows the deleted file for the retention period and needs its folder to group
+	// it under.
+	database.SaveMetaData(models.File{
+		Id:                 "cleanupbundlekeepfile",
+		Name:               "cleanupbundlekeepfile.txt",
+		SHA1:               "cleanupbundlekeepfile",
+		BundleId:           bundle.Id,
+		DisposedAt:         time.Now().Unix() - 10,
+		DisposalReason:     models.DisposalReasonDownloaded,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	})
+
+	CleanUp(false)
+
+	_, ok := database.GetFileBundle(bundle.Id)
+	test.IsEqualBool(t, ok, true)
+}
+
+func TestCleanUpRemovesBundleWithoutMemberRows(t *testing.T) {
+	bundle := models.FileBundle{
+		Id:                 "cleanupbundledrop",
+		Name:               "cleanupbundledrop",
+		CreationDate:       time.Now().Unix() - models.FileBundleGracePeriod - 1,
+		UnlimitedTime:      true,
+		UnlimitedDownloads: true,
+	}
+	database.SaveFileBundle(bundle)
+
+	CleanUp(false)
+
+	_, ok := database.GetFileBundle(bundle.Id)
+	test.IsEqualBool(t, ok, false)
+}
