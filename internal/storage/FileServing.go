@@ -1503,6 +1503,13 @@ func (r DownloadAccessResolver) Of(file models.File) models.DownloadAccess {
 		r.grants[shareResourceKey{resourceType: resourceType, resourceId: resourceId}])
 }
 
+// OfBundle returns the axes governing this folder, the same answer DownloadAccessOfBundle gives,
+// against the grants this resolver already read.
+func (r DownloadAccessResolver) OfBundle(bundle models.FileBundle) models.DownloadAccess {
+	return downloadAccessOfBundle(bundle,
+		r.grants[shareResourceKey{resourceType: models.ShareResourceBundle, resourceId: bundle.Id}])
+}
+
 // governingBundle returns the folder this file is judged by, if it belongs to one.
 func governingBundle(file models.File) (models.FileBundle, bool) {
 	if file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
@@ -1547,6 +1554,7 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 		// here rather than by FileBundle.DownloadAccess, which answers the folder's own question
 		// and is where a folder visit reads that its counter IS the one to spend.
 		access.SpendsOwnCounter = false
+		access.Governing = models.AllowanceGoverningFolder
 	} else {
 		access = file.DownloadAccess(int64(LeewayFor(file).Seconds()))
 	}
@@ -1564,8 +1572,15 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 //
 // A folder is never a secret, so its window is always the configured leeway.
 func DownloadAccessOfBundle(bundle models.FileBundle) models.DownloadAccess {
+	return downloadAccessOfBundle(bundle, database.GetShareGrants(models.ShareResourceBundle, bundle.Id))
+}
+
+// downloadAccessOfBundle is the rule DownloadAccessOfBundle and DownloadAccessResolver.OfBundle
+// both answer from, taking the grants already in hand rather than reading them. The two exist
+// because one reads the grant table per folder and the other once for all of them; the rule they
+// apply must not be able to differ.
+func downloadAccessOfBundle(bundle models.FileBundle, grants []models.ShareGrant) models.DownloadAccess {
 	access := bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
-	grants := database.GetShareGrants(models.ShareResourceBundle, bundle.Id)
 	if len(grants) == 0 {
 		return access
 	}
