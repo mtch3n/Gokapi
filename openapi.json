@@ -2212,6 +2212,10 @@
                         },
                         "unlimiteddownloads": {
                           "type": "boolean"
+                        },
+                        "deletedat": {
+                          "type": "integer",
+                          "description": "Unix timestamp the folder was deleted by its owner, or 0 while it is live. A deleted folder keeps its entry, and its member files keep theirs, until the metadata retention period elapses and both are removed together. It can no longer be opened through its link."
                         }
                       }
                     }
@@ -2280,6 +2284,10 @@
                       "unlimiteddownloads": {
                         "type": "boolean"
                       },
+                      "deletedat": {
+                        "type": "integer",
+                        "description": "Unix timestamp the folder was deleted by its owner, or 0 while it is live. A deleted folder keeps its entry, and its member files keep theirs, until the metadata retention period elapses and both are removed together. It can no longer be opened through its link."
+                      },
                       "membercount": {
                         "type": "integer",
                         "description": "Number of member files this bundle still has rows for, including files pending deletion and files whose content has already been disposed of (expired or download allowance exhausted). Those rows remain in a file listing as history for the metadata retention period, with a status saying the content is gone, so the folder summarising them counts the same rows. This is the listing view and is NOT what a recipient would receive."
@@ -2310,7 +2318,7 @@
           "folder"
         ],
         "summary": "Deletes a file bundle/folder and all associated files",
-        "description": "This API call deletes a file bundle and all files associated with it. To delete a bundle of a different user, the user requires the user permission DELETE to execute this call. Requires API permission DELETE",
+        "description": "This API call deletes a file bundle and all files associated with it. The bundle and its member files remain listed as history, marked deleted, until GOKAPI_METADATA_RETENTION elapses and both are removed together; the folder can no longer be opened through its link from the moment it is deleted. To delete a bundle of a different user, the user requires the user permission DELETE to execute this call. Requires API permission DELETE",
         "operationId": "folderdelete",
         "security": [
           {
@@ -2470,6 +2478,10 @@
                         },
                         "unlimiteddownloads": {
                           "type": "boolean"
+                        },
+                        "deletedat": {
+                          "type": "integer",
+                          "description": "Unix timestamp the folder was deleted by its owner, or 0 while it is live. A deleted folder keeps its entry, and its member files keep theirs, until the metadata retention period elapses and both are removed together. It can no longer be opened through its link."
                         }
                       }
                     }

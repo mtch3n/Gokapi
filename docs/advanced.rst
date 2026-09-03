@@ -236,7 +236,11 @@ Available environment variables
 |                                     |                                                                                                                         |                 |                             |
 |                                     | the same reason as GOKAPI_MAX_EXPIRY: storage.CleanUp re-reads it from the environment on                               |                 |                             |
 |                                     |                                                                                                                         |                 |                             |
-|                                     | every sweep, so it must be present on every start.                                                                      |                 |                             |
+|                                     | every sweep, so it must be present on every start. A folder deleted by its owner is kept                                |                 |                             |
+|                                     |                                                                                                                         |                 |                             |
+|                                     | for the same window, so the members it held stay grouped under it, and is removed once the                              |                 |                             |
+|                                     |                                                                                                                         |                 |                             |
+|                                     | last of their records is.                                                                                               |                 |                             |
 +-------------------------------------+-------------------------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+
 | GOKAPI_MIN_FREE_SPACE               | Sets the minimum free space on the disk in MB for accepting an upload                                                   | No              | 400                         |
 +-------------------------------------+-------------------------------------------------------------------------------------------------------------------------+-----------------+-----------------------------+

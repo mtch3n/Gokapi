@@ -10,7 +10,8 @@ import (
 )
 
 const fileBundleColumns = `id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
-	PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt`
+	PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt,
+	DeletedAt`
 
 type schemaFileBundle struct {
 	Id                     string
@@ -24,6 +25,7 @@ type schemaFileBundle struct {
 	DownloadsRemaining     int
 	UnlimitedDownloads     bool
 	WindowOpenedAt         int64
+	DeletedAt              int64
 }
 
 func (s schemaFileBundle) toFileBundle() models.FileBundle {
@@ -40,6 +42,7 @@ func (s schemaFileBundle) toFileBundle() models.FileBundle {
 		DownloadsRemaining:     s.DownloadsRemaining,
 		UnlimitedDownloads:     s.UnlimitedDownloads,
 		WindowOpenedAt:         s.WindowOpenedAt,
+		DeletedAt:              s.DeletedAt,
 	}
 }
 
@@ -52,7 +55,7 @@ func (p DatabaseProvider) GetFileBundle(id string) (models.FileBundle, bool) {
 	row := p.queryRow("SELECT "+fileBundleColumns+" FROM FileBundles WHERE id = $1", id)
 	err := row.Scan(&rowResult.Id, &rowResult.NameEncrypted, &rowResult.UserId, &rowResult.CreationDate, &rowResult.EncryptedSharePassword,
 		&rowResult.PasswordHash, &rowResult.ExpireAt, &rowResult.UnlimitedTime, &rowResult.DownloadsRemaining, &rowResult.UnlimitedDownloads,
-		&rowResult.WindowOpenedAt)
+		&rowResult.WindowOpenedAt, &rowResult.DeletedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return models.FileBundle{}, false
@@ -75,7 +78,7 @@ func (p DatabaseProvider) GetAllFileBundles() []models.FileBundle {
 		rowData := schemaFileBundle{}
 		err = rows.Scan(&rowData.Id, &rowData.NameEncrypted, &rowData.UserId, &rowData.CreationDate, &rowData.EncryptedSharePassword,
 			&rowData.PasswordHash, &rowData.ExpireAt, &rowData.UnlimitedTime, &rowData.DownloadsRemaining, &rowData.UnlimitedDownloads,
-			&rowData.WindowOpenedAt)
+			&rowData.WindowOpenedAt, &rowData.DeletedAt)
 		helper.Check(err)
 		result = append(result, rowData.toFileBundle())
 	}
@@ -99,20 +102,23 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 		DownloadsRemaining:     bundle.DownloadsRemaining,
 		UnlimitedDownloads:     bundle.UnlimitedDownloads,
 		WindowOpenedAt:         bundle.WindowOpenedAt,
+		DeletedAt:              bundle.DeletedAt,
 	}
 
 	_, err = p.exec(`INSERT INTO FileBundles
 					(id, NameEncrypted, userid, creationdate, EncryptedSharePassword,
-					 PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+					 PasswordHash, ExpireAt, UnlimitedTime, DownloadsRemaining, UnlimitedDownloads, WindowOpenedAt,
+					 DeletedAt)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 					ON CONFLICT (id) DO UPDATE SET NameEncrypted = EXCLUDED.NameEncrypted, userid = EXCLUDED.userid,
 						creationdate = EXCLUDED.creationdate, EncryptedSharePassword = EXCLUDED.EncryptedSharePassword,
 						PasswordHash = EXCLUDED.PasswordHash, ExpireAt = EXCLUDED.ExpireAt,
 						UnlimitedTime = EXCLUDED.UnlimitedTime, DownloadsRemaining = EXCLUDED.DownloadsRemaining,
-						UnlimitedDownloads = EXCLUDED.UnlimitedDownloads, WindowOpenedAt = EXCLUDED.WindowOpenedAt`,
+						UnlimitedDownloads = EXCLUDED.UnlimitedDownloads, WindowOpenedAt = EXCLUDED.WindowOpenedAt,
+						DeletedAt = EXCLUDED.DeletedAt`,
 		newData.Id, newData.NameEncrypted, newData.UserId, newData.CreationDate, newData.EncryptedSharePassword,
 		newData.PasswordHash, newData.ExpireAt, newData.UnlimitedTime, newData.DownloadsRemaining, newData.UnlimitedDownloads,
-		newData.WindowOpenedAt)
+		newData.WindowOpenedAt, newData.DeletedAt)
 	helper.Check(err)
 }
 

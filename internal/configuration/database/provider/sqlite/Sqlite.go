@@ -22,7 +22,7 @@ type DatabaseProvider struct {
 }
 
 // DatabaseSchemeVersion contains the version number to be expected from the current database. If lower, an upgrade will be performed
-const DatabaseSchemeVersion = 28
+const DatabaseSchemeVersion = 29
 
 // New returns an instance
 func New(dbConfig models.DbConnection) (DatabaseProvider, error) {
@@ -336,6 +336,17 @@ func (p DatabaseProvider) Upgrade(currentDbVersion int) {
 		}
 		if !p.columnExists("FileBundles", "WindowOpenedAt") {
 			err := p.rawSqlite(`ALTER TABLE FileBundles ADD COLUMN "WindowOpenedAt" INTEGER NOT NULL DEFAULT 0;`)
+			helper.Check(err)
+		}
+	}
+	// A folder its owner deleted outlives the deletion, so its members' retained rows still have
+	// something to be grouped under (see models.FileBundle.DeletedAt). Every row that already
+	// exists is a live folder by definition - it was never deleted, because a deleted one used to
+	// be removed outright - so 0 is correct with no backfill needed, the same reasoning as the v24
+	// step's DisposedAt. Same idempotency guard as the v17 step above.
+	if currentDbVersion < 29 {
+		if !p.columnExists("FileBundles", "DeletedAt") {
+			err := p.rawSqlite(`ALTER TABLE FileBundles ADD COLUMN "DeletedAt" INTEGER NOT NULL DEFAULT 0;`)
 			helper.Check(err)
 		}
 	}
@@ -742,6 +753,7 @@ func (p DatabaseProvider) createNewDatabase() error {
 			"DownloadsRemaining"	INTEGER NOT NULL DEFAULT 0,
 			"UnlimitedDownloads"	INTEGER NOT NULL DEFAULT 0,
 			"WindowOpenedAt"	INTEGER NOT NULL DEFAULT 0,
+			"DeletedAt"	INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY("id")
 		);`
 	err := p.rawSqlite(sqlStmt)

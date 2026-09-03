@@ -87,7 +87,9 @@ type Environment struct {
 	// plus "d" (day) and "w" (week) suffixes, e.g. "365d". Set to 0 to remove the record together
 	// with its content, which is the behaviour prior to this setting existing. Not persistent, for
 	// the same reason as GOKAPI_MAX_EXPIRY: storage.CleanUp re-reads it from the environment on
-	// every sweep, so it must be present on every start.
+	// every sweep, so it must be present on every start. A folder deleted by its owner is kept
+	// for the same window, so the members it held stay grouped under it, and is removed once the
+	// last of their records is.
 	MetadataRetention Duration `env:"METADATA_RETENTION" envDefault:"7d"`
 	// Sets how long a file request is kept, together with every file it received and its upload
 	// API key, once it has expired or been marked closed. Accepts a Go duration such as "12h",

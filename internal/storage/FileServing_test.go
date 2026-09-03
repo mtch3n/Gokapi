@@ -1581,7 +1581,7 @@ func TestCleanUpKeepsBundleWithDisposedMember(t *testing.T) {
 	bundle := models.FileBundle{
 		Id:                 "cleanupbundlekeep",
 		Name:               "cleanupbundlekeep",
-		CreationDate:       time.Now().Unix() - models.FileBundleGracePeriod - 1,
+		CreationDate:       time.Now().Add(-25 * time.Hour).Unix(),
 		UnlimitedTime:      true,
 		UnlimitedDownloads: true,
 	}
@@ -1610,7 +1610,7 @@ func TestCleanUpRemovesBundleWithoutMemberRows(t *testing.T) {
 	bundle := models.FileBundle{
 		Id:                 "cleanupbundledrop",
 		Name:               "cleanupbundledrop",
-		CreationDate:       time.Now().Unix() - models.FileBundleGracePeriod - 1,
+		CreationDate:       time.Now().Add(-25 * time.Hour).Unix(),
 		UnlimitedTime:      true,
 		UnlimitedDownloads: true,
 	}
@@ -1619,5 +1619,133 @@ func TestCleanUpRemovesBundleWithoutMemberRows(t *testing.T) {
 	CleanUp(false)
 
 	_, ok := database.GetFileBundle(bundle.Id)
+	test.IsEqualBool(t, ok, false)
+}
+
+// TestCleanUpKeepsYoungBundleWithoutMemberRows is what models.FileBundleGracePeriod exists for: a
+// folder whose first upload has not finished yet has no member row to be kept alive by, and must
+// not be collected out from under an upload still in flight.
+func TestCleanUpKeepsYoungBundleWithoutMemberRows(t *testing.T) {
+	bundle := models.FileBundle{
+		Id:                 "cleanupbundleyoung",
+		Name:               "cleanupbundleyoung",
+		CreationDate:       time.Now().Add(-time.Minute).Unix(),
+		UnlimitedTime:      true,
+		UnlimitedDownloads: true,
+	}
+	database.SaveFileBundle(bundle)
+	t.Cleanup(func() { database.DeleteFileBundle(bundle) })
+
+	CleanUp(false)
+
+	_, ok := database.GetFileBundle(bundle.Id)
+	test.IsEqualBool(t, ok, true)
+}
+
+// TestCleanUpRemovesYoungDeletedBundleWithoutMemberRows is the other side of that grace period. It
+// protects a folder that may still gain a member, which a folder its owner deleted never will, so
+// holding one would leave an empty folder in the listing for the rest of the day after everything
+// it was keeping had already gone.
+func TestCleanUpRemovesYoungDeletedBundleWithoutMemberRows(t *testing.T) {
+	bundle := models.FileBundle{
+		Id:                 "cleanupbundleyoungdeleted",
+		Name:               "cleanupbundleyoungdeleted",
+		CreationDate:       time.Now().Add(-time.Minute).Unix(),
+		UnlimitedTime:      true,
+		UnlimitedDownloads: true,
+		DeletedAt:          time.Now().Add(-30 * time.Second).Unix(),
+	}
+	database.SaveFileBundle(bundle)
+	t.Cleanup(func() { database.DeleteFileBundle(bundle) })
+
+	CleanUp(false)
+
+	_, ok := database.GetFileBundle(bundle.Id)
+	test.IsEqualBool(t, ok, false)
+}
+
+// TestCleanUpKeepsDeletedBundleWithMemberRow pins what the deletion mark does and does not do: it
+// exempts the folder from the creation grace period, not from the rule that a bundle stays for as
+// long as a file row names it. A deleted folder whose members are still listed as history must
+// still be there for them to be grouped under.
+func TestCleanUpKeepsDeletedBundleWithMemberRow(t *testing.T) {
+	bundle := models.FileBundle{
+		Id:                 "cleanupbundledeletedkeep",
+		Name:               "cleanupbundledeletedkeep",
+		CreationDate:       time.Now().Add(-time.Minute).Unix(),
+		UnlimitedTime:      true,
+		UnlimitedDownloads: true,
+		DeletedAt:          time.Now().Add(-30 * time.Second).Unix(),
+	}
+	// The member row goes in first: a folder marked deleted with nothing naming it yet is a folder
+	// with nothing keeping it, and a sweep running in the background would collect it - correctly -
+	// out from under the fixture.
+	database.SaveMetaData(models.File{
+		Id:                 "cleanupbundledeletedkeepfile",
+		Name:               "cleanupbundledeletedkeepfile.txt",
+		BundleId:           bundle.Id,
+		DisposedAt:         time.Now().Add(-30 * time.Second).Unix(),
+		DisposalReason:     models.DisposalReasonDeleted,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+	})
+	database.SaveFileBundle(bundle)
+	t.Cleanup(func() {
+		database.DeleteMetaData("cleanupbundledeletedkeepfile")
+		database.DeleteFileBundle(bundle)
+	})
+
+	CleanUp(false)
+
+	_, ok := database.GetFileBundle(bundle.Id)
+	test.IsEqualBool(t, ok, true)
+}
+
+// TestCleanUpConcurrentPassesCollectDeletedBundle drives the overlap cleanUpMutex exists for: a
+// manual delete starts a sweep in the background, so a caller that runs one itself has two passes
+// over the same rows. Unserialised, a slower pass working from a snapshot taken before the faster
+// one purged the member writes that record back, and a bundle is kept alive by exactly such a
+// record - so the folder is left behind by a pair of passes that either one alone would have
+// collected.
+func TestCleanUpConcurrentPassesCollectDeletedBundle(t *testing.T) {
+	bundle := models.FileBundle{
+		Id:                 "cleanupbundleconcurrent",
+		Name:               "cleanupbundleconcurrent",
+		CreationDate:       time.Now().Add(-time.Minute).Unix(),
+		UnlimitedTime:      true,
+		UnlimitedDownloads: true,
+		DeletedAt:          time.Now().Add(-time.Second).Unix(),
+	}
+	database.SaveFileBundle(bundle)
+	sha1 := "cleanupbundleconcurrent_blob"
+	err := os.WriteFile(configuration.Get().DataDir+"/"+sha1, []byte("concurrent"), 0600)
+	test.IsNil(t, err)
+	database.SaveMetaData(models.File{
+		Id:                 "cleanupbundleconcurrentfile",
+		Name:               "cleanupbundleconcurrentfile.txt",
+		SHA1:               sha1,
+		BundleId:           bundle.Id,
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		PendingDeletion:    time.Now().Add(-time.Hour).Unix(),
+	})
+	t.Cleanup(func() {
+		database.DeleteMetaData("cleanupbundleconcurrentfile")
+		database.DeleteFileBundle(bundle)
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			CleanUp(false)
+		}()
+	}
+	wg.Wait()
+
+	_, ok := database.GetMetaDataById("cleanupbundleconcurrentfile")
+	test.IsEqualBool(t, ok, false)
+	_, ok = database.GetFileBundle(bundle.Id)
 	test.IsEqualBool(t, ok, false)
 }

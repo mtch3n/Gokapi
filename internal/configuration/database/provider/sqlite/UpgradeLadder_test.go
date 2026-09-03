@@ -204,6 +204,7 @@ var schemaLadder = []schemaLadderStep{
 		ALTER TABLE FileBundles ADD COLUMN "UnlimitedDownloads" INTEGER NOT NULL DEFAULT 0;`},
 	{28, `ALTER TABLE FileMetaData ADD COLUMN "WindowOpenedAt" INTEGER NOT NULL DEFAULT 0;
 		ALTER TABLE FileBundles ADD COLUMN "WindowOpenedAt" INTEGER NOT NULL DEFAULT 0;`},
+	{29, `ALTER TABLE FileBundles ADD COLUMN "DeletedAt" INTEGER NOT NULL DEFAULT 0;`},
 }
 
 // The fixture rows every ladder database is seeded with. All of them predate the encrypted name
