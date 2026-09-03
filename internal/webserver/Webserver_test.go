@@ -3371,7 +3371,7 @@ func TestPublicApiConfig(t *testing.T) {
 // download page is told the policy; the uploader is not offered a control.
 func TestDownloadLeewayIsNotOnAuthenticatedConfig(t *testing.T) {
 	t.Parallel()
-	for _, url := range []string{"http://127.0.0.1:53843/api/info/config", "http://127.0.0.1:53843/api/features"} {
+	for _, url := range []string{urlIp + "/api/info/config", urlIp + "/api/features"} {
 		request, err := http.NewRequest("GET", url, nil)
 		test.IsNil(t, err)
 		request.Header.Set("apikey", "validkeyid7")
