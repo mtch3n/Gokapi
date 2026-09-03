@@ -149,9 +149,9 @@ func GetUploadCounts() map[int]int {
 	result := make(map[int]int)
 	timeNow := time.Now().Unix()
 	files := database.GetAllMetadata()
-	bundles := bundlesById()
+	resolver := NewDownloadAccessResolver()
 	for _, file := range files {
-		access := downloadAccessIn(file, bundles)
+		access := resolver.Of(file)
 		if !access.IsExpired(timeNow) && !access.IsExhausted(timeNow) {
 			result[file.UserId] = result[file.UserId] + 1
 		}
@@ -1054,7 +1054,7 @@ func CleanUp(periodic bool) {
 	retention := time.Duration(environment.New().MetadataRetention)
 
 	allFiles := database.GetAllMetadata()
-	bundles := bundlesById()
+	resolver := NewDownloadAccessResolver()
 	shaRefCount := make(map[string]int, len(allFiles))
 	for _, file := range allFiles {
 		if !file.IsDisposed() {
@@ -1077,10 +1077,10 @@ func CleanUp(periodic bool) {
 			// content is already gone, so there is nothing to check.
 		case !FileExists(element, dataDir):
 			deleteFileHard(element, key, "stored object missing")
-		case isExpiredFileWithoutDownload(element, downloadAccessIn(element, bundles), timeNow):
+		case isExpiredFileWithoutDownload(element, resolver.Of(element), timeNow):
 			reason := models.DisposalReasonExpired
 			reasonText := "expired"
-			if downloadAccessIn(element, bundles).IsExhausted(timeNow) {
+			if resolver.Of(element).IsExhausted(timeNow) {
 				reason = models.DisposalReasonDownloaded
 				reasonText = "downloads exhausted"
 			}
@@ -1409,13 +1409,28 @@ func DownloadAccessOf(file models.File) models.DownloadAccess {
 	return downloadAccessOf(file, bundle, ok)
 }
 
-// downloadAccessIn resolves a file's axes against an already-loaded set of folders, for a caller
-// that walks every file and would otherwise read the same folder once per member.
-func downloadAccessIn(file models.File, bundles map[string]models.FileBundle) models.DownloadAccess {
+// DownloadAccessResolver answers DownloadAccessOf's question for many files against one read of
+// the folder table. A caller that walks every file - the owner's file list, the CleanUp sweep -
+// would otherwise read the same folder once per member of it.
+type DownloadAccessResolver struct {
+	bundles map[string]models.FileBundle
+}
+
+// NewDownloadAccessResolver reads every folder once, for the resolver to answer from.
+func NewDownloadAccessResolver() DownloadAccessResolver {
+	bundles := make(map[string]models.FileBundle)
+	for _, bundle := range database.GetAllFileBundles() {
+		bundles[bundle.Id] = bundle
+	}
+	return DownloadAccessResolver{bundles: bundles}
+}
+
+// Of returns the axes governing this file, the same answer DownloadAccessOf gives.
+func (r DownloadAccessResolver) Of(file models.File) models.DownloadAccess {
 	if file.BundleId == "" || !file.IsBundleMember(file.BundleId) {
 		return downloadAccessOf(file, models.FileBundle{}, false)
 	}
-	bundle, ok := bundles[file.BundleId]
+	bundle, ok := r.bundles[file.BundleId]
 	return downloadAccessOf(file, bundle, ok)
 }
 
@@ -1432,15 +1447,6 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 		return bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
 	}
 	return file.DownloadAccess(int64(LeewayFor(file).Seconds()))
-}
-
-// bundlesById returns every folder keyed by its id, for downloadAccessIn.
-func bundlesById() map[string]models.FileBundle {
-	result := make(map[string]models.FileBundle)
-	for _, bundle := range database.GetAllFileBundles() {
-		result[bundle.Id] = bundle
-	}
-	return result
 }
 
 // IsExpiredFile returns true if the file can no longer be served: the expiry timestamp passed, or

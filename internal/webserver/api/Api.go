@@ -1412,12 +1412,15 @@ func getFilesForUser(user models.User, includeUploadRequests bool) []models.File
 	if includeUploadRequests {
 		collaborated = collaboratedRequestIds(user)
 	}
+	// One read of the folder table for the whole list: a folder decides its members' status, and
+	// resolving that per file would read the same folder once per member of it.
+	resolver := storage.NewDownloadAccessResolver()
 	for _, element := range database.GetAllMetadata() {
 		if !includeUploadRequests && element.IsFileRequest() {
 			continue
 		}
 		if mayViewFile(element, user, collaborated) {
-			file, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(element))
+			file, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, resolver.Of(element))
 			helper.Check(err)
 			validFiles = append(validFiles, file)
 		}

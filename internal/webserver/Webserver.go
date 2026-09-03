@@ -981,11 +981,14 @@ func (u *AdminView) convertGlobalConfig(view int, user models.User) *AdminView {
 	u.CustomContent = customStaticInfo
 	switch view {
 	case ViewMain:
+		// One read of the folder table for the whole list: a folder decides its members' status,
+		// and resolving that per file would read the same folder once per member of it.
+		resolver := storage.NewDownloadAccessResolver()
 		for _, element := range database.GetAllMetadata() {
 			if element.UserId != user.Id && !user.HasPermissionListOtherUploads() {
 				continue
 			}
-			fileInfo, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(element))
+			fileInfo, err := element.ToFileApiOutput(config.ServerUrl, config.IncludeFilename, resolver.Of(element))
 			helper.Check(err)
 			metaDataList = append(metaDataList, fileInfo)
 		}
