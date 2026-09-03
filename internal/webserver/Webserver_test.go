@@ -3015,6 +3015,12 @@ func TestSingleFileUnrestrictedDownloadStaysAnonymous(t *testing.T) {
 // attached before both LogDownloadDenied calls in the restricted-file branch of serveFile, not
 // only before the eventual successful LogDownload: a denial for an exhausted per-recipient
 // allowance must also name who was denied, rather than falling back to anonymous.
+//
+// The share deliberately has a second recipient who never collects, so the file itself is still
+// alive when the first is refused - each recipient has their own budget, and the file is only
+// over once the last of them is finished. Without them this would be the different denial
+// tested by TestSingleFileLastRecipientDenialAttributesRecipient: the file itself gone, refused
+// at the door.
 func TestSingleFileRestrictedAllowanceExhaustedDenialAttributesRecipient(t *testing.T) {
 	t.Parallel()
 	fileId := helper.GenerateRandomString(16)
@@ -3035,12 +3041,18 @@ func TestSingleFileRestrictedAllowanceExhaustedDenialAttributesRecipient(t *test
 		Email:     "exhausted-recipient@example.com",
 		CreatedAt: time.Now().Unix(),
 	})
-	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 1)
+	bystanderId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "exhausted-recipient-bystander@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId, bystanderId}, 999, 1)
 	t.Cleanup(func() {
 		database.DeleteShareGrants(models.ShareResourceFile, fileId)
 		database.DeleteShareRecipient(recipientId)
 		database.DeleteMetaData(fileId)
 	})
+
+	t.Cleanup(func() { database.DeleteShareRecipient(bystanderId) })
 
 	cookie := testShareAccessCookie(models.ShareResourceFile, fileId, recipientId)
 

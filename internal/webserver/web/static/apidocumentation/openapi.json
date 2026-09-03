@@ -2974,7 +2974,7 @@
                   },
                   "downloadsAllowed": {
                     "type": "integer",
-                    "description": "Per-recipient download allowance. 0 means unlimited"
+                    "description": "Per-recipient download allowance, spent against this recipient alone. 0 takes the resource's own download limit, so the owner's one number applies to each recipient separately - a file limited to three downloads and shared with three people is nine - and only a resource that is itself unlimited yields an unlimited grant"
                   }
                 }
               }
@@ -3031,7 +3031,7 @@
           "share"
         ],
         "summary": "Lists shares granted to the caller",
-        "description": "Returns every file, folder or file request currently reachable through a share grant whose recipient email matches the caller's own account name. Derived live from the grant rows each call - there is no separate inbox table - so it reflects a grant, a cleared list or a blocked recipient immediately. A grant is skipped if its resource no longer exists, if a file is disposed or past its own expiry, or if a file request is closed or past its expiry. An account whose name is not an email address, or one that is blocked as a share recipient, gets an empty list. Requires API permission VIEW.",
+        "description": "Returns every file, folder or file request currently reachable through a share grant whose recipient email matches the caller's own account name. Derived live from the grant rows each call - there is no separate inbox table - so it reflects a grant, a cleared list or a blocked recipient immediately. A grant is skipped if its resource no longer exists, if a file is disposed or past its own expiry, if a file request is closed or past its expiry, or if the recipient has spent their own download allowance and the download window that spending it opened has closed. An account whose name is not an email address, or one that is blocked as a share recipient, gets an empty list. Requires API permission VIEW.",
         "operationId": "listShareInbox",
         "security": [
           {

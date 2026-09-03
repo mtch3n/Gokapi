@@ -11,6 +11,7 @@ import (
 
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/helper"
+	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/test"
@@ -157,4 +158,50 @@ func TestPublicApiFileMetadataRateLimitsExhaustedRecipient(t *testing.T) {
 	if elapsed < 700*time.Millisecond {
 		t.Fatalf("call past the burst returned in %v; expected WaitOnFailedId to have throttled it to ~1s, meaning the rate limiter was never consulted", elapsed)
 	}
+}
+
+// TestSingleFileLastRecipientDenialAttributesRecipient covers the other end of a share's life.
+// Once the last recipient has spent their last download the file itself is over, so the next
+// request is refused at the door by storage.GetFile rather than at the per-recipient allowance
+// check - and that final entry in the share's audit trail must still name who was asking, or the
+// one denial that closes a share would be the one with nobody's name on it.
+func TestSingleFileLastRecipientDenialAttributesRecipient(t *testing.T) {
+	fileId := helper.GenerateRandomString(16)
+	database.SaveMetaData(models.File{
+		Id:                 fileId,
+		Name:               "last_recipient.txt",
+		Size:               "3 B",
+		SizeBytes:          3,
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ContentType:        "text/plain",
+		DownloadsRemaining: 1,
+		UnlimitedTime:      true,
+		UserId:             999,
+	})
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "last-recipient@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, fileId, []int{recipientId}, 999, 1)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, fileId)
+		database.DeleteShareRecipient(recipientId)
+		database.DeleteMetaData(fileId)
+	})
+
+	granted, _ := database.AcquireShareGrantDownload(models.ShareResourceFile, fileId,
+		recipientId, time.Now().Unix(), 0)
+	test.IsEqualBool(t, granted, true)
+
+	cookie := shareCookieFor(t, models.ShareResourceFile, fileId, recipientId)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/downloadFile?id="+fileId, nil)
+	r.AddCookie(cookie)
+	serveFile(fileId, true, w, r)
+
+	entry := lastDownloadEntry(t, fileId, logging.OutcomeDenied)
+	test.IsEqualBool(t, entry.Actor.Anonymous, false)
+	test.IsEqualInt(t, entry.Actor.RecipientId, recipientId)
+	test.IsEqualString(t, entry.Actor.RecipientEmail, "last-recipient@example.com")
+	test.IsEqualString(t, entry.Error, "unknown, expired, or invalid file id")
 }

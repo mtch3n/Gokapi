@@ -1260,6 +1260,13 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		// Covers an unknown id, an expired file and a file pending deletion alike: GetFile does
 		// not distinguish the reason. Unknown-id probes are an enumeration signal worth
 		// recording on their own (PLAN.md), not just outright denials against a real file.
+		//
+		// A share whose recipients have every one of them spent their allowance is over, and is
+		// refused here rather than at the per-recipient check below, exactly as an expired one
+		// is. The recipient asking for it is attached first, or the last denial of a share's life
+		// would be the one entry in its trail with nobody's name on it. Costs nothing for an
+		// ordinary probe: with no token and no cookie, recipientFor answers from memory.
+		r = attachRecipient(r, recipientFor(w, r, models.ShareResourceFile, id))
 		if err := logging.LogDownloadDenied(models.File{Id: id}, r, configuration.Get().SaveIp, "unknown, expired, or invalid file id"); err != nil {
 			respondAuditWriteFailed(w)
 			return
