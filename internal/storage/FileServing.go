@@ -786,7 +786,15 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		}
 		file.DownloadsRemaining = current.DownloadsRemaining
 		file.WindowOpenedAt = current.WindowOpenedAt
-		access := DownloadAccessOf(file)
+	}
+	// The axes governing this file, resolved once - after any re-read above - and read by both
+	// decisions below: whether this request may still be served, and which counter serving it
+	// spends. Skipped when the caller asks for neither, since resolving it costs a read.
+	var access models.DownloadAccess
+	if recheckExpiry || increaseCounter {
+		access = DownloadAccessOf(file)
+	}
+	if recheckExpiry {
 		// Only the expiry is re-tested when another counter governs. That counter was spent
 		// atomically by the caller that gated this request - the recipient's own grant, the
 		// folder's visit allowance - so re-testing it here would find the download acquired for
@@ -808,7 +816,6 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		// its own must be left untouched - otherwise a file limited to three downloads and
 		// shared with three people would still stop after three, locking out the two recipients
 		// who never got theirs. All that is left to record here is that it was downloaded.
-		access := DownloadAccessOf(file)
 		if access.SpendsOwnCounter && !access.UnlimitedDownloads {
 			granted, opened := database.AcquireDownload(file.Id, time.Now().Unix(), int64(LeewayFor(file).Seconds()))
 			if !granted {
