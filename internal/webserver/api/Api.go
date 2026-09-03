@@ -1219,7 +1219,7 @@ func apiChunkComplete(w http.ResponseWriter, r requestParser, user models.User, 
 		// models.FileBundle.DeletedAt), and it answers here exactly as a folder that never existed
 		// does. Uploading into one would give a folder nobody can open a member that is not
 		// disposed of, which is the one thing that would keep its row alive indefinitely.
-		if !exists || bundle.DeletedAt != 0 {
+		if !exists || bundle.IsDeleted() {
 			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, "bundle not found")
 			return
 		}
@@ -2493,6 +2493,15 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 	case models.ShareResourceBundle:
 		bundle, found := database.GetFileBundle(resourceId)
 		if !found || (bundle.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
+			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
+			return shareaccess.Resource{}, false
+		}
+		// Asked directly rather than left to the member check below. A deleted folder has no
+		// live members, so that check already refuses one - but only for as long as a deleted
+		// folder cannot regain a member, which is a promise kept by an upload guard in a
+		// different file. Granting someone access to a folder is the one thing here that hands
+		// out new reach, so it states its own reason for refusing rather than inheriting one.
+		if bundle.IsDeleted() {
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
 			return shareaccess.Resource{}, false
 		}

@@ -2318,7 +2318,7 @@
           "folder"
         ],
         "summary": "Deletes a file bundle/folder and all associated files",
-        "description": "This API call deletes a file bundle and all files associated with it. The bundle and its member files remain listed as history, marked deleted, until GOKAPI_METADATA_RETENTION elapses and both are removed together; the folder can no longer be opened through its link from the moment it is deleted. To delete a bundle of a different user, the user requires the user permission DELETE to execute this call. Requires API permission DELETE",
+        "description": "This API call deletes a file bundle and all files associated with it. The folder can no longer be opened through its link from the moment it is deleted. The bundle and its member files stay listed as history, marked deleted, until GOKAPI_METADATA_RETENTION elapses and both are removed together - or until the owner deletes the folder a second time, which removes that history immediately. That mirrors a file, where a second delete purges the retained record the same way; the audit log is the durable record of what happened, not this listing. To delete a bundle of a different user, the user requires the user permission DELETE to execute this call. Requires API permission DELETE",
         "operationId": "folderdelete",
         "security": [
           {

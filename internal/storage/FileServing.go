@@ -1261,7 +1261,7 @@ func cleanInvalidBundles() {
 	files := database.GetAllMetadata()
 
 	for _, bundle := range bundles {
-		if bundle.DeletedAt == 0 && !bundle.IsOlderThanGracePeriod() {
+		if !bundle.IsDeleted() && !bundle.IsOlderThanGracePeriod() {
 			continue
 		}
 		hasMember := false
@@ -1578,7 +1578,7 @@ func DownloadAccessOfBundle(bundle models.FileBundle) models.DownloadAccess {
 // are disposed of, so the membership check already refuses it, but this says so directly rather
 // than leaving the guarantee to depend on what a caller counts as a member.
 func IsAvailableBundle(bundle models.FileBundle, timeNow int64) bool {
-	if bundle.DeletedAt != 0 {
+	if bundle.IsDeleted() {
 		return false
 	}
 	access := DownloadAccessOfBundle(bundle)

@@ -208,6 +208,18 @@ func (b *FileBundle) RetainedTotals(files map[string]File) (int64, int) {
 	return totalSize, count
 }
 
+// IsDeleted reports whether the owner has deleted this folder. The row outlives the deletion,
+// the way a disposed file's row does (see File.IsDisposed, which this mirrors): the members keep
+// their rows for the metadata retention period so the owner still sees what was deleted, and the
+// folder has to outlive them or they are left with nothing to be grouped under.
+//
+// A deleted folder is never openable again. Everything that decides whether a folder may be
+// reached, or may be given to someone new, asks this rather than testing the timestamp itself,
+// so the answer cannot drift between them.
+func (b *FileBundle) IsDeleted() bool {
+	return b.DeletedAt != 0
+}
+
 // IsOlderThanGracePeriod returns true if the bundle was created more than 24 hours ago
 func (b *FileBundle) IsOlderThanGracePeriod() bool {
 	return time.Now().Unix() > b.CreationDate+FileBundleGracePeriod
