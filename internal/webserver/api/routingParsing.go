@@ -1545,6 +1545,117 @@ func (p *paramFolderDelete) New() requestParser {
 	return &paramFolderDelete{}
 }
 
+// ParseRequest reads r and saves the passed header values in the paramFolderModify struct
+// In the end, ProcessParameter() is called
+func (p *paramFolderModify) ParseRequest(r *http.Request) error {
+	var err error
+	var exists bool
+	p.foundHeaders = make(map[string]bool)
+
+	// RequestParser header value "id", required: true
+	exists, err = checkHeaderExists(r, "id", true, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["id"] = exists
+	if exists {
+		p.Id = r.Header.Get("id")
+	}
+
+	// RequestParser header value "name", required: false, has base64support
+	exists, err = checkHeaderExists(r, "name", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["name"] = exists
+	if exists {
+		p.Name = r.Header.Get("name")
+		if strings.HasPrefix(p.Name, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Name, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Name = string(decoded)
+		}
+	}
+
+	// RequestParser header value "allowedDownloads", required: false
+	exists, err = checkHeaderExists(r, "allowedDownloads", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["allowedDownloads"] = exists
+	if exists {
+		p.AllowedDownloads, err = parseHeaderInt(r, "allowedDownloads")
+		if err != nil {
+			return fmt.Errorf("invalid value in header allowedDownloads supplied")
+		}
+	}
+
+	// RequestParser header value "expiryTimestamp", required: false
+	exists, err = checkHeaderExists(r, "expiryTimestamp", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["expiryTimestamp"] = exists
+	if exists {
+		p.ExpiryTimestamp, err = parseHeaderInt64(r, "expiryTimestamp")
+		if err != nil {
+			return fmt.Errorf("invalid value in header expiryTimestamp supplied")
+		}
+	}
+
+	// RequestParser header value "password", required: false, has base64support
+	exists, err = checkHeaderExists(r, "password", false, true)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["password"] = exists
+	if exists {
+		p.Password = r.Header.Get("password")
+		if strings.HasPrefix(p.Password, "base64:") {
+			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Password, "base64:"))
+			if err != nil {
+				return err
+			}
+			p.Password = string(decoded)
+		}
+	}
+
+	// RequestParser header value "generatedpassword", required: false
+	exists, err = checkHeaderExists(r, "generatedpassword", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["generatedpassword"] = exists
+	if exists {
+		p.GeneratedPassword, err = parseHeaderBool(r, "generatedpassword")
+		if err != nil {
+			return fmt.Errorf("invalid value in header generatedpassword supplied")
+		}
+	}
+
+	// RequestParser header value "removePassword", required: false
+	exists, err = checkHeaderExists(r, "removePassword", false, false)
+	if err != nil {
+		return err
+	}
+	p.foundHeaders["removePassword"] = exists
+	if exists {
+		p.RemovePassword, err = parseHeaderBool(r, "removePassword")
+		if err != nil {
+			return fmt.Errorf("invalid value in header removePassword supplied")
+		}
+	}
+
+	return p.ProcessParameter(r)
+}
+
+// New returns a new instance of paramFolderModify struct
+func (p *paramFolderModify) New() requestParser {
+	return &paramFolderModify{}
+}
+
 // ParseRequest parses the header file. As paramFolderShareKey has no fields with the
 // tag header, this method does nothing, except calling ProcessParameter()
 func (p *paramFolderShareKey) ParseRequest(r *http.Request) error {

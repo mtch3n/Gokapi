@@ -941,6 +941,153 @@ func apiFolderDelete(w http.ResponseWriter, r requestParser, user models.User, _
 	_, _ = w.Write(jsonResult)
 }
 
+func apiFolderModify(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
+	request, ok := r.(*paramFolderModify)
+	if !ok {
+		panic("invalid parameter passed")
+	}
+	// Serialised the same way apiEditFile serialises an edit of a single file, so two concurrent
+	// edits of one folder cannot each save a full bundle read before the other's write. The key is
+	// a bundle ID rather than a file ID, which at worst shares a stripe with an unrelated file.
+	apimutex.Lock(apimutex.TypeMetaData, request.Id)
+	defer apimutex.Unlock(apimutex.TypeMetaData, request.Id)
+
+	bundle, ok := filebundle.Get(request.Id)
+	if !ok {
+		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Folder does not exist")
+		return
+	}
+
+	if bundle.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads) {
+		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to edit this folder")
+		return
+	}
+
+	// database.SaveFileBundle needs the master key to encrypt the name (see
+	// encryptBundleNameForSave), and a new password has to be encrypted for the share key as
+	// well. Checked here for the same reason apiFolderCreate checks it: an ErrSealed deeper down
+	// would reach helper.Check and panic the request instead of answering with a clean refusal.
+	if encryption.IsSealed() {
+		sendError(w, http.StatusServiceUnavailable, errorcodes.InstanceSealed, "Instance is sealed")
+		return
+	}
+
+	// Validated up front, before any field of bundle is touched, so that a rejected name or
+	// password leaves every other requested edit unsaved too, instead of applying a partial
+	// update - same reasoning as apiEditFile.
+	if request.IsNameSet && request.Name == "" {
+		sendError(w, http.StatusBadRequest, errorcodes.CannotParse, "Folder name must not be empty")
+		return
+	}
+	// Cap folder name length at 256 characters
+	if len(request.Name) > 256 {
+		sendError(w, http.StatusBadRequest, errorcodes.CannotParse, "Folder name is too long (maximum 256 characters)")
+		return
+	}
+
+	// changePassword is true only when the caller actually sent a "password" header, and removal
+	// is its own explicit signal - see paramFilesModify.ProcessParameter, whose semantics
+	// paramFolderModify copies exactly.
+	changePassword := request.IsPasswordSet
+	removePassword := request.RemovePassword
+	var newPasswordHash string
+	var newSharePassword string
+	if changePassword {
+		validatedPassword, err := configuration.ValidateSharePassword(request.Password, request.IsPasswordSet)
+		if err != nil {
+			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
+			return
+		}
+		newPasswordHash = configuration.HashPassword(validatedPassword, false, "")
+		newSharePassword = validatedPassword
+	}
+
+	if request.IsNameSet {
+		bundle.Name = request.Name
+	}
+	if request.UnlimitedDownloads {
+		bundle.UnlimitedDownloads = true
+	} else {
+		if request.AllowedDownloads != 0 {
+			bundle.DownloadsRemaining = request.AllowedDownloads
+			bundle.UnlimitedDownloads = false
+		}
+	}
+	if request.UnlimitedExpiry {
+		bundle.UnlimitedTime = true
+	} else {
+		if request.ExpiryTimestamp != 0 {
+			bundle.ExpireAt = request.ExpiryTimestamp
+			bundle.UnlimitedTime = false
+		}
+	}
+	// Creation is clamped in apiFolderCreate, but this one writes the expiry directly, so the
+	// retention cap has to be applied here too. Clamping after the branches above also catches a
+	// folder that predates the cap being configured. Same as apiEditFile.
+	bundle.ExpireAt, bundle.UnlimitedTime = fileupload.ClampExpiryTimestamp(bundle.ExpireAt, bundle.UnlimitedTime)
+
+	if changePassword {
+		bundle.PasswordHash = newPasswordHash
+		// Always reassigned, never left as it was. The stored copy belongs to the OLD password,
+		// so keeping it here would make GET /folder/{id}/sharekey hand out a key that no longer
+		// opens the folder. Stored on the same terms whether it was typed or generated - see
+		// storage.EncryptSharePassword.
+		bundle.EncryptedSharePassword = storage.EncryptSharePassword(newSharePassword)
+		// A folder password cookie is registered under "bundle:"+id, not the bare id - see
+		// writeFolderPwCookie in Webserver.go. Without this, whoever entered the old password
+		// keeps the folder open for the remaining lifetime of their cookie after the owner
+		// rotated it.
+		downloadPasswordToken.DeleteAllForFile("bundle:" + bundle.Id)
+	} else if removePassword {
+		bundle.PasswordHash = ""
+		bundle.EncryptedSharePassword = nil
+		downloadPasswordToken.DeleteAllForFile("bundle:" + bundle.Id)
+	}
+
+	// A member's own ExpireAt is inert for every serving decision - the folder decides those now
+	// (see models.FileBundle.ExpireAt) - but storage.CleanUp still disposes of a file's content on
+	// the member's own ExpireAt, and a disposed member stops counting as a member
+	// (models.File.IsBundleMember). Extending a folder past its members' own expiry would
+	// therefore leave an unexpired folder with nothing left in it, which pubApiFolder refuses as
+	// if it never existed. So the folder's lifetime is a floor on its members' retention. Never
+	// shortened: the folder's own gate already refuses an expired folder, and cutting a member's
+	// retention short here would destroy content the owner's file list still lists. Written
+	// before the bundle itself, so a failure leaves members living longer than they need to
+	// rather than a folder that quietly empties out.
+	if request.UnlimitedExpiry || request.ExpiryTimestamp != 0 {
+		for _, member := range filebundle.GetFiles(bundle) {
+			if member.UnlimitedTime {
+				continue
+			}
+			if bundle.UnlimitedTime {
+				member.UnlimitedTime = true
+				database.SaveMetaData(member)
+				continue
+			}
+			if member.ExpireAt < bundle.ExpireAt {
+				member.ExpireAt = bundle.ExpireAt
+				database.SaveMetaData(member)
+			}
+		}
+	}
+
+	database.SaveFileBundle(bundle)
+
+	logging.LogFolderEdit(bundle, user)
+
+	type FolderModifyResponse struct {
+		Result     string            `json:"Result"`
+		FileBundle models.FileBundle `json:"FileBundle"`
+	}
+	response := FolderModifyResponse{
+		Result:     "OK",
+		FileBundle: bundle,
+	}
+	result, err := json.Marshal(response)
+	helper.Check(err)
+	_, _ = w.Write(result)
+}
+
 func apiChunkAdd(w http.ResponseWriter, r requestParser, _ models.User, _ models.ApiKey) {
 	request, ok := r.(*paramChunkAdd)
 	if !ok {
