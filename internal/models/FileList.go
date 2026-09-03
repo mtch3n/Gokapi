@@ -107,28 +107,6 @@ func (a DownloadAccess) IsExpired(timeNow int64) bool {
 	return a.ExpireAt < timeNow && !a.UnlimitedTime
 }
 
-// GrantAllowance bounds a recipient's own download budget by the resource's. The owner set the
-// resource's limit and it is the ceiling: a share may narrow what the owner allowed, never widen
-// it, and a grant of 0 - "no limit of my own", which is what the share dialog sends unless the
-// owner types a number - resolves to the owner's limit rather than to no limit at all. The result
-// is 0, meaning unlimited, only when the resource itself is unlimited and the grant sets no limit
-// either.
-//
-// used is what this recipient has already taken. It is added back because the two counters move
-// in opposite directions: DownloadsRemaining falls as the recipient spends the budget, so
-// comparing the grant's cap against it directly would shrink the budget every time part of it was
-// used, and a recipient granted five downloads on a five-download file would get three.
-func (a DownloadAccess) GrantAllowance(granted, used int) int {
-	if a.UnlimitedDownloads {
-		return granted
-	}
-	resourceCap := a.DownloadsRemaining + used
-	if granted == 0 || granted > resourceCap {
-		return resourceCap
-	}
-	return granted
-}
-
 // IsExhausted reports whether the download allowance is spent and no window is open anymore.
 // With a leeway of 0 this is exactly "no downloads remaining", the rule that applied before
 // windows existed.

@@ -154,12 +154,7 @@ type Database interface {
 	// call opens a window, and a request inside an open window is granted for free. granted is
 	// false when the allowance is exhausted and no window is open, in which case the caller must
 	// not serve the resource. The grant's lastdownloadat is the window start.
-	//
-	// allowed is the recipient's effective allowance, which the caller resolves (see
-	// storage.GrantAllowanceOf) rather than this reading the stored downloadsallowed column: the
-	// owner's own limit on the resource bounds a grant, and that limit can change after the
-	// grant was written. 0 means unlimited.
-	AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64, allowed int) (granted, opened bool)
+	AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (granted, opened bool)
 
 	// SaveShareLoginToken stores a magic link.
 	SaveShareLoginToken(token models.ShareLoginToken)

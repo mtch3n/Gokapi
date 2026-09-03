@@ -300,11 +300,6 @@ func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string)
 // because a grant's allowance is a used/allowed pair with 0 meaning unlimited, not a countdown to
 // zero.
 //
-// The allowance tested is the one the caller resolved (see storage.GrantAllowanceOf), not the
-// stored DownloadsAllowed field: the owner's own limit on the resource bounds a grant, and that
-// limit can change after the grant was written, so the field holds what the owner asked for
-// rather than what applies now. 0 means unlimited.
-//
 // A read-then-increment-then-roll-back version of this was wrong in a way that
 // failed OPEN. If the grant were revoked between the read and the HINCRBY, the
 // HINCRBY would recreate the hash with only a DownloadsUsed field; HasShareGrant
@@ -312,7 +307,7 @@ func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string)
 // which means unlimited. A revoked recipient would have regained unlimited
 // access. The HEXISTS check below is inside the script precisely so that
 // window cannot exist.
-func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64, allowed int) (bool, bool) {
+func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
 	const script = `
 if redis.call('HEXISTS', KEYS[1], 'RecipientId') == 0 then
 	return 0
@@ -321,7 +316,7 @@ local lastDownloadAt = tonumber(redis.call('HGET', KEYS[1], 'LastDownloadAt')) o
 if lastDownloadAt > tonumber(ARGV[2]) then
 	return 1
 end
-local allowed = tonumber(ARGV[3])
+local allowed = tonumber(redis.call('HGET', KEYS[1], 'DownloadsAllowed')) or 0
 local used = tonumber(redis.call('HGET', KEYS[1], 'DownloadsUsed')) or 0
 if allowed ~= 0 and used >= allowed then
 	return 0
@@ -333,7 +328,7 @@ return 2
 	key := p.dbPrefix + prefixShareGrant + grantKey(resourceType, resourceId, recipientId)
 	conn := p.pool.Get()
 	defer conn.Close()
-	result, err := conn.Do("EVAL", script, "1", key, timeNow, timeNow-leeway, allowed)
+	result, err := conn.Do("EVAL", script, "1", key, timeNow, timeNow-leeway)
 	resultInt, err2 := redigo.Int(result, err)
 	helper.Check(err2)
 	return resultInt > 0, resultInt == 2

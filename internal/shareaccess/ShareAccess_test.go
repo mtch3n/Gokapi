@@ -403,12 +403,12 @@ func TestConsumeDownloadHonoursPerRecipientAllowance(t *testing.T) {
 	gail, _ := database.GetShareRecipientByEmail("gail@example.com")
 	hank, _ := database.GetShareRecipientByEmail("hank@example.com")
 
-	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, gail.Id, 0, 2))
-	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, gail.Id, 0, 2))
-	test.IsEqual(t, ConsumeDownload(resource.Type, resource.Id, gail.Id, 0, 2), ErrDownloadsExhausted)
+	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, gail.Id, 0))
+	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, gail.Id, 0))
+	test.IsEqual(t, ConsumeDownload(resource.Type, resource.Id, gail.Id, 0), ErrDownloadsExhausted)
 
 	// The allowance is per recipient, so Hank still has his own.
-	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, hank.Id, 0, 2))
+	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, hank.Id, 0))
 }
 
 // A link may never outlive the resource it points at.
@@ -632,10 +632,10 @@ func TestAccessGateEndToEnd(t *testing.T) {
 	test.IsEqualInt(t, fromCookie, ivy.Id)
 
 	// Ivy spends her own allowance and no one else's.
-	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, ivy.Id, 0, 2))
-	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, ivy.Id, 0, 2))
-	test.IsEqual(t, ConsumeDownload(resource.Type, resource.Id, ivy.Id, 0, 2), ErrDownloadsExhausted)
-	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, jack.Id, 0, 2))
+	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, ivy.Id, 0))
+	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, ivy.Id, 0))
+	test.IsEqual(t, ConsumeDownload(resource.Type, resource.Id, ivy.Id, 0), ErrDownloadsExhausted)
+	test.IsNil(t, ConsumeDownload(resource.Type, resource.Id, jack.Id, 0))
 
 	// Revoking Ivy takes effect at once, without waiting for her link or her
 	// cookie to expire.

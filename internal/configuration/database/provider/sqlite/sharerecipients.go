@@ -252,14 +252,8 @@ func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string)
 // AcquireShareGrantDownload atomically records one download by this recipient - mirrors
 // AcquireDownload in metadata.go exactly, including its three steps and the reasoning behind each;
 // see that function. The grant's lastdownloadat, which this already wrote before windows existed,
-// is the window start.
-//
-// The allowance tested is the one the caller resolved (see storage.GrantAllowanceOf), not the
-// stored downloadsallowed column: the owner's own limit on the resource bounds a grant, and that
-// limit can change after the grant was written, so the column holds what the owner asked for
-// rather than what applies now. 0 means unlimited. The test still lives in the UPDATE's WHERE
-// clause so it is applied against the live downloadsused, atomically.
-func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64, allowed int) (bool, bool) {
+// is the window start. A downloadsallowed of 0 means unlimited.
+func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
 	windowOpenSince := timeNow - leeway
 	if p.isShareGrantWindowOpen(resourceType, resourceId, recipientId, windowOpenSince) {
 		return true, false
@@ -267,9 +261,9 @@ func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId
 	result, err := p.sqliteDb.Exec(`UPDATE ShareGrants
 		SET downloadsused = downloadsused + 1, lastdownloadat = ?
 		WHERE resourcetype = ? AND resourceid = ? AND recipientid = ?
-		  AND (? = 0 OR downloadsused < ?)
+		  AND (downloadsallowed = 0 OR downloadsused < downloadsallowed)
 		  AND lastdownloadat <= ?`,
-		timeNow, resourceType, resourceId, recipientId, allowed, allowed, windowOpenSince)
+		timeNow, resourceType, resourceId, recipientId, windowOpenSince)
 	helper.Check(err)
 	affected, err := result.RowsAffected()
 	helper.Check(err)
