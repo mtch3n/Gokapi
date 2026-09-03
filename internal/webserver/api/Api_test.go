@@ -3468,45 +3468,40 @@ func TestEditFileReplacesStoredShareKey(t *testing.T) {
 	test.IsEqualString(t, stored, "typedPassw0rd1!")
 }
 
-// TestStoreBundleShareKeyToggleOnAndOff is the failing-first test for storeBundleShareKey: a
-// bundle member uploaded with a password stores an encrypted share key on the BUNDLE (not just
-// the file) when StoreShareKeys is on, and stores nothing on the bundle when it is off - mirroring
-// TestApiGetShareKeyToggleOff/TestApiGetShareKeyToggleOnGeneratedVsManual for files exactly.
-func TestStoreBundleShareKeyToggleOnAndOff(t *testing.T) {
+// TestMemberPasswordDoesNotBecomeTheFolderShareKey pins that uploading a member into a folder
+// never writes a share key onto the folder itself. A folder's key is set from the folder's OWN
+// password, by apiFolderCreate and the modify path, and nowhere else.
+//
+// This replaces a test that asserted the opposite. The behaviour it pinned dated from before the
+// folder became the unit of sharing, when a folder's password was inferred from its members;
+// afterwards it stored a key on a folder whose PasswordHash was empty, so GET
+// /folder/{id}/sharekey handed the owner a password that opened nothing - the folder had no gate
+// to open.
+func TestMemberPasswordDoesNotBecomeTheFolderShareKey(t *testing.T) {
 	withMasterKey(t)
+	withStoreShareKeys(t, true)
 
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermUpload)
 	database.SaveApiKey(apiKey)
 
-	// Toggle off: the member's own file still stores nothing either (existing behaviour), and
-	// the bundle must not either.
-	withStoreShareKeys(t, false)
-	bundleOff := filebundle.Create("TestStoreBundleShareKey_Off", idUser)
-	chunkUploadToBundleWithPassword(t, apiKey.Id, "bundlesharekeyoff1", bundleOff.Id, "folderPassw0rd!")
-	bundle, ok := database.GetFileBundle(bundleOff.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt(t, len(bundle.EncryptedSharePassword), 0)
+	// A folder created with no password of its own, which is what filebundle.Create makes.
+	folder := filebundle.Create("TestMemberPasswordNotFolderKey", idUser)
+	memberId := chunkUploadToBundleWithPassword(t, apiKey.Id, "memberkeynotfolder1", folder.Id, "folderPassw0rd!")
 
-	// Toggle on: the first member's password is stored on the bundle.
-	withStoreShareKeys(t, true)
-	bundleOn := filebundle.Create("TestStoreBundleShareKey_On", idUser)
-	chunkUploadToBundleWithPassword(t, apiKey.Id, "bundlesharekeyon1", bundleOn.Id, "folderPassw0rd!")
-	bundle, ok = database.GetFileBundle(bundleOn.Id)
+	stored, ok := database.GetFileBundle(folder.Id)
 	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, len(bundle.EncryptedSharePassword) > 0, true)
-	stored, ok := storage.GetBundleSharePassword(bundle)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualString(t, stored, "folderPassw0rd!")
+	// No gate, so nothing to hand out a key for.
+	test.IsEqualString(t, stored.PasswordHash, "")
+	test.IsEqualInt(t, len(stored.EncryptedSharePassword), 0)
+	_, hasKey := storage.GetBundleSharePassword(stored)
+	test.IsEqualBool(t, hasKey, false)
 
-	// A second member completing afterwards must not overwrite the key the first member
-	// established - see storeBundleShareKey's doc comment.
-	chunkUploadToBundleWithPassword(t, apiKey.Id, "bundlesharekeyon2", bundleOn.Id, "differentPassw0rd!")
-	bundle, ok = database.GetFileBundle(bundleOn.Id)
+	// The member keeps its own key, which is what /files/{id}/sharekey serves. Only the folder
+	// is left alone.
+	member, ok := database.GetMetaDataById(memberId)
 	test.IsEqualBool(t, ok, true)
-	stored, ok = storage.GetBundleSharePassword(bundle)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualString(t, stored, "folderPassw0rd!")
+	test.IsEqualBool(t, len(member.EncryptedSharePassword) > 0, true)
 }
 
 // TestApiGetFolderShareKeyAuthorisation is the failing-first authz test for GET
@@ -3522,8 +3517,15 @@ func TestApiGetFolderShareKeyAuthorisation(t *testing.T) {
 	ownerKey.GrantPermission(models.ApiPermView)
 	database.SaveApiKey(ownerKey)
 
+	// The folder carries its own password and its own stored key, which is how apiFolderCreate
+	// establishes them. This fixture used to upload a member with a password and rely on that
+	// becoming the folder's key; it no longer does, because a folder's key comes from the
+	// folder's own password and nothing else - see
+	// TestMemberPasswordDoesNotBecomeTheFolderShareKey.
 	bundle := filebundle.Create("TestApiGetFolderShareKeyAuthorisation_Folder", idUser)
-	chunkUploadToBundleWithPassword(t, ownerKey.Id, "foldersharekeyauth1", bundle.Id, "folderAuthPassw0rd!")
+	bundle.PasswordHash = configuration.HashPassword("folderAuthPassw0rd!", false, "")
+	bundle.EncryptedSharePassword = storage.EncryptSharePassword("folderAuthPassw0rd!")
+	database.SaveFileBundle(bundle)
 
 	// Owner can retrieve it.
 	w, r := getFolderShareKey(ownerKey.Id, bundle.Id)

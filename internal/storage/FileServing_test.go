@@ -1749,3 +1749,41 @@ func TestCleanUpConcurrentPassesCollectDeletedBundle(t *testing.T) {
 	_, ok = database.GetFileBundle(bundle.Id)
 	test.IsEqualBool(t, ok, false)
 }
+
+// TestDuplicateFileDoesNotInheritTheSourceShareKey pins that duplicating a file with a NEW
+// password never leaves the source's stored share key on the copy.
+//
+// newFile starts as a copy of the source, so before this was fixed the duplicate carried its own
+// new PasswordHash alongside the SOURCE's EncryptedSharePassword. GET /api/files/{id}/sharekey on
+// the duplicate then served the source file's password - to the duplicate's owner, who is not
+// necessarily the source's owner, since DuplicateFile reassigns UserId. That is a disclosure, not
+// merely a stale key.
+//
+// The source's key is a sentinel rather than a real encrypted value: the assertion is that the
+// duplicate does not carry THOSE bytes, which holds whether or not this instance stores keys at
+// all, and does not need an encryption setup to be meaningful.
+func TestDuplicateFileDoesNotInheritTheSourceShareKey(t *testing.T) {
+	tempFile, err := createTestFile()
+	test.IsNil(t, err)
+	source, ok := database.GetMetaDataById(tempFile.File.Id)
+	test.IsEqualBool(t, ok, true)
+
+	sourceKey := []byte("the-source-files-stored-share-key")
+	source.PasswordHash = configuration.HashPassword("SourcePassw0rd!", false, "")
+	source.EncryptedSharePassword = sourceKey
+	database.SaveMetaData(source)
+
+	duplicate, err := DuplicateFile(source, ParamPassword, "duplicate.dat", models.UploadParameters{
+		Password: "DifferentPassw0rd!",
+	})
+	test.IsNil(t, err)
+
+	// The copy got its own password, so it must not be advertising the source's key for it.
+	test.IsEqualBool(t, duplicate.PasswordHash == source.PasswordHash, false)
+	test.IsEqualBool(t, string(duplicate.EncryptedSharePassword) == string(sourceKey), false)
+
+	// And the row that was actually written carries the same, not just the returned struct.
+	stored, ok := database.GetMetaDataById(duplicate.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualBool(t, string(stored.EncryptedSharePassword) == string(sourceKey), false)
+}

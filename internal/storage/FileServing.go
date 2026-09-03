@@ -549,6 +549,13 @@ func DuplicateFile(file models.File, parametersToChange int, newFileName string,
 			return models.File{}, err
 		}
 		newFile.PasswordHash = configuration.HashPassword(validatedPassword, false, "")
+		// Always reassigned, never inherited. newFile is a copy of the source, so without this
+		// the duplicate keeps the SOURCE's stored key while carrying its own new password hash -
+		// and GET /files/{id}/sharekey would then hand the duplicate's owner, who can be a
+		// different user (UserId is reassigned below), the source file's password. Stored on the
+		// same terms as every other password change; see EncryptSharePassword, whose contract is
+		// that a caller changing a password must store its result even when that result is nil.
+		newFile.EncryptedSharePassword = EncryptSharePassword(validatedPassword)
 	}
 	if changeName {
 		newFile.Name = newFileName
