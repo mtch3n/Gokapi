@@ -5067,34 +5067,29 @@ func TestFolderModifyClampsExpiry(t *testing.T) {
 // still decides something: storage.CleanUp disposes of a member's content on it, and a disposed
 // member stops counting as a member. Extending a folder past its members' own expiry would
 // otherwise leave an unexpired folder that pubApiFolder refuses for having nothing in it.
-func TestFolderModifyExtendsMemberRetention(t *testing.T) {
+func TestFolderModifyKeepsMembersServableAfterExtending(t *testing.T) {
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermEdit)
 	database.SaveApiKey(apiKey)
 
 	folder := filebundle.Create("TestFolderModifyRetention_Folder", idUser)
-	shortLived := time.Now().Add(time.Hour).Unix()
+	// The member's OWN ExpireAt is already in the past. It is inert: a member's expiry is the
+	// folder's expiry now (see storage.downloadAccessOf), so extending the folder must leave the
+	// member servable without anything writing to the member's row. This asserts that outcome
+	// rather than the write that used to produce it - apiFolderModify propagated the folder's
+	// expiry onto its members to stop CleanUp disposing them early, which the bundle-resolved
+	// access made redundant.
 	database.SaveMetaData(models.File{
 		Id:                 "foldermodifymember1",
 		Name:               "foldermodifymember1.dat",
 		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		ExpireAt:           shortLived,
-		DownloadsRemaining: 1,
-		UserId:             idUser,
-		BundleId:           folder.Id,
-	})
-	database.SaveMetaData(models.File{
-		Id:                 "foldermodifymember2",
-		Name:               "foldermodifymember2.dat",
-		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
-		UnlimitedTime:      true,
+		ExpireAt:           time.Now().Add(-time.Hour).Unix(),
 		DownloadsRemaining: 1,
 		UserId:             idUser,
 		BundleId:           folder.Id,
 	})
 	t.Cleanup(func() {
 		database.DeleteMetaData("foldermodifymember1")
-		database.DeleteMetaData("foldermodifymember2")
 	})
 
 	extended := time.Now().Add(72 * time.Hour).Unix()
@@ -5105,36 +5100,23 @@ func TestFolderModifyExtendsMemberRetention(t *testing.T) {
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
 
-	member, ok := database.GetMetaDataById("foldermodifymember1")
+	// The member is still served, on the folder's expiry, with its own left untouched.
+	served, ok := storage.GetFile("foldermodifymember1")
 	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt64(t, member.ExpireAt, extended)
-	// A member that never expires on its own is left exactly as it was
-	member, ok = database.GetMetaDataById("foldermodifymember2")
+	test.IsEqualString(t, served.Id, "foldermodifymember1")
+	stored, ok := database.GetMetaDataById("foldermodifymember1")
 	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, member.UnlimitedTime, true)
+	test.IsEqualBool(t, stored.ExpireAt < time.Now().Unix(), true)
 
-	// Shortening the folder does not cut a member's retention short - the folder's own gate
-	// already refuses an expired folder, and the owner's file list still lists the member
+	// And an expired folder takes its members with it, however long the member's own row says.
 	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
 		{Name: "id", Value: folder.Id},
-		{Name: "expiryTimestamp", Value: strconv.FormatInt(shortLived, 10)},
+		{Name: "expiryTimestamp", Value: strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)},
 	})
 	Process(w, r)
 	test.IsEqualInt(t, w.Code, 200)
-	member, ok = database.GetMetaDataById("foldermodifymember1")
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt64(t, member.ExpireAt, extended)
-
-	// A folder given an unlimited lifetime hands that on to every member that had one of its own
-	w, r = getRecorder("/folder/modify", apiKey.Id, []test.Header{
-		{Name: "id", Value: folder.Id},
-		{Name: "expiryTimestamp", Value: "0"},
-	})
-	Process(w, r)
-	test.IsEqualInt(t, w.Code, 200)
-	member, ok = database.GetMetaDataById("foldermodifymember1")
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, member.UnlimitedTime, true)
+	_, ok = storage.GetFile("foldermodifymember1")
+	test.IsEqualBool(t, ok, false)
 }
 
 // TestFolderModifyPermission is the authz test for PUT /folder/modify: another user's folder is
@@ -6142,8 +6124,10 @@ func TestApiShareInboxHidesSpentGrant(t *testing.T) {
 	test.IsNil(t, json.Unmarshal(w.Body.Bytes(), &response))
 	test.IsEqualInt(t, len(response.Items), 1)
 
-	// Spend the single download the recipient was granted.
-	test.IsEqualBool(t, database.IncreaseShareGrantDownloadCount(models.ShareResourceFile, "inboxFileSpent", recipientId), true)
+	// Spend the single download the recipient was granted. Leeway 0, so the window closes at
+	// once and the grant is genuinely exhausted rather than merely open.
+	granted, _ := database.AcquireShareGrantDownload(models.ShareResourceFile, "inboxFileSpent", recipientId, time.Now().Unix(), 0)
+	test.IsEqualBool(t, granted, true)
 
 	w = httptest.NewRecorder()
 	apiShareInbox(w, nil, user, models.ApiKey{})

@@ -1044,33 +1044,6 @@ func apiFolderModify(w http.ResponseWriter, r requestParser, user models.User, _
 		downloadPasswordToken.DeleteAllForFile("bundle:" + bundle.Id)
 	}
 
-	// A member's own ExpireAt is inert for every serving decision - the folder decides those now
-	// (see models.FileBundle.ExpireAt) - but storage.CleanUp still disposes of a file's content on
-	// the member's own ExpireAt, and a disposed member stops counting as a member
-	// (models.File.IsBundleMember). Extending a folder past its members' own expiry would
-	// therefore leave an unexpired folder with nothing left in it, which pubApiFolder refuses as
-	// if it never existed. So the folder's lifetime is a floor on its members' retention. Never
-	// shortened: the folder's own gate already refuses an expired folder, and cutting a member's
-	// retention short here would destroy content the owner's file list still lists. Written
-	// before the bundle itself, so a failure leaves members living longer than they need to
-	// rather than a folder that quietly empties out.
-	if request.UnlimitedExpiry || request.ExpiryTimestamp != 0 {
-		for _, member := range filebundle.GetFiles(bundle) {
-			if member.UnlimitedTime {
-				continue
-			}
-			if bundle.UnlimitedTime {
-				member.UnlimitedTime = true
-				database.SaveMetaData(member)
-				continue
-			}
-			if member.ExpireAt < bundle.ExpireAt {
-				member.ExpireAt = bundle.ExpireAt
-				database.SaveMetaData(member)
-			}
-		}
-	}
-
 	database.SaveFileBundle(bundle)
 
 	logging.LogFolderEdit(bundle, user)
@@ -2313,6 +2286,7 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 	}
 
 	timeNow := time.Now().Unix()
+	leeway := int64(storage.DownloadLeeway().Seconds())
 	// GrantedBy resolves to a user id far more often than to distinct ids across one inbox, so a
 	// small cache keeps a page of results from repeating database.GetUser per row.
 	grantedByNames := make(map[int]string)
@@ -2344,7 +2318,7 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			// there is anything left to open - the same test pubApiFolder applies. Without this
 			// an exhausted or expired folder stayed listed alongside the files, which are
 			// filtered just below.
-			if !ok || !bundle.IsAvailable(timeNow) {
+			if !ok || !bundle.IsAvailable(timeNow, leeway) {
 				continue
 			}
 			name = bundle.DisplayName()
