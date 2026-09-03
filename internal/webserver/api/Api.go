@@ -2312,11 +2312,11 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			grantLeeway = int64(storage.LeewayFor(file).Seconds())
 		case models.ShareResourceBundle:
 			bundle, ok := database.GetFileBundle(grant.ResourceId)
-			// A folder is the unit of sharing, so its own expiry and allowance decide whether
-			// there is anything left to open - the same test pubApiFolder applies. Without this
-			// an exhausted or expired folder stayed listed alongside the files, which are
-			// filtered just below.
-			if !ok || !bundle.IsAvailable(timeNow, leeway) {
+			// A folder is the unit of sharing, so the expiry and allowance governing it decide
+			// whether there is anything left to open - the same test pubApiFolder applies.
+			// Without this an exhausted or expired folder stayed listed alongside the files,
+			// which are filtered just below.
+			if !ok || !storage.IsAvailableBundle(bundle, timeNow) {
 				continue
 			}
 			name = bundle.DisplayName()

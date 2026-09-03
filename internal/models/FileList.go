@@ -100,13 +100,14 @@ type DownloadAccess struct {
 	UnlimitedDownloads bool
 	WindowOpenedAt     int64
 	Leeway             int64
-	// SpendsFileCounter is true when spending one download here means decrementing the file's
-	// own DownloadsRemaining. It is false when another counter governs - the folder a file
-	// belongs to, or the per-recipient grants of a share restricted to named recipients - in
-	// which case whoever gated the request has already spent that counter, and the file's own
-	// must be left alone. Which counter it is is downloadAccessOf's decision, exactly like the
-	// axes above, so that no caller has to work it out for itself.
-	SpendsFileCounter bool
+	// SpendsOwnCounter is true when spending one download here means decrementing the resource's
+	// own stored counter - the file's DownloadsRemaining, the folder's. It is false when another
+	// counter governs: the folder a file belongs to, or the per-recipient grants of a share
+	// restricted to named recipients, in which case whoever gated the request has already spent
+	// that counter and the resource's own must be left alone. Which counter it is is
+	// storage.DownloadAccessOf's decision, exactly like the axes above, so that no caller has to
+	// work it out for itself.
+	SpendsOwnCounter bool
 }
 
 // IsExpired reports whether the expiry timestamp has passed.
@@ -155,7 +156,7 @@ func (a DownloadAccess) WithShareGrants(grants []ShareGrant) DownloadAccess {
 	a.DownloadsRemaining = downloadsRemaining
 	a.UnlimitedDownloads = unlimitedDownloads
 	a.WindowOpenedAt = windowOpenedAt
-	a.SpendsFileCounter = false
+	a.SpendsOwnCounter = false
 	return a
 }
 
@@ -170,7 +171,7 @@ func (f *File) DownloadAccess(leeway int64) DownloadAccess {
 		UnlimitedDownloads: f.UnlimitedDownloads,
 		WindowOpenedAt:     f.WindowOpenedAt,
 		Leeway:             leeway,
-		SpendsFileCounter:  true,
+		SpendsOwnCounter:   true,
 	}
 }
 

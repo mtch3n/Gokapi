@@ -51,7 +51,7 @@ func TestDownloadAccessWithShareGrantsSumsWhatTheRecipientsHaveLeft(t *testing.T
 	access := file.DownloadAccess(0).WithShareGrants(grants)
 	test.IsEqualInt(t, access.DownloadsRemaining, 9)
 	test.IsEqualBool(t, access.UnlimitedDownloads, false)
-	test.IsEqualBool(t, access.SpendsFileCounter, false)
+	test.IsEqualBool(t, access.SpendsOwnCounter, false)
 	test.IsEqualBool(t, access.IsExhausted(1000), false)
 
 	// Eight of the nine taken, and one recipient still holds the file open.

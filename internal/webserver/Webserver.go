@@ -1952,7 +1952,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// rather than leaking, through the 400 that resolution can produce, whether an id names a
 	// member of it - which also stops the answer depending on whether a CleanUp sweep has caught
 	// up with disposing the members of a folder that just became unavailable.
-	if !bundle.IsAvailable(time.Now().Unix(), int64(storage.DownloadLeeway().Seconds())) {
+	if !storage.IsAvailableBundle(bundle, time.Now().Unix()) {
 		respondPubApiNotFound(w, r)
 		return
 	}
@@ -2086,7 +2086,13 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 // serve, once the allowance is exhausted and that window has closed; always true for an unlimited
 // bundle.
 func consumeBundleDownload(bundle models.FileBundle) bool {
-	if bundle.UnlimitedDownloads {
+	// Which counter a visit spends is storage.DownloadAccessOfBundle's decision, not this
+	// function's: a folder restricted to named recipients is metered by their grants, and its own
+	// counter would otherwise cap all of them together at the number the owner meant each of them
+	// to have. There is nothing to spend here then, exactly as there is nothing to spend for a
+	// folder with no limit at all.
+	access := storage.DownloadAccessOfBundle(bundle)
+	if !access.SpendsOwnCounter || access.UnlimitedDownloads {
 		return true
 	}
 	granted, _ := database.AcquireBundleDownload(bundle.Id, time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
@@ -2129,13 +2135,13 @@ func bundleMembers(bundleId string, allFiles map[string]models.File) []models.Fi
 
 // bundleAvailability reports whether the bundle can currently be served at all: it has at least
 // one member (the requester's full, access-filtered membership), and the bundle itself - not any
-// member - is not expired and has not exhausted its own download allowance. See
-// models.FileBundle.IsAvailable and bundleMembers.
+// member - is not expired and has not exhausted the allowance governing it. See
+// storage.IsAvailableBundle and bundleMembers.
 func bundleAvailability(bundle models.FileBundle, members []models.File) bool {
 	if len(members) == 0 {
 		return false
 	}
-	return bundle.IsAvailable(time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
+	return storage.IsAvailableBundle(bundle, time.Now().Unix())
 }
 
 // isValidFolderPassword reports whether the folder's own password gate (see

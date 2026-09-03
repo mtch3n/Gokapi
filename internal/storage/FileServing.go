@@ -796,7 +796,7 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 			apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 			return false
 		}
-		if access.SpendsFileCounter && access.IsExhausted(time.Now().Unix()) {
+		if access.SpendsOwnCounter && access.IsExhausted(time.Now().Unix()) {
 			apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 			return false
 		}
@@ -809,7 +809,7 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		// shared with three people would still stop after three, locking out the two recipients
 		// who never got theirs. All that is left to record here is that it was downloaded.
 		access := DownloadAccessOf(file)
-		if access.SpendsFileCounter && !access.UnlimitedDownloads {
+		if access.SpendsOwnCounter && !access.UnlimitedDownloads {
 			granted, opened := database.AcquireDownload(file.Id, time.Now().Unix(), int64(LeewayFor(file).Seconds()))
 			if !granted {
 				// The allowance is exhausted and no download window is open (or the atomic,
@@ -1507,6 +1507,11 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 	var access models.DownloadAccess
 	if hasBundle {
 		access = bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
+		// The counter a visit spends is the folder's, never the member's, so serving this file
+		// must leave its own row alone - see models.DownloadAccess.SpendsOwnCounter. Cleared
+		// here rather than by FileBundle.DownloadAccess, which answers the folder's own question
+		// and is where a folder visit reads that its counter IS the one to spend.
+		access.SpendsOwnCounter = false
 	} else {
 		access = file.DownloadAccess(int64(LeewayFor(file).Seconds()))
 	}
@@ -1514,6 +1519,33 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 		return access
 	}
 	return access.WithShareGrants(grants)
+}
+
+// DownloadAccessOfBundle resolves the axes governing a folder itself, the folder twin of
+// DownloadAccessOf and the one place they are decided. A folder restricted to named recipients is
+// governed by their grants exactly as a file is: the owner's one number is each recipient's own
+// budget, so its own visit allowance neither gates nor exhausts it, and it is over once the last
+// recipient is finished or it expires, whichever comes first.
+//
+// A folder is never a secret, so its window is always the configured leeway.
+func DownloadAccessOfBundle(bundle models.FileBundle) models.DownloadAccess {
+	access := bundle.DownloadAccess(int64(DownloadLeeway().Seconds()))
+	grants := database.GetShareGrants(models.ShareResourceBundle, bundle.Id)
+	if len(grants) == 0 {
+		return access
+	}
+	return access.WithShareGrants(grants)
+}
+
+// IsAvailableBundle reports whether the folder itself may currently be opened at all: not expired,
+// and its download allowance is not exhausted - which, with a leeway above 0, includes a folder
+// whose allowance is spent but whose download window is still open. It says nothing about
+// membership: a folder with zero members is still "available" by this function alone, and callers
+// combine it with their own membership check (see webserver.bundleAvailability) because what
+// counts as a member differs by caller (see models.File.IsBundleMember).
+func IsAvailableBundle(bundle models.FileBundle, timeNow int64) bool {
+	access := DownloadAccessOfBundle(bundle)
+	return !access.IsExpired(timeNow) && !access.IsExhausted(timeNow)
 }
 
 // IsExpiredFile returns true if the file can no longer be served: the expiry timestamp passed, or

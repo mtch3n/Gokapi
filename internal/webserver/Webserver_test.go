@@ -2861,15 +2861,25 @@ func TestFolderZipExhaustedBundleAllowanceStillRefusesWhole(t *testing.T) {
 		Email:     "zip-ordering-recipient@example.com",
 		CreatedAt: time.Now().Unix(),
 	})
-	// Grant exactly one bundle download, then immediately spend it, so the recipient's bundle
-	// allowance is already exhausted by the time the request under test arrives.
-	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 1)
+	// A second recipient who never collects, so the folder itself is still alive while the first
+	// is refused: each recipient has their own budget, and a folder is only over once the last of
+	// them is finished with it (see storage.downloadAccessOf). Without them the folder would be
+	// exhausted here and a concurrent CleanUp could collect the member rows this test inspects
+	// afterwards.
+	bystanderId := database.SaveShareRecipient(models.ShareRecipient{
+		Email:     "zip-ordering-bystander@example.com",
+		CreatedAt: time.Now().Unix(),
+	})
+	// Grant exactly one bundle download each, then immediately spend the first recipient's, so
+	// their bundle allowance is already exhausted by the time the request under test arrives.
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId, bystanderId}, 999, 1)
 	if granted, _ := database.AcquireShareGrantDownload(models.ShareResourceBundle, bundle.Id, recipientId, time.Now().Unix(), 0); !granted {
 		t.Fatalf("Failed to pre-exhaust the bundle allowance for the test fixture")
 	}
 	t.Cleanup(func() {
 		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
 		database.DeleteShareRecipient(recipientId)
+		database.DeleteShareRecipient(bystanderId)
 		database.DeleteMetaData(file1Id)
 		database.DeleteMetaData(file2Id)
 		filebundle.Delete(bundle)
