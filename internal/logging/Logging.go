@@ -483,6 +483,35 @@ func LogDownloadDenied(file models.File, r *http.Request, saveIp bool, reason st
 	})
 }
 
+// LogDownloadAllowanceBypassed records that an authenticated internal-API caller was served a
+// resource whose download allowance was already spent - exactly the case storage.GetFile (and so
+// the public download path) would have refused. The allowance is a property of the link, not of
+// the file, so the internal API does not enforce it, but every such exception is recorded here so
+// an operator reading the log can see every time it happened and to whom. This is a guarded,
+// fail-closed event like LogDownload: the caller must not proceed to serve or return anything
+// about the resource if this returns a non-nil error - refuse the request instead. It is written
+// in addition to, never instead of, whatever the caller's own action already logs (e.g.
+// LogDownload for an actual byte-serving download); a request against a resource whose allowance
+// is not spent writes nothing here at all.
+func LogDownloadAllowanceBypassed(file models.File, r *http.Request, saveIp bool) error {
+	ip := ""
+	if saveIp {
+		ip = GetIpAddress(r)
+	}
+	createLogEntry(categoryDownload, fmt.Sprintf("ID %s, IP %s, internal API served a spent download allowance, Useragent %s%s",
+		file.Id, ip, sanitiseUserAgent(r), recipientLogSuffix(r)), false)
+	return appendAuditEntry(AuditEntry{
+		Category:   categoryDownload,
+		Action:     "allowance-bypass",
+		Outcome:    OutcomeSuccess,
+		Ip:         ip,
+		FileId:     file.Id,
+		Actor:      buildActorFromRequest(r),
+		FileConfig: downloadFileConfig(file),
+		Detail:     "internal API bypassed spent download allowance",
+	})
+}
+
 // LogDownloadSession records that a download session token was minted against resourceId, i.e.
 // that the allowance backing it was just spent. This is a guarded, fail-closed event like
 // LogDownload: the endpoint that spent the allowance must refuse the request if this returns a

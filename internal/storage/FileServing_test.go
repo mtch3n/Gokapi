@@ -97,6 +97,78 @@ func TestGetFile(t *testing.T) {
 	database.DeleteMetaData(pendingFile.Id)
 }
 
+// TestGetFileIgnoringAllowance covers the one predicate that is supposed to differ from GetFile
+// (a spent allowance is admitted, not refused) and confirms every other check getFile applies is
+// still applied unchanged - one case each, so a future edit to getFile cannot quietly widen this
+// beyond the allowance it is meant to ignore.
+func TestGetFileIgnoringAllowance(t *testing.T) {
+	const realBlobSha1 = "e017693e4a04a59d0b0f400fe98177fe7ee13cf7" // shared blob already seeded by testconfiguration
+
+	spentFile := models.File{
+		Id:                 "ignoringallowance-spent",
+		Name:               "ignoringallowance-spent",
+		SHA1:               realBlobSha1,
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+	}
+	database.SaveMetaData(spentFile)
+	file, ok := GetFileIgnoringAllowance(spentFile.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.Id, spentFile.Id)
+	// GetFile is the strict twin: it must still refuse the very same resource on the allowance
+	// alone, confirming the two have not drifted onto the same predicate by accident.
+	_, strictOk := GetFile(spentFile.Id)
+	test.IsEqualBool(t, strictOk, false)
+
+	pendingDeletionFile := models.File{
+		Id:                 "ignoringallowance-pendingdeletion",
+		Name:               "ignoringallowance-pendingdeletion",
+		SHA1:               realBlobSha1,
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		PendingDeletion:    time.Now().Add(time.Hour).Unix(),
+	}
+	database.SaveMetaData(pendingDeletionFile)
+	_, ok = GetFileIgnoringAllowance(pendingDeletionFile.Id)
+	test.IsEqualBool(t, ok, false)
+
+	disposedFile := models.File{
+		Id:                 "ignoringallowance-disposed",
+		Name:               "ignoringallowance-disposed",
+		SHA1:               realBlobSha1,
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		DisposedAt:         time.Now().Unix() - 10,
+	}
+	database.SaveMetaData(disposedFile)
+	_, ok = GetFileIgnoringAllowance(disposedFile.Id)
+	test.IsEqualBool(t, ok, false)
+
+	expiredFile := models.File{
+		Id:                 "ignoringallowance-expired",
+		Name:               "ignoringallowance-expired",
+		SHA1:               realBlobSha1,
+		ExpireAt:           time.Now().Add(-time.Hour).Unix(),
+		DownloadsRemaining: 0,
+	}
+	database.SaveMetaData(expiredFile)
+	_, ok = GetFileIgnoringAllowance(expiredFile.Id)
+	test.IsEqualBool(t, ok, false)
+
+	missingBlobFile := models.File{
+		Id:                 "ignoringallowance-missingblob",
+		Name:               "ignoringallowance-missingblob",
+		SHA1:               "no-such-blob-on-disk",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+	}
+	database.SaveMetaData(missingBlobFile)
+	_, ok = GetFileIgnoringAllowance(missingBlobFile.Id)
+	test.IsEqualBool(t, ok, false)
+}
+
 func TestGetFileByHotlink(t *testing.T) {
 	_, result := GetFileByHotlink("invalid")
 	test.IsEqualBool(t, result, false)
@@ -1457,14 +1529,14 @@ func TestReplaceFile(t *testing.T) {
 	database.SaveMetaData(e2eFile)
 	_, ok = database.GetMetaDataById(e2eFile.Id)
 	test.IsEqualBool(t, ok, true)
-	_, err := ReplaceFile("invalidfile", originalFile.Id, false)
-	test.IsNotNil(t, err)
-	_, err = ReplaceFile(originalFile.Id, "invalidfile", false)
-	test.IsNotNil(t, err)
-	_, err = ReplaceFile(originalFile.Id, e2eFile.Id, false)
+
+	// ReplaceFile takes both files already resolved by value - the id-based lookup, and so the
+	// invalid-id error case, now lives entirely in the caller (see apiReplaceFile). The one error
+	// this function still produces itself is the E2E refusal, which does not depend on a lookup.
+	_, err := ReplaceFile(originalFile, e2eFile, false)
 	test.IsNotNil(t, err)
 
-	_, err = ReplaceFile(originalFile.Id, newFile.Id, false)
+	_, err = ReplaceFile(originalFile, newFile, false)
 	test.IsNil(t, err)
 	file, ok := GetFile(originalFile.Id)
 	test.IsEqualBool(t, ok, true)
@@ -1478,7 +1550,10 @@ func TestReplaceFile(t *testing.T) {
 	_, ok = GetFile(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 
-	_, err = ReplaceFile(originalFile.Id, newFile.Id, true)
+	// file is the row as it stands after the first replace (originalFile.Id, now carrying
+	// newFile's content) - passed in by value exactly as a caller who just re-resolved it would.
+	_, err = ReplaceFile(file, newFile, true)
+	test.IsNil(t, err)
 	_, ok = GetFile(originalFile.Id)
 	test.IsEqualBool(t, ok, true)
 	_, ok = GetFile(newFile.Id)

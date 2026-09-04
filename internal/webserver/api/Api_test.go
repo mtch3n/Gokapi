@@ -3612,6 +3612,67 @@ func TestFileReplace(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 }
 
+// TestApiReplaceFileActuallyReplacesSpentFile is the regression for the bug a reviewer found by
+// running the handler: storage.ReplaceFile used to re-resolve both files by id with the strict,
+// allowance-checking storage.GetFile, so replacing an owner's own exhausted file 404'd - "A file
+// with such an ID could not be found" - despite apiReplaceFile having already admitted it via
+// storage.GetFileIgnoringAllowance, and despite that 404 an "allowance-bypass" audit entry still
+// got written, since it used to be recorded before the (failing) replace rather than after. This
+// confirms both halves: the replace actually happens (content moves over in the database), and
+// the audit entry is only written because it genuinely happened.
+func TestApiReplaceFileActuallyReplacesSpentFile(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermReplace)
+	database.SaveApiKey(apiKey)
+
+	original := models.File{
+		Id:                 "replaceSpentOriginal",
+		Name:               "old-spent.txt",
+		Size:               "1KB",
+		SHA1:               "replacetest1",
+		ContentType:        "text/plain",
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		UnlimitedTime:      true,
+		SizeBytes:          1024,
+		UserId:             idUser,
+	}
+	newContent := models.File{
+		Id:                 "replaceSpentNewContent",
+		Name:               "new-spent.txt",
+		Size:               "2KB",
+		SHA1:               "replacetest2",
+		ContentType:        "text/plain2",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		SizeBytes:          2048,
+		UserId:             idUser,
+	}
+	database.SaveMetaData(original)
+	database.SaveMetaData(newContent)
+
+	testReplaceFileCall(t, apiKey, original.Id, newContent.Id, false, 200, "")
+
+	stored, ok := database.GetMetaDataById(original.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, newContent.Name)
+	test.IsEqualString(t, stored.SHA1, newContent.SHA1)
+	test.IsEqualString(t, stored.ContentType, newContent.ContentType)
+	// The original's own allowance is untouched by a replace - it is a property of the file
+	// record being kept, not of the content being swapped in.
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	found := false
+	for _, entry := range entries {
+		if entry.Action == "allowance-bypass" && entry.FileId == original.Id {
+			found = true
+			test.IsEqualString(t, string(entry.Outcome), "success")
+		}
+	}
+	test.IsEqualBool(t, found, true)
+}
+
 func TestChunkCompleteSanitisation(t *testing.T) {
 	apiKey := generateNewKey(false, idUser, "", "")
 	apiKey.GrantPermission(models.ApiPermUpload)
@@ -5816,6 +5877,223 @@ func TestCollaboratorCanSeeReceivedFiles(t *testing.T) {
 	stranger, _ := database.GetUser(idStranger)
 	_, code, _, _ = checkDownloadAllowed(file.Id, stranger)
 	test.IsEqualInt(t, code, 401)
+}
+
+// TestInternalApiBypassNeverBecomesAccessControlHole confirms the internal API's allowance bypass
+// removes only the allowance check, never mayViewFile's permission check: a file whose download
+// allowance is fully spent is served to a caller who may otherwise view it (here, a collaborator
+// on the file request it was received through), but a stranger with no view right is still
+// refused with exactly the same 401 they would get for a live file - the bypass must never turn
+// into a way to read someone else's spent file.
+func TestInternalApiBypassNeverBecomesAccessControlHole(t *testing.T) {
+	database.SaveUser(models.User{
+		Id: idStranger, Name: "TestStranger", Permissions: models.UserPermissionNone,
+		UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderInternal,
+	}, false)
+	fr := models.FileRequest{
+		Id: "bypassAccessRequest", Name: "Bypass access request", UserId: idAdmin,
+		ApiKey: "bypassAccessRequestKey", CreationDate: time.Now().Unix(),
+	}
+	fr.SetCollaboratorIds([]int{idUser})
+	database.SaveFileRequest(fr)
+	file := models.File{
+		Id: "bypassAccessFile", Name: "bypassaccess.txt", SHA1: "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		DownloadsRemaining: 0, UnlimitedDownloads: false, UnlimitedTime: true,
+		UserId: idAdmin, UploadRequestId: fr.Id,
+	}
+	database.SaveMetaData(file)
+
+	collaborator, _ := database.GetUser(idUser)
+	_, code, _, _ := checkDownloadAllowed(file.Id, collaborator)
+	test.IsEqualInt(t, code, 0)
+
+	stranger, _ := database.GetUser(idStranger)
+	_, code, _, _ = checkDownloadAllowed(file.Id, stranger)
+	test.IsEqualInt(t, code, 401)
+}
+
+// TestInternalApiServesSpentFileToOwnerWithoutCounting is the central regression for this change:
+// the download allowance is a property of the link, not of the file, so the authenticated
+// internal API serves an owner their own already-exhausted file rather than refusing it the way
+// the public download path (rightly) does - and it moves no counter doing so, since the request
+// never asked to increase one (IncreaseCounter defaults to false and stays the caller's choice).
+func TestInternalApiServesSpentFileToOwnerWithoutCounting(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	file := models.File{
+		Id:                 "bypassSpentDownload",
+		Name:               "bypassSpentDownload",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		DownloadCount:      3,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(file)
+
+	w, r := getRecorder("/api/files/download/"+file.Id, apiKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	stored, ok := database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	test.IsEqualInt(t, stored.DownloadCount, 3)
+}
+
+// TestInternalApiAuditsAllowanceBypassOnlyWhenSpent confirms the audit side of the bypass: the
+// same request that serves a spent file through the internal API writes an "allowance-bypass"
+// audit entry attributed to the caller, while the identical request against a resource whose
+// allowance is not spent writes nothing - only the policy exception gets a trail.
+func TestInternalApiAuditsAllowanceBypassOnlyWhenSpent(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	spentFile := models.File{
+		Id:                 "bypassAuditSpent",
+		Name:               "bypassAuditSpent",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(spentFile)
+	notSpentFile := models.File{
+		Id:                 "bypassAuditNotSpent",
+		Name:               "bypassAuditNotSpent",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 5,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(notSpentFile)
+
+	w, r := getRecorder("/api/files/download/"+spentFile.Id, apiKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	w, r = getRecorder("/api/files/download/"+notSpentFile.Id, apiKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	foundSpent := false
+	foundNotSpent := false
+	for _, entry := range entries {
+		if entry.Action != "allowance-bypass" {
+			continue
+		}
+		if entry.FileId == spentFile.Id {
+			foundSpent = true
+			test.IsEqualInt(t, entry.Actor.UserId, idUser)
+		}
+		if entry.FileId == notSpentFile.Id {
+			foundNotSpent = true
+		}
+	}
+	test.IsEqualBool(t, foundSpent, true)
+	test.IsEqualBool(t, foundNotSpent, false)
+}
+
+// TestApiDownloadRefusesPresignMintOfSpentFile is the mint-side twin of
+// TestDownloadPresignedRefusesSpentFile (internal/webserver/Webserver_test.go): a presigned URL is
+// a public credential exactly like a share, so /api/files/download must refuse to mint one for a
+// spent file rather than handing back a URL that downloadPresigned would only refuse later on
+// redemption. Strict at both ends of that flow is the point of the pair. Refusing here also means
+// no bypass happened, so unlike the plain-download case this must not write an allowance-bypass
+// audit entry - only the ordinary denial LogDownloadDenied already writes for any refused download.
+func TestApiDownloadRefusesPresignMintOfSpentFile(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	file := models.File{
+		Id:                 "bypassPresignSpent",
+		Name:               "bypassPresignSpent",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(file)
+
+	w, r := getRecorder("/api/files/download/"+file.Id, apiKey.Id, []test.Header{{Name: "presignUrl", Value: "true"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	foundDenied := false
+	foundBypass := false
+	for _, entry := range entries {
+		if entry.FileId != file.Id {
+			continue
+		}
+		if entry.Action == "allowance-bypass" {
+			foundBypass = true
+		}
+		if entry.Action == "download" && entry.Outcome == logging.OutcomeDenied {
+			foundDenied = true
+		}
+	}
+	test.IsEqualBool(t, foundDenied, true)
+	test.IsEqualBool(t, foundBypass, false)
+}
+
+// TestApiDownloadFailedIncreaseCounterDoesNotAuditSuccess is the regression for the second bug a
+// reviewer found by running the handler: apiDownloadSingle discarded storage.ServeFile's bool
+// return, so requesting increaseCounter=true against a spent file - now reachable at all only
+// because checkDownloadAllowed bypasses the allowance - fell through to an implicit 200 with an
+// empty body once SpendDownload failed to acquire, after an audit entry had already claimed the
+// bypass succeeded. Nothing was actually served, so the response must be a real refusal, the
+// allowance must be untouched, and no "allowance-bypass" success entry may exist for this file.
+func TestApiDownloadFailedIncreaseCounterDoesNotAuditSuccess(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	file := models.File{
+		Id:                 "bypassSpentIncreaseCounter",
+		Name:               "bypassSpentIncreaseCounter",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		DownloadCount:      4,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(file)
+
+	w, r := getRecorder("/api/files/download/"+file.Id, apiKey.Id, []test.Header{{Name: "increaseCounter", Value: "true"}})
+	Process(w, r)
+
+	test.IsEqualBool(t, w.Code == http.StatusOK, false)
+	test.IsEqualBool(t, w.Body.Len() > 0, true)
+
+	stored, ok := database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	test.IsEqualInt(t, stored.DownloadCount, 4)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	for _, entry := range entries {
+		if entry.FileId != file.Id {
+			continue
+		}
+		// No success of any shape may exist for this file: nothing was served.
+		test.IsEqualBool(t, entry.Outcome == logging.OutcomeSuccess, false)
+	}
 }
 
 // TestResolveShareResourceRefusesReceivedFile is a regression test for a gap in

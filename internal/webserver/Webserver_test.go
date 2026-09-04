@@ -29,6 +29,7 @@ import (
 	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/storage/chunking/chunkreservation"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
+	"github.com/forceu/gokapi/internal/storage/presign"
 	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
@@ -880,6 +881,38 @@ func TestPublicApiFileUnprotected(t *testing.T) {
 	if contentType, ok := response["contentType"]; !ok || contentType != "text/html" {
 		t.Errorf("Expected contentType 'text/html', got %v", contentType)
 	}
+}
+
+// TestDownloadPresignedRefusesSpentFile confirms downloadPresigned stays strict even though the
+// internal API now bypasses the allowance check: it mints public access (the presign key needs no
+// credential to redeem), so it must keep resolving through storage.GetFile and refuse a spent
+// file exactly as an ordinary public download would - unlike checkDownloadAllowed, which may have
+// let the mint through in the first place.
+func TestDownloadPresignedRefusesSpentFile(t *testing.T) {
+	file := models.File{
+		Id:                 "presignspentfile1234",
+		Name:               "presignspentfile1234",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/plain",
+		UserId:             5,
+	}
+	database.SaveMetaData(file)
+
+	presignedUrl := models.Presign{
+		Id:      "presignspentfilekey1234",
+		FileIds: []string{file.Id},
+		Expiry:  time.Now().Add(time.Second * 30).Unix(),
+	}
+	presign.Save(presignedUrl)
+
+	r := httptest.NewRequest(http.MethodGet, "/downloadPresigned?key="+presignedUrl.Id, nil)
+	w := httptest.NewRecorder()
+	downloadPresigned(w, r)
+
+	test.IsEqualInt(t, w.Code, http.StatusBadRequest)
 }
 
 // TestPublicApiFilePasswordProtected tests GET /pubapi/file for a password-protected file

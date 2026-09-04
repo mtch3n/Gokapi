@@ -1552,7 +1552,7 @@ func apiListSingle(w http.ResponseWriter, r requestParser, user models.User, _ m
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	file, ok := storage.GetFile(request.Id)
+	file, ok := storage.GetFileIgnoringAllowance(request.Id)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
 		return
@@ -1566,6 +1566,12 @@ func apiListSingle(w http.ResponseWriter, r requestParser, user models.User, _ m
 	helper.Check(err)
 	result, err := json.Marshal(output)
 	helper.Check(err)
+	// Audited only once nothing stands between here and a successful response: everything above
+	// this point can still refuse the request, and an entry recorded any earlier would claim a
+	// bypass on a request that went on to be refused.
+	if !auditAllowanceBypassIfSpent(w, file, logging.WithActor(request.WebRequest, user)) {
+		return
+	}
 	_, _ = w.Write(result)
 }
 
@@ -1585,7 +1591,7 @@ func apiGetShareKey(w http.ResponseWriter, r requestParser, user models.User, _ 
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	file, ok := storage.GetFile(request.Id)
+	file, ok := storage.GetFileIgnoringAllowance(request.Id)
 	if !ok || (file.UserId != user.Id && !user.HasPermission(models.UserPermListOtherUploads)) {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
 		return
@@ -1602,6 +1608,12 @@ func apiGetShareKey(w http.ResponseWriter, r requestParser, user models.User, _ 
 	password, ok := storage.GetSharePassword(file)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "File not found")
+		return
+	}
+	// Audited only once the key has actually been retrieved: sealed and no-key-stored above are
+	// both still live refusals at this point, and an entry recorded ahead of them would claim a
+	// bypass on a request that ultimately received nothing.
+	if !auditAllowanceBypassIfSpent(w, file, logging.WithActor(request.WebRequest, user)) {
 		return
 	}
 	result, err := json.Marshal(struct {
@@ -1659,14 +1671,42 @@ func apiDownloadSingle(w http.ResponseWriter, r requestParser, user models.User,
 		sendError(w, statusCode, errCode, errMessage)
 		return
 	}
-	if !request.PresignUrl {
-		forceDecryption := file.Encryption.IsEncrypted && !file.Encryption.IsEndToEndEncrypted
-		// Attribute the audit entry for this download to the authenticated API user rather
-		// than recording it as an anonymous share access.
-		storage.ServeFile(file, w, logging.WithActor(request.WebRequest, user), true, request.IncreaseCounter, forceDecryption, false)
+	if request.PresignUrl {
+		// Minting a presigned URL hands back a public credential - a link - exactly like a
+		// share or downloadPresigned's own redemption, so unlike serving bytes below it must
+		// resolve strictly here: refuse a spent file at mint time, where the caller can still
+		// see why, rather than handing back a URL downloadPresigned will refuse anyway.
+		if refusePresignOfSpentFile(w, file, logging.WithActor(request.WebRequest, user)) {
+			return
+		}
+		createAndOutputPresignedUrl([]string{file.Id}, w, "")
 		return
 	}
-	createAndOutputPresignedUrl([]string{file.Id}, w, "")
+	forceDecryption := file.Encryption.IsEncrypted && !file.Encryption.IsEndToEndEncrypted
+	// Attribute the audit entry for this download to the authenticated API user rather
+	// than recording it as an anonymous share access.
+	actorRequest := logging.WithActor(request.WebRequest, user)
+	if !storage.ServeFile(file, w, actorRequest, true, request.IncreaseCounter, forceDecryption, false) {
+		// ServeFile wrote nothing to w here: with recheckExpiry false (only a tokened public
+		// retry ever asks for that), the sole remaining way it refuses is IncreaseCounter asking
+		// to spend an allowance that GetFileIgnoringAllowance already let through with nothing
+		// left to spend. Nothing irreversible happened - SpendDownload never acquired - so this
+		// is refused cleanly rather than falling through to an implicit 200 with an empty body,
+		// which a client could not tell apart from a genuine zero-byte file.
+		if auditErr := logging.LogDownloadDenied(file, actorRequest, configuration.Get().SaveIp, "download allowance exhausted, could not increase counter"); auditErr != nil {
+			sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, request refused")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		sendError(w, http.StatusConflict, errorcodes.UnspecifiedError, "download allowance exhausted, could not increase counter")
+		return
+	}
+	// The file was actually served above, so only now is it true that the internal API bypassed
+	// its spent allowance to do so; auditing any earlier would have claimed success even on the
+	// refusal branch just above, which serves nothing. ServeFile has already written the
+	// response by this point, so a write failure here can no longer be answered with an error -
+	// see auditAllowanceBypassAfterServe.
+	auditAllowanceBypassAfterServe(file, actorRequest)
 }
 
 func apiDownloadZip(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
@@ -1688,6 +1728,17 @@ func apiDownloadZip(w http.ResponseWriter, r requestParser, user models.User, _ 
 			}
 			w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 			sendError(w, statusCode, errCode, errMessage)
+			return
+		}
+		if request.PresignUrl {
+			// See the identical branch in apiDownloadSingle: minting a presigned URL for this
+			// zip is minting a public credential, so every member must resolve strictly here,
+			// refusing the whole mint at the first spent file rather than one that redeems
+			// only partway.
+			if refusePresignOfSpentFile(w, file, logging.WithActor(request.WebRequest, user)) {
+				return
+			}
+		} else if !auditAllowanceBypassIfSpent(w, file, logging.WithActor(request.WebRequest, user)) {
 			return
 		}
 		requestedFiles = append(requestedFiles, file)
@@ -1768,8 +1819,19 @@ func fillFileRequestNames(fr *models.FileRequest, users map[int]models.User) {
 	}
 }
 
+// checkDownloadAllowed resolves the file for /api/files/download/{id} (and the zip equivalent).
+// It looks the file up via storage.GetFileIgnoringAllowance rather than storage.GetFile: the
+// download allowance is a property of the link, not of the file, so an authenticated caller
+// reaching its own asset through the internal API is not refused because recipients spent an
+// allowance the owner set for them. mayViewFile still governs who may reach the file at all -
+// removing the allowance check here removes a limit, never a permission.
+//
+// This bypass is only correct for serving bytes to the caller itself. A caller asking to mint a
+// presigned URL instead is asking for a public credential - a link - and both callers of this
+// function refuse that mint separately, via refusePresignOfSpentFile, rather than trusting the
+// bypass above to cover it; see the PresignUrl branch in apiDownloadSingle/apiDownloadZip.
 func checkDownloadAllowed(fileId string, user models.User) (models.File, int, int, string) {
-	file, ok := storage.GetFile(fileId)
+	file, ok := storage.GetFileIgnoringAllowance(fileId)
 	if !ok {
 		return models.File{}, http.StatusNotFound, errorcodes.NotFound, "file not found"
 	}
@@ -1777,6 +1839,73 @@ func checkDownloadAllowed(fileId string, user models.User) (models.File, int, in
 		return models.File{}, http.StatusUnauthorized, errorcodes.NoPermission, "no permission to download file"
 	}
 	return file, 0, 0, ""
+}
+
+// auditAllowanceBypassIfSpent writes the audit entry for a bypassing internal-API path that has
+// already served or returned a resource whose download allowance is already spent - the one case
+// storage.GetFile, and so the public path, would have refused. A resource whose allowance is not
+// spent writes nothing: only the policy exception gets a trail.
+//
+// Callers must place this once whatever it is auditing has actually happened - after the mutation
+// or lookup it describes has itself succeeded, never before, or a later failure in that operation
+// would leave a "bypass" entry recording something that never took place (this used to be exactly
+// that bug: it fired ahead of storage.ReplaceFile, so a refused replace - an end-to-end file, say -
+// still logged a false success). Nothing has been written to the response yet at any of those call
+// sites, so this can still fail closed on a write error: the 503 is sent here and the caller must
+// not proceed to write anything about the resource, reported by the false return value. It also
+// reports the failure via logging.LogAuditWriteFailure, the same fallback ServeFile's own audit
+// write uses, since by the time this runs the operation it is auditing may already be an
+// irreversible fact with nothing else recording it. See auditAllowanceBypassAfterServe for the one
+// call site where the response has already been written and this pattern no longer applies.
+func auditAllowanceBypassIfSpent(w http.ResponseWriter, file models.File, r *http.Request) bool {
+	if !storage.DownloadAccessOf(file).IsSpent() {
+		return true
+	}
+	if err := logging.LogDownloadAllowanceBypassed(file, r, configuration.Get().SaveIp); err != nil {
+		logging.LogAuditWriteFailure(fmt.Sprintf("allowance bypass for file %s", file.Id), err)
+		sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, request refused")
+		return false
+	}
+	return true
+}
+
+// auditAllowanceBypassAfterServe is auditAllowanceBypassIfSpent's twin for apiDownloadSingle's
+// byte-serving branch, the one call site where the response may already be on its way to the
+// client by the time it is safe to know a bypass actually happened: storage.ServeFile has already
+// returned true, meaning it already wrote headers and (usually) a body. Refusing now the way
+// auditAllowanceBypassIfSpent does would at best be a no-op (a second WriteHeader call, logged and
+// ignored by net/http) and at worst corrupt an already-flushed body, so a durable-write failure
+// here is handled the same way ServeFile's own internal audit write is when it fails after an
+// irreversible state change: logging.LogAuditWriteFailure, a best-effort note to the
+// human-readable log only, never an attempt to refuse a request that has already been answered.
+func auditAllowanceBypassAfterServe(file models.File, r *http.Request) {
+	if !storage.DownloadAccessOf(file).IsSpent() {
+		return
+	}
+	if err := logging.LogDownloadAllowanceBypassed(file, r, configuration.Get().SaveIp); err != nil {
+		logging.LogAuditWriteFailure(fmt.Sprintf("allowance bypass for file %s was already served", file.Id), err)
+	}
+}
+
+// refusePresignOfSpentFile reports whether file's download allowance is spent, and if so refuses
+// it - fail-closed exactly like checkDownloadAllowed's own denial branch above, recorded via
+// LogDownloadDenied rather than LogDownloadAllowanceBypassed, since a strict refusal here means no
+// bypass happened. A presigned URL is a public credential precisely like a share, so it must never
+// be minted for a resource the public download path would refuse - doing so would let the internal
+// API launder a dead link into a live one via downloadPresigned. Returns true, having already sent
+// the response (a 404 matching what an ordinary strict lookup would have produced, or a 503 if the
+// audit write itself failed), if the caller must not proceed to mint anything.
+func refusePresignOfSpentFile(w http.ResponseWriter, file models.File, r *http.Request) bool {
+	if !storage.DownloadAccessOf(file).IsSpent() {
+		return false
+	}
+	if err := logging.LogDownloadDenied(file, r, configuration.Get().SaveIp, "file not found"); err != nil {
+		sendError(w, http.StatusServiceUnavailable, errorcodes.UnspecifiedError, "could not record audit event, request refused")
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	sendError(w, http.StatusNotFound, errorcodes.NotFound, "file not found")
+	return true
 }
 
 func createAndOutputPresignedUrl(ids []string, w http.ResponseWriter, filename string) {
@@ -1825,7 +1954,7 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	file, ok := storage.GetFile(request.Id)
+	file, ok := storage.GetFileIgnoringAllowance(request.Id)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid id provided.")
 		return
@@ -1859,6 +1988,13 @@ func apiDuplicateFile(w http.ResponseWriter, r requestParser, user models.User, 
 		sendError(w, http.StatusInternalServerError, errorcodes.InternalServer, err.Error())
 		return
 	}
+	// Audited only once the duplicate has actually been created: CreateUploadConfig and
+	// DuplicateFile above can both still refuse the request (a bad password, a share password
+	// too short), and an entry recorded ahead of them would claim a bypass for a duplicate that
+	// was never made.
+	if !auditAllowanceBypassIfSpent(w, file, logging.WithActor(request.WebRequest, user)) {
+		return
+	}
 	outputFileApiInfo(w, newFile)
 }
 
@@ -1871,7 +2007,7 @@ func apiChangeFileOwner(w http.ResponseWriter, r requestParser, user models.User
 	apimutex.Lock(apimutex.TypeMetaData, request.Id)
 	defer apimutex.Unlock(apimutex.TypeMetaData, request.Id)
 
-	file, ok := storage.GetFile(request.Id)
+	file, ok := storage.GetFileIgnoringAllowance(request.Id)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid id provided.")
 		return
@@ -1887,6 +2023,12 @@ func apiChangeFileOwner(w http.ResponseWriter, r requestParser, user models.User
 	}
 	file.UserId = request.NewOwner
 	database.SaveMetaData(file)
+	// Audited only once the ownership change has actually been saved: the new-owner check above
+	// can still refuse the request, and an entry recorded ahead of it would claim a bypass for a
+	// change that never happened.
+	if !auditAllowanceBypassIfSpent(w, file, logging.WithActor(request.WebRequest, user)) {
+		return
+	}
 	outputFileApiInfo(w, file)
 }
 
@@ -1895,7 +2037,7 @@ func apiReplaceFile(w http.ResponseWriter, r requestParser, user models.User, ap
 	if !ok {
 		panic("invalid parameter passed")
 	}
-	fileOriginal, ok := storage.GetFile(request.Id)
+	fileOriginal, ok := storage.GetFileIgnoringAllowance(request.Id)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid id provided.")
 		return
@@ -1909,7 +2051,7 @@ func apiReplaceFile(w http.ResponseWriter, r requestParser, user models.User, ap
 		sendError(w, http.StatusBadRequest, errorcodes.UnsupportedFile, "Cannot replace a file request upload")
 		return
 	}
-	fileNewContent, ok := storage.GetFile(request.IdNewContent)
+	fileNewContent, ok := storage.GetFileIgnoringAllowance(request.IdNewContent)
 	if !ok {
 		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid id provided.")
 		return
@@ -1926,16 +2068,30 @@ func apiReplaceFile(w http.ResponseWriter, r requestParser, user models.User, ap
 		return
 	}
 
-	modifiedFile, err := storage.ReplaceFile(request.Id, request.IdNewContent, request.DeleteNewFile)
+	// fileOriginal and fileNewContent are passed by value, already resolved above via
+	// storage.GetFileIgnoringAllowance: ReplaceFile no longer re-fetches by id (and so no longer
+	// re-applies the strict allowance check that used to refuse the replace a second time, after
+	// this handler had already admitted both files past their own spent allowance).
+	modifiedFile, err := storage.ReplaceFile(fileOriginal, fileNewContent, request.DeleteNewFile)
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrorReplaceE2EFile):
 			sendError(w, http.StatusBadRequest, errorcodes.EndToEndNotSupported, "End-to-End encrypted files cannot be replaced")
-		case errors.Is(err, storage.ErrorFileNotFound):
-			sendError(w, http.StatusNotFound, errorcodes.NotFound, "A file with such an ID could not be found")
 		default:
 			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput, err.Error())
 		}
+		return
+	}
+	// Audited only once the replace has actually happened: ReplaceFile above can still refuse
+	// the request (an end-to-end file), and an entry recorded ahead of it would claim a bypass
+	// for a replace that never took place. Both files' allowance fields are untouched by
+	// ReplaceFile, so the pre-replace fileOriginal/fileNewContent snapshots still accurately
+	// describe the allowance state that was actually bypassed to get here.
+	actorRequest := logging.WithActor(request.WebRequest, user)
+	if !auditAllowanceBypassIfSpent(w, fileOriginal, actorRequest) {
+		return
+	}
+	if !auditAllowanceBypassIfSpent(w, fileNewContent, actorRequest) {
 		return
 	}
 	logging.LogReplace(fileOriginal, modifiedFile, user)
