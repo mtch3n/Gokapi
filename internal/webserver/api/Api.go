@@ -756,34 +756,7 @@ func apiDeleteFile(w http.ResponseWriter, r requestParser, user models.User, _ m
 		sendError(w, http.StatusServiceUnavailable, errorcodes.AuditWriteFailed, "Service temporarily unavailable, please try again.")
 		return
 	}
-	if request.DelaySeconds == 0 {
-		_ = storage.DeleteFile(request.Id, true)
-	} else {
-		_ = storage.DeleteFileSchedule(request.Id, request.DelaySeconds*1000, true)
-	}
-}
-
-func apiRestoreFile(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {
-	request, ok := r.(*paramFilesRestore)
-	if !ok {
-		panic("invalid parameter passed")
-	}
-	file, ok := database.GetMetaDataById(request.Id)
-	if !ok {
-		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid file ID provided or file has already been deleted.")
-		return
-	}
-	if file.UserId != user.Id && !user.HasPermission(models.UserPermDeleteOtherUploads) {
-		sendError(w, http.StatusUnauthorized, errorcodes.NoPermission, "No permission to restore this file")
-		return
-	}
-	file, ok = storage.CancelPendingFileDeletion(file.Id)
-	if !ok {
-		sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid file ID provided or file has already been deleted.")
-		return
-	}
-	logging.LogRestore(file, user)
-	outputFileJson(w, file)
+	_ = storage.DeleteFile(request.Id, true)
 }
 
 func apiFolderCreate(w http.ResponseWriter, r requestParser, user models.User, _ models.ApiKey) {

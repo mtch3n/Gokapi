@@ -20,9 +20,8 @@ import (
 // invariant tests in the webserver package for that half); a disposed record must still be
 // exactly reconstructible history for its owner, meaning its stored name survives disposal even
 // while the instance is sealed; storage.CleanUp's five-branch sweep and its shaRefCount
-// deduplication must each behave exactly as documented; and the delete/restore surface
-// (DeleteFile, DeleteFileSchedule, CancelPendingFileDeletion) must route disposed and live
-// records to the right one of dispose/purge/refuse.
+// deduplication must each behave exactly as documented; and DeleteFile must route an
+// already-disposed record to a purge and a live one to disposal.
 
 // writeBlob creates a uniquely-named content blob in the test data directory and returns the
 // name to use as a file's SHA1 - the tests here never need the bytes to actually hash to the
@@ -265,62 +264,6 @@ func TestCleanUpShaRefCountLiveDuplicateProtectsBlob(t *testing.T) {
 	storedLive, ok := database.GetMetaDataById(idLive)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, storedLive.IsDisposed(), false)
-}
-
-// --- CancelPendingFileDeletion refusals ---
-
-func TestCancelPendingFileDeletionRefusesDisposedRecord(t *testing.T) {
-	id := "cancel_disposed_" + helper.GenerateRandomString(8)
-	database.SaveMetaData(models.File{
-		Id:             id,
-		Name:           "cancel-disposed.txt",
-		DisposedAt:     time.Now().Unix(),
-		DisposalReason: models.DisposalReasonExpired,
-	})
-
-	_, ok := CancelPendingFileDeletion(id)
-	test.IsEqualBool(t, ok, false)
-
-	stored, found := database.GetMetaDataById(id)
-	test.IsEqualBool(t, found, true)
-	test.IsEqualBool(t, stored.IsDisposed(), true)
-}
-
-// TestCancelPendingFileDeletionRefusesElapsedTimer is the gap CancelPendingFileDeletion's own
-// doc comment calls out: PendingDeletion has already elapsed (Status reads "deleted") but
-// CleanUp has not physically disposed of the row yet. Restoring here must still be refused, or
-// the restore would be silently undone moments later once the next sweep catches up.
-func TestCancelPendingFileDeletionRefusesElapsedTimer(t *testing.T) {
-	id := "cancel_elapsed_" + helper.GenerateRandomString(8)
-	database.SaveMetaData(models.File{
-		Id:                 id,
-		Name:               "cancel-elapsed.txt",
-		UnlimitedDownloads: true,
-		UnlimitedTime:      true,
-		PendingDeletion:    time.Now().Add(-time.Hour).Unix(),
-	})
-
-	_, ok := CancelPendingFileDeletion(id)
-	test.IsEqualBool(t, ok, false)
-
-	stored, found := database.GetMetaDataById(id)
-	test.IsEqualBool(t, found, true)
-	test.IsEqualBool(t, stored.PendingDeletion != 0, true)
-}
-
-func TestCancelPendingFileDeletionSucceedsBeforeTimerElapses(t *testing.T) {
-	id := "cancel_pending_" + helper.GenerateRandomString(8)
-	database.SaveMetaData(models.File{
-		Id:                 id,
-		Name:               "cancel-pending.txt",
-		UnlimitedDownloads: true,
-		UnlimitedTime:      true,
-		PendingDeletion:    time.Now().Add(time.Hour).Unix(),
-	})
-
-	restored, ok := CancelPendingFileDeletion(id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt64(t, restored.PendingDeletion, 0)
 }
 
 // --- DeleteFile: purges an already-disposed record, disposes a live one ---

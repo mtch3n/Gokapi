@@ -65,7 +65,8 @@ const (
 const (
 	// StatusActive means the file is live and can be downloaded.
 	StatusActive = "active"
-	// StatusPendingDeletion means the owner scheduled a deletion whose delay has not yet elapsed.
+	// StatusPendingDeletion means the file's download allowance is spent but it is still inside
+	// its download window, and will be disposed of once that window closes.
 	StatusPendingDeletion = "pending_deletion"
 	// StatusExpired means the file's content was disposed of because its expiry timestamp passed.
 	StatusExpired = "expired"
@@ -225,13 +226,7 @@ func (f *File) Status(access DownloadAccess, timeNow int64) string {
 		}
 	}
 	if f.PendingDeletion != 0 {
-		// <, matching storage.isPendingToBeDeleted exactly, for the same reason: this method's
-		// own doc comment promises the same status CleanUp will land on, so the two must agree
-		// at the boundary too - see that function's comment for why it is strict.
-		if f.PendingDeletion < timeNow {
-			return StatusDeleted
-		}
-		return StatusPendingDeletion
+		return StatusDeleted
 	}
 	if access.IsExhausted(timeNow) {
 		return StatusDownloaded

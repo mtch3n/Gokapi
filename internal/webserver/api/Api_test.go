@@ -2025,32 +2025,20 @@ func TestDeleteFile(t *testing.T) {
 		DownloadsRemaining: 1,
 		UserId:             idSuperAdmin,
 	})
-	database.SaveMetaData(models.File{
-		Id:                 "smalltestfileDelay",
-		Name:               "smalltestfileDelay",
-		SHA1:               "03cfd743661f07975fa2f1220c5194cbaff48451",
-		ExpireAt:           2147483646,
-		DownloadsRemaining: 1,
-		UserId:             idUser,
-	})
 	_, ok := database.GetMetaDataById("smalltestfile1")
 	test.IsEqualBool(t, ok, true)
 	_, ok = database.GetMetaDataById("smalltestfile2")
 	test.IsEqualBool(t, ok, true)
-	_, ok = database.GetMetaDataById("smalltestfileDelay")
-	test.IsEqualBool(t, ok, true)
 
 	apiKey := testAuthorisation(t, "/files/delete", models.ApiPermDelete)
-	testDeleteFileCall(t, apiKey, "", "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
-	testDeleteFileCall(t, apiKey, "invalid", "", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided.","ErrorCode":5}`)
-	testDeleteFileCall(t, apiKey, "smalltestfile1", "invalid", 400, `{"Result":"error","ErrorMessage":"invalid value in header delay supplied","ErrorCode":4}`)
-	testDeleteFileCall(t, apiKey, "smalltestfile1", "", 200, "")
-	testDeleteFileCall(t, apiKey, "smalltestfileDelay", "1", 200, "")
-	testDeleteFileCall(t, apiKey, "smalltestfile2", "", 401, `{"Result":"error","ErrorMessage":"No permission to delete this file","ErrorCode":6}`)
+	testDeleteFileCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
+	testDeleteFileCall(t, apiKey, "invalid", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided.","ErrorCode":5}`)
+	testDeleteFileCall(t, apiKey, "smalltestfile1", 200, "")
+	testDeleteFileCall(t, apiKey, "smalltestfile2", 401, `{"Result":"error","ErrorMessage":"No permission to delete this file","ErrorCode":6}`)
 	_, ok = database.GetMetaDataById("smalltestfile2")
 	test.IsEqualBool(t, ok, true)
 	grantUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
-	testDeleteFileCall(t, apiKey, "smalltestfile2", "", 200, "")
+	testDeleteFileCall(t, apiKey, "smalltestfile2", 200, "")
 	removeUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
 
 	time.Sleep(200 * time.Millisecond)
@@ -2058,26 +2046,15 @@ func TestDeleteFile(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 	_, ok = database.GetMetaDataById("smalltestfile2")
 	test.IsEqualBool(t, ok, false)
-	file, ok := database.GetMetaDataById("smalltestfileDelay")
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-
-	time.Sleep(900 * time.Millisecond)
-	_, ok = database.GetMetaDataById("smalltestfileDelay")
-	test.IsEqualBool(t, ok, false)
 }
 
-func testDeleteFileCall(t *testing.T, apiKey models.ApiKey, fileId, delay string, resultCode int, expectedResponse string) {
+func testDeleteFileCall(t *testing.T, apiKey models.ApiKey, fileId string, resultCode int, expectedResponse string) {
 	t.Helper()
 	const apiUrl = "/files/delete"
 	const headerFileId = "id"
-	const headerDelay = "delay"
 	headers := []test.Header{{}}
 	if fileId != "" {
 		headers = append(headers, test.Header{Name: headerFileId, Value: fileId})
-	}
-	if delay != "" {
-		headers = append(headers, test.Header{Name: headerDelay, Value: delay})
 	}
 	w, r := getRecorder(apiUrl, apiKey.Id, headers)
 	Process(w, r)
@@ -2088,117 +2065,6 @@ func testDeleteFileCall(t *testing.T, apiKey models.ApiKey, fileId, delay string
 
 	defer test.ExpectPanic(t)
 	apiDeleteFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
-}
-
-func TestRestoreFile(t *testing.T) {
-	config := configuration.Get()
-	fileUser := models.File{
-		Id:                 "pendingdeletion1",
-		Name:               "pendingdeletion1",
-		SHA1:               "pendingdeletion",
-		ExpireAt:           2147483646,
-		DownloadsRemaining: 1,
-		UserId:             idUser,
-	}
-	fileAdmin := models.File{
-		Id:                 "pendingdeletion2",
-		Name:               "pendingdeletion2",
-		SHA1:               "pendingdeletion",
-		ExpireAt:           2147483646,
-		DownloadsRemaining: 1,
-		UserId:             idSuperAdmin,
-	}
-	database.SaveMetaData(fileUser)
-	database.SaveMetaData(fileAdmin)
-	_, ok := database.GetMetaDataById(fileUser.Id)
-	test.IsEqualBool(t, ok, true)
-	_, ok = database.GetMetaDataById(fileAdmin.Id)
-	test.IsEqualBool(t, ok, true)
-
-	apiKey := testAuthorisation(t, "/files/restore", models.ApiPermDelete)
-	testRestoreFileCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
-	testRestoreFileCall(t, apiKey, "invalid", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided or file has already been deleted.","ErrorCode":5}`)
-	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(fileUser)))
-	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
-
-	storage.DeleteFileSchedule(fileUser.Id, 500, true)
-	storage.DeleteFileSchedule(fileAdmin.Id, 500, true)
-
-	file, ok := database.GetMetaDataById(fileUser.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-	file, ok = database.GetMetaDataById(fileAdmin.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-
-	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(fileUser)))
-	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
-
-	file, ok = database.GetMetaDataById(fileUser.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt64(t, file.PendingDeletion, 0)
-	file, ok = database.GetMetaDataById(fileAdmin.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-
-	startTime := time.Now()
-	for {
-		if time.Since(startTime) > 10*time.Second {
-			t.Errorf("Timeout waiting for file to be deleted")
-			break
-		}
-		_, ok = database.GetMetaDataById(fileAdmin.Id)
-		if !ok {
-			break
-		} else {
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-
-	startTime = time.Now()
-	for {
-		if time.Since(startTime) > 10*time.Second {
-			t.Errorf("Timeout waiting for file to be restored")
-			break
-		}
-		file, ok = database.GetMetaDataById(fileUser.Id)
-		if !ok {
-			t.Errorf("File was deleted")
-			break
-		}
-		if file.PendingDeletion == 0 {
-			break
-		} else {
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-	test.IsEqualInt64(t, file.PendingDeletion, 0)
-	// Removed directly rather than via storage.DeleteFile(id, true): that only schedules
-	// disposal and fires CleanUp in a background goroutine, racing TestList (the very next
-	// top-level test), which asserts idUser has no files the moment it starts. A direct
-	// database.DeleteMetaData guarantees the row is gone before this test returns, without
-	// running a full CleanUp sweep over every other fixture row this package's other tests
-	// still depend on.
-	database.DeleteMetaData(fileUser.Id)
-}
-
-func testRestoreFileCall(t *testing.T, apiKey models.ApiKey, fileId string, resultCode int, expectedResponse string) {
-	t.Helper()
-	const apiUrl = "/files/restore"
-	const headerFileId = "id"
-	headers := []test.Header{{}}
-	if fileId != "" {
-		headers = append(headers, test.Header{Name: headerFileId, Value: fileId})
-	}
-	w, r := getRecorder(apiUrl, apiKey.Id, headers)
-	Process(w, r)
-	test.IsEqualInt(t, w.Code, resultCode)
-	if expectedResponse != "" {
-		test.ResponseBodyIs(t, w, expectedResponse)
-	}
-
-	defer test.ExpectPanic(t)
-	apiRestoreFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestList(t *testing.T) {
