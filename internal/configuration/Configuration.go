@@ -108,6 +108,14 @@ func Load() {
 	if serverSettings.ChunkSize == 0 {
 		serverSettings.ChunkSize = 45
 	}
+	// Generated here rather than in a configupgrade step so that a fresh setup, an upgrade from
+	// any older version and a config someone hand-edited the key out of are all covered by one
+	// path. Length is checked rather than emptiness: a truncated key would otherwise be kept and
+	// silently weaken every token signed with it.
+	if len(serverSettings.DownloadSessionKey) < 32 {
+		serverSettings.DownloadSessionKey = helper.GenerateRandomString(48)
+		save()
+	}
 	helper.CreateDir(serverSettings.DataDir)
 	filesystem.Init(serverSettings.DataDir)
 	logging.Init(serverSettings.DataDir)
