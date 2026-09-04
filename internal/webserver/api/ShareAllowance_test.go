@@ -16,17 +16,19 @@ import (
 	"github.com/forceu/gokapi/internal/test"
 )
 
-// setShareLeeway overrides GOKAPI_DOWNLOAD_LEEWAY for the calling test, restoring this package's
-// default of 0 once it finishes. configuration.GetEnvironment hands back a cached value, so
-// configuration.Load has to re-parse before storage.DownloadLeeway sees the override. Safe here
-// for the same reason storage's own setDownloadLeeway is: nothing in this package runs under
-// t.Parallel.
+// setShareLeeway overrides GOKAPI_DOWNLOAD_SESSION_LEEWAY and GOKAPI_DOWNLOAD_SESSION_SIGN_KEY for the
+// calling test, restoring this package's defaults once it finishes. configuration.GetEnvironment
+// hands back a cached value, so configuration.Load has to re-parse before storage.DownloadLeeway
+// sees the override. Safe here for the same reason storage's own setDownloadLeeway is: nothing in
+// this package runs under t.Parallel.
 func setShareLeeway(t *testing.T, value string) {
 	t.Helper()
-	os.Setenv("GOKAPI_DOWNLOAD_LEEWAY", value)
+	os.Setenv("GOKAPI_DOWNLOAD_SESSION_LEEWAY", value)
+	os.Setenv("GOKAPI_DOWNLOAD_SESSION_SIGN_KEY", "test_key_that_is_at_least_32_characters_long__")
 	configuration.Load()
 	t.Cleanup(func() {
-		os.Setenv("GOKAPI_DOWNLOAD_LEEWAY", "0")
+		os.Setenv("GOKAPI_DOWNLOAD_SESSION_LEEWAY", "0")
+		os.Unsetenv("GOKAPI_DOWNLOAD_SESSION_SIGN_KEY")
 		configuration.Load()
 	})
 }

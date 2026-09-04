@@ -28,15 +28,6 @@ type Configuration struct {
 	// /api/files/{id}/sharekey). Defaults to false: without this flag, no plaintext or
 	// encrypted password is ever persisted beyond the PasswordHash used to verify it.
 	StoreShareKeys bool `json:"StoreShareKeys"`
-	// DownloadSessionKey is the MAC key for the download session tokens that let the party who
-	// spent a download keep retrying it while its window is open (see downloadsession.Sign).
-	// Generated on first start and never rotated automatically: deleting it from the config
-	// invalidates every token in flight, which costs at most one leeway window of retries.
-	//
-	// Kept here rather than derived from the master key because it must work at every encryption
-	// level, including a sealed Level 4 boot and a Level 0 test instance, where no master key
-	// exists to derive from.
-	DownloadSessionKey string `json:"DownloadSessionKey"`
 }
 
 // Encryption holds information about the encryption used on this file
