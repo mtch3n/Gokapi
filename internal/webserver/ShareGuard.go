@@ -81,12 +81,26 @@ type downloadAuthResult struct {
 	// cookie/token). Present so a caller can attach it for audit attribution - see
 	// attachRecipient - without resolving the same identity a second time.
 	RecipientId int
+	// BundleRecipientId is the recipient resolved against the file's GOVERNING BUNDLE
+	// specifically, set whenever that bundle is identity-restricted - including when the file
+	// itself is ALSO restricted, in which case RecipientId above is the file's own and this is
+	// the separate identity the bundle's own allowance must be spent against. Zero when the
+	// bundle is unrestricted. Exists so a caller spending the bundle's allowance can pass this
+	// straight to consumeShareDownload rather than re-deriving it - see that function's doc
+	// comment for why re-deriving it a narrower way is exactly the bug this avoids.
+	BundleRecipientId int
 	// RequiresPassword is true only when the single reason this call refused is a missing or
 	// no-longer-valid passcode cookie (a file's own p<id> cookie, or a bundle's b<id> cookie) -
 	// never set together with Authorised, and never set for a recipient-restriction refusal. A
 	// caller needs this distinguished from every other refusal because the two answers differ:
 	// "ask again for the password" versus "there is nothing here for you".
 	RequiresPassword bool
+	// DenialReason is a short, human-readable explanation of a refusal, for a caller writing an
+	// audit denial entry - never set together with Authorised. Kept as free text rather than an
+	// enum because its only consumer is logging.LogDownloadDenied's reason string, which is
+	// itself free text; a caller that needs to branch on WHY a request was refused should branch
+	// on Authorised/RequiresPassword/RecipientId instead, not parse this.
+	DenialReason string
 }
 
 // shareLeewayFor returns how long a download window stays open for this
@@ -110,46 +124,45 @@ func shareAccessMode(file models.File) string {
 	return file.AccessMode(database.IsShareRestricted(models.ShareResourceFile, file.Id))
 }
 
-// consumeShareDownload records a download against the recipient's own
-// allowance when the resource is restricted.
+// consumeShareDownload records a download against recipientId's own allowance when the resource
+// is restricted.
 //
-// Returns false when the allowance is exhausted and no download window is open,
-// in which case the caller must not serve the file. For an unrestricted resource
-// there is no per-recipient allowance and this is a no-op, leaving the existing
-// per-file counter as the only limit. leeway is the window length the caller
+// recipientId is the identity the caller's OWN authorisation step already resolved - via
+// shareaccess.RecipientFor, directly or through resolveShareAccess/mayDownloadFile/
+// mayDownloadBundle - never re-derived here from a narrower source. This function used to read a
+// cookie itself, with a bare query-token fallback that did not understand the sharetoken HEADER
+// RecipientFor accepts - which let a caller authorised via a header-carried token be refused
+// right here at the spend, because the two steps disagreed about what counted as identity.
+// RecipientFor's own grant check (HasShareGrant, on both its cookie and its token path) is what
+// makes the explicit re-check this function used to do redundant now that every caller is
+// required to have gone through it first.
+//
+// Returns false when the allowance is exhausted and no download window is open, in which case the
+// caller must not serve the file, or when the resource is restricted but no recipientId was
+// resolved. For an unrestricted resource there is no per-recipient allowance and this is a no-op,
+// leaving the existing per-file counter as the only limit. leeway is the window length the caller
 // resolved for the resource being served (see storage.LeewayFor), in seconds.
-func consumeShareDownload(r *http.Request, resourceType int, resourceId string, leeway int64) bool {
+func consumeShareDownload(resourceType int, resourceId string, recipientId int, leeway int64) bool {
 	if !database.IsShareRestricted(resourceType, resourceId) {
 		return true
 	}
-	recipientId, ok := shareaccess.ReadCookie(r, resourceType, resourceId)
-	if !ok {
-		// Fall back to a token in the URL query. Mailed links now carry the token in a
-		// fragment the server never sees, but this fallback remains for pre-fragment mailed
-		// links (?token= form, valid up to 30 days) presented directly to a download URL.
-		if rawToken := r.URL.Query().Get(shareaccess.TokenQueryParam); rawToken != "" {
-			// firstUse is not raised here: this fallback only feeds the download-consuming
-			// path, and shareaccess.RecipientFor - which does raise share.link.redeemed - is
-			// always the
-			// first call to validate a token for a given request.
-			recipient, _, err := shareaccess.ValidateToken(rawToken, resourceType, resourceId)
-			if err != nil {
-				return false
-			}
-			recipientId = recipient.Id
-		} else {
-			return false
-		}
-	} else if !database.HasShareGrant(resourceType, resourceId, recipientId) {
-		// Unlike a token, a cookie carries no grant check of its own - ReadCookie
-		// only proves the cookie is genuine, not that the grant behind it still
-		// exists. Without this, revoking a recipient mid-cookie-lifetime would
-		// not take effect on this download-consuming path until the cookie
-		// itself expired, the same gap RecipientFor already closes for the
-		// read-only access check.
+	if recipientId == 0 {
 		return false
 	}
 	return shareaccess.ConsumeDownload(resourceType, resourceId, recipientId, leeway) == nil
+}
+
+// recipientGrantStillValid re-checks, at the moment a download session token is served, that the
+// recipient it names still has a live grant on this resource and has not been blocked since the
+// token was minted (see the leeway-session-token plan, D23). A stateless bearer token carries no
+// revocation list of its own; this is what makes blocking or removing a recipient take effect on
+// the very next tokened request rather than waiting out the rest of the window.
+func recipientGrantStillValid(resourceType int, resourceId string, recipientId int) bool {
+	if !database.HasShareGrant(resourceType, resourceId, recipientId) {
+		return false
+	}
+	recipient, ok := database.GetShareRecipient(recipientId)
+	return ok && !recipient.IsBlocked
 }
 
 // accessibleBundleMembers narrows a bundle's member list to the files the current
@@ -173,22 +186,23 @@ func accessibleBundleMembers(w http.ResponseWriter, r *http.Request, members []m
 // mayDownloadFile is the non-spending twin of every gate serveFile runs before it is willing to
 // spend a download and write the first byte (see the leeway-session-token plan, D27 and §2.8:
 // "a HEAD request must run every authorisation gate and then answer with headers only, spending
-// nothing" - something today's code cannot do, because on this path the gates ARE the spends).
+// nothing" - something serveFile's OLD inline gates could not do, because on that shape the
+// gates ARE the spends). serveFile's tokenless leg now calls this directly for its own
+// authorisation, rather than duplicating the logic inline; only the two spends that follow
+// (shareaccess.ConsumeDownload and consumeShareDownload) still live in serveFile itself.
 //
 // It answers the identical question serveFile's body answers between resolving the file (via
 // storage.GetFile, which already covers existence, expiry and the AGGREGATE allowance - see
 // storage.IsExpiredFile - and is itself a pure read, so it is not repeated here) and calling
-// storage.ServeFile: may THIS caller, specifically, have it. That is three gates, run in exactly
-// serveFile's order because the order decides which refusal reason wins when more than one gate
-// would refuse:
+// storage.ServeFile: may THIS caller, specifically, have it. That is three gates, run in a fixed
+// order because the order decides which refusal reason wins when more than one gate would refuse:
 //
-//  1. A restricted governing bundle (Webserver.go:1286, the savedFile.BundleId cascade) -
-//     existence of a resolvable recipient only; deferred to step 3 below for the exhaustion
-//     half, matching consumeShareDownload's position in serveFile.
+//  1. A restricted governing bundle - existence of a resolvable recipient only; deferred to step
+//     3 below for the exhaustion half, matching consumeShareDownload's position in serveFile.
 //  2. The file's own restriction, superseding a passcode entirely - shareaccess.ConsumeDownload's
 //     non-spending twin, resolveShareAccess, in one step because serveFile spends the very
-//     recipient id it just resolved rather than re-deriving it - or, when the file carries no
-//     restriction of its own, its passcode cookie (Webserver.go:1344, isValidPwCookie).
+//     recipient id it just resolved (RecipientId, below) rather than re-deriving it - or, when
+//     the file carries no restriction of its own, its passcode cookie (isValidPwCookie).
 //  3. The governing bundle's allowance, actually exhausted or not - deferred to here because
 //     serveFile's own consumeShareDownload(bundle) call sits after the passcode branch, so a
 //     missing passcode answers "needs a password" even when the bundle grant behind it happens to
@@ -200,24 +214,21 @@ func accessibleBundleMembers(w http.ResponseWriter, r *http.Request, members []m
 // touches neither a DownloadsRemaining nor a DownloadsUsed column. Nothing else here writes
 // anything.
 //
-// Divergence from today's gates, reported rather than silently introduced: serveFile's bundle
-// allowance spend (consumeShareDownload) resolves identity via shareaccess.ReadCookie plus a
-// query-token fallback, not via shareaccess.RecipientFor - a narrower, legacy path its own comment
-// says is "kept for pre-fragment mailed links". This function resolves it the same way
-// mayAccessShare already does everywhere else, via RecipientFor (header token, query token, or
-// cookie). The two can disagree only in one edge case: a caller presenting identity solely via the
-// sharetoken HEADER with no cookie yet set on this same resource. That gap already exists between
-// mayAccessShare and consumeShareDownload today, so this does not introduce it - it inherits it,
-// and does not close it. It is not reachable through normal SPA use, which always fetches the
-// resource's metadata (and so exchanges the header token for a cookie) before ever requesting the
-// download itself.
+// BundleRecipientId is returned alongside RecipientId specifically so serveFile's later spend of
+// the bundle's own allowance (consumeShareDownload) can be given the identity resolved HERE,
+// through RecipientFor, rather than re-deriving it a narrower way. It used to: consumeShareDownload
+// read a cookie directly, with a bare query-token fallback that did not understand the sharetoken
+// header RecipientFor accepts, so a caller authorised by a header-carried token could reach this
+// function's Authorised:true and then be refused at the spend for a reason invisible to it. Fixed
+// by making the spend take the id rather than resolve one of its own; see consumeShareDownload's
+// doc comment.
 func mayDownloadFile(w http.ResponseWriter, r *http.Request, file models.File) downloadAuthResult {
 	bundleRestricted := file.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, file.BundleId)
 	var bundleRecipientId int
 	if bundleRestricted {
 		bundleRecipientId = shareaccess.RecipientFor(w, r, models.ShareResourceBundle, file.BundleId)
 		if bundleRecipientId == 0 {
-			return downloadAuthResult{}
+			return downloadAuthResult{DenialReason: "no valid recipient access for the file's restricted bundle"}
 		}
 	}
 
@@ -225,48 +236,56 @@ func mayDownloadFile(w http.ResponseWriter, r *http.Request, file models.File) d
 	if database.IsShareRestricted(models.ShareResourceFile, file.Id) {
 		fileRecipientId, ok := resolveShareAccess(w, r, models.ShareResourceFile, file.Id)
 		if !ok {
-			return downloadAuthResult{RecipientId: fileRecipientId}
+			// resolveShareAccess still reports the recipient it found, if any, so this
+			// distinguishes "nobody" (an unknown or missing recipient cookie/token) from "this
+			// recipient, but their allowance is gone" - the same distinction serveFile's old
+			// inline gates drew between refusing before a spend and having the spend itself fail.
+			reason := "no valid recipient access for a restricted file"
+			if fileRecipientId != 0 {
+				reason = "recipient download allowance exhausted"
+			}
+			return downloadAuthResult{RecipientId: fileRecipientId, BundleRecipientId: bundleRecipientId, DenialReason: reason}
 		}
 		recipientId = fileRecipientId
 	} else if file.PasswordHash != "" && !isValidPwCookie(r, file) {
-		return downloadAuthResult{RecipientId: bundleRecipientId, RequiresPassword: true}
+		return downloadAuthResult{RecipientId: bundleRecipientId, BundleRecipientId: bundleRecipientId, RequiresPassword: true}
 	}
 
 	if bundleRestricted && shareaccess.IsExhausted(models.ShareResourceBundle, file.BundleId, bundleRecipientId,
 		shareLeewayFor(models.ShareResourceBundle, file.BundleId)) {
-		return downloadAuthResult{RecipientId: bundleRecipientId}
+		return downloadAuthResult{RecipientId: bundleRecipientId, BundleRecipientId: bundleRecipientId,
+			DenialReason: "bundle download allowance exhausted"}
 	}
-	return downloadAuthResult{Authorised: true, RecipientId: recipientId}
+	return downloadAuthResult{Authorised: true, RecipientId: recipientId, BundleRecipientId: bundleRecipientId}
 }
 
 // mayDownloadBundle is mayDownloadFile's folder twin: the non-spending answer to every gate
 // pubApiFolderZip runs before it spends a member's, the bundle recipients', or the folder's own
-// visit allowance (consumeShareDownload at Webserver.go:2018, :2024, :2051 and :2062). Like
-// mayDownloadFile it answers only the identity questions - storage.IsAvailableBundle already
-// covers the folder's own existence, expiry and aggregate allowance as a pure read, and stays a
-// separate call a caller makes alongside this one, not something repeated here.
+// visit allowance (consumeShareDownload and consumeBundleDownload, in both branches of
+// pubApiFolderZip). Like mayDownloadFile it answers only the identity questions -
+// storage.IsAvailableBundle/IsAvailableBundleInWindow already cover the folder's own existence,
+// expiry and aggregate allowance as a pure read, and stay a separate call the caller makes
+// alongside this one, not something repeated here.
 //
-// Order again matches pubApiFolderZip exactly, because it decides which refusal wins:
+// Order matches pubApiFolderZip's tokenless leg exactly, because it decides which refusal wins:
 //
-//  1. Recipient restriction - existence only; pubApiFolderZip resolves this first
-//     (Webserver.go:1929, the bundleRecipientId check) and does not test exhaustion until the
-//     allowance is actually spent, later.
-//  2. The folder's own password (isValidFolderPassword's cookie check, non-spending already).
-//  3. The recipient's allowance, actually exhausted or not - deferred to here for the same reason
-//     as mayDownloadFile's bundle check: pubApiFolderZip's own consumeShareDownload(bundle) call
-//     runs after the password gate, so a missing password answers "needs a password" even when
-//     the grant behind it is already spent.
+//  1. Recipient restriction - existence only; deferred to step 3 below for the exhaustion half.
+//  2. The folder's own password (isValidPwCookieBundle, non-spending already).
+//  3. The recipient's allowance, actually exhausted or not - deferred to here because a missing
+//     password must answer "needs a password" even when the grant behind it is already spent.
 //
 // This does not cover a member's OWN restriction, independent of the bundle's - that is
 // mayDownloadFile's question, asked once per member by accessibleBundleMembers, and answering it
-// here too would just be the same call twice.
+// here too would just be the same call twice. Nor does it apply to a tokened request at all:
+// pubApiFolderZip resolves identity from the token's own claims on that leg instead, since the
+// token - not a fresh cookie/header resolution - IS the authorisation by then.
 func mayDownloadBundle(w http.ResponseWriter, r *http.Request, bundle models.FileBundle) downloadAuthResult {
 	restricted := database.IsShareRestricted(models.ShareResourceBundle, bundle.Id)
 	var recipientId int
 	if restricted {
 		recipientId = shareaccess.RecipientFor(w, r, models.ShareResourceBundle, bundle.Id)
 		if recipientId == 0 {
-			return downloadAuthResult{}
+			return downloadAuthResult{DenialReason: "no valid recipient access for the folder"}
 		}
 	}
 
@@ -276,7 +295,7 @@ func mayDownloadBundle(w http.ResponseWriter, r *http.Request, bundle models.Fil
 
 	if restricted && shareaccess.IsExhausted(models.ShareResourceBundle, bundle.Id, recipientId,
 		shareLeewayFor(models.ShareResourceBundle, bundle.Id)) {
-		return downloadAuthResult{RecipientId: recipientId}
+		return downloadAuthResult{RecipientId: recipientId, DenialReason: "recipient download allowance exhausted"}
 	}
 	return downloadAuthResult{Authorised: true, RecipientId: recipientId}
 }

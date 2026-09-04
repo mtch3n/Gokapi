@@ -3275,6 +3275,114 @@
           }
         }
       }
+    },
+    "/pubapi/downloadsession": {
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "summary": "Mint a download session token for a file",
+        "description": "Public, unauthenticated endpoint that spends the same download allowance a direct download would and, when the file has a retry window worth protecting, returns a short-lived signed token that lets the caller retry or resume the same download for the rest of that window without spending another one. Returns no session (expiresAt 0) rather than 404 when the file has unlimited downloads or no leeway window at all - there is nothing to protect in that case, and the caller should fall back to the plain download URL. A member of a folder redirects (307) to /pubapi/foldersession for the governing folder. POST only, so a browser prefetch or a link-preview bot cannot spend an allowance by merely requesting the page.",
+        "operationId": "pubapiDownloadSession",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID of the file to mint a download session for"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A token was minted, or none was needed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "type": "string",
+                      "description": "The signed session token. Absent when no token was minted."
+                    },
+                    "expiresAt": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Unix timestamp the token expires at, or 0 when none was minted."
+                    },
+                    "requiresPassword": {
+                      "type": "boolean",
+                      "description": "Present instead of session/expiresAt when the file is passcode-protected and no valid passcode cookie was presented."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired file ID, refused authorisation, or the allowance is already spent"
+          },
+          "405": {
+            "description": "A method other than POST was used"
+          }
+        }
+      }
+    },
+    "/pubapi/foldersession": {
+      "post": {
+        "tags": [
+          "folder"
+        ],
+        "summary": "Mint a download session token for a folder",
+        "description": "The folder twin of /pubapi/downloadsession. Spends one visit of the folder's own allowance and, when the folder has a retry window worth protecting, returns a short-lived signed token that authorises the whole folder - not any particular selection - for the rest of that window: any member, any subset, or the whole zip, any number of times, free. Takes no ids; the caller appends its own current selection when it builds the eventual /pubapi/folderzip URL. Returns no session (expiresAt 0) rather than 404 when the folder has unlimited downloads or no leeway window at all. POST only, for the same reason as /pubapi/downloadsession.",
+        "operationId": "pubapiFolderSession",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID of the folder to mint a download session for"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A token was minted, or none was needed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session": {
+                      "type": "string",
+                      "description": "The signed session token. Absent when no token was minted."
+                    },
+                    "expiresAt": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "Unix timestamp the token expires at, or 0 when none was minted."
+                    },
+                    "requiresPassword": {
+                      "type": "boolean",
+                      "description": "Present instead of session/expiresAt when the folder is passcode-protected and no valid passcode cookie was presented."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or expired folder ID, refused authorisation, or the allowance is already spent"
+          },
+          "405": {
+            "description": "A method other than POST was used"
+          }
+        }
+      }
     }
   },
   "components": {

@@ -322,9 +322,14 @@ func TestCleanUpWaitsForTheLastRecipientsWindow(t *testing.T) {
 	test.IsEqualBool(t, stored.IsDisposed(), false)
 	test.FileExists(t, configuration.Get().DataDir+"/"+stored.SHA1)
 
-	// The second recipient's own retry is still free while that window is open, which is what the
-	// window is for.
-	test.IsEqualBool(t, downloadAsRecipient(t, fileId, recipients[1]), true)
+	// A plain, tokenless retry is refused even though the second recipient's own window is still
+	// open: storage.GetFile now enforces R1 (the leeway-session-token plan) for every caller,
+	// aggregate-spent or not - a retry inside the window is what the session token minted by
+	// POST /pubapi/downloadsession exists for (see webserver.serveFileTokened), not something
+	// storage.GetFile grants for free any more. downloadAsRecipient goes through GetFile
+	// directly, with no token, so this is exactly that refusal, not a defect: the window is
+	// still what keeps CleanUp off the file above, only retrying without a token that changed.
+	test.IsEqualBool(t, downloadAsRecipient(t, fileId, recipients[1]), false)
 }
 
 // TestCleanUpDisposesOnceTheLastWindowClosed is the closing half of the test above, with the

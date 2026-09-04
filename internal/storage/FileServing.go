@@ -713,8 +713,33 @@ func isVideoFile(filename, contentType string) bool {
 }
 
 // GetFile gets the file by id. Returns (empty File, false) if invalid / expired file
-// or (file, true) if valid file
+// or (file, true) if valid file. Refuses a file whose download allowance is spent even while its
+// window is still open - see IsExpiredFile - because a plain, tokenless request is exactly what
+// must not be allowed to ride someone else's window. GetFileInWindow is the lenient twin for a
+// caller presenting a valid session token.
 func GetFile(id string) (models.File, bool) {
+	return getFile(id, func(access models.DownloadAccess, timeNow int64) bool {
+		return access.IsExpired(timeNow) || access.IsSpent()
+	})
+}
+
+// GetFileInWindow is GetFile's lenient twin for a caller presenting a valid download session
+// token: it tolerates a spent allowance while the download window that spending it opened is
+// still open, refusing on IsExhausted rather than IsSpent, but applies every other check GetFile
+// applies - pending deletion, disposed, expiry, AWS validity, blob presence - unchanged. A token
+// does not survive the owner deleting the file, ExpireAt passing, or disposal; it only buys a
+// retry against an allowance that is otherwise gone.
+func GetFileInWindow(id string, timeNow int64) (models.File, bool) {
+	return getFile(id, func(access models.DownloadAccess, now int64) bool {
+		return access.IsExpired(now) || access.IsExhausted(now)
+	})
+}
+
+// getFile is GetFile's and GetFileInWindow's shared body, so the two can never drift apart on
+// anything but the one predicate that is supposed to differ between them: whether a spent-but-
+// windowed allowance refuses the file or lets it through. isExpired reports the former - true
+// means refuse, exactly like IsExpiredFile's own return value.
+func getFile(id string, isExpired func(access models.DownloadAccess, timeNow int64) bool) (models.File, bool) {
 	var emptyResult = models.File{}
 	if id == "" {
 		return emptyResult, false
@@ -727,13 +752,13 @@ func GetFile(id string) (models.File, bool) {
 		return emptyResult, false
 	}
 	// A disposed record is owner-visible history and nothing else: every public path treats it
-	// exactly like a record that was deleted outright. GetFile is the single choke point every
+	// exactly like a record that was deleted outright. getFile is the single choke point every
 	// public path (download, hotlink, share resend, ...) resolves a file through, so the check
 	// belongs here rather than duplicated at each caller.
 	if file.IsDisposed() {
 		return emptyResult, false
 	}
-	if IsExpiredFile(file, time.Now().Unix()) {
+	if isExpired(DownloadAccessOf(file), time.Now().Unix()) {
 		return emptyResult, false
 	}
 	if !checkIfValidAws(file) {
@@ -1645,15 +1670,29 @@ func IsAvailableBundle(bundle models.FileBundle, timeNow int64) bool {
 		return false
 	}
 	access := DownloadAccessOfBundle(bundle)
+	return !access.IsExpired(timeNow) && !access.IsSpent()
+}
+
+// IsAvailableBundleInWindow is IsAvailableBundle's lenient twin for a caller presenting a valid
+// download session token: it tolerates a spent visit allowance while the download window that
+// spending it opened is still open, keeping today's IsExhausted body rather than IsSpent.
+func IsAvailableBundleInWindow(bundle models.FileBundle, timeNow int64) bool {
+	if bundle.IsDeleted() {
+		return false
+	}
+	access := DownloadAccessOfBundle(bundle)
 	return !access.IsExpired(timeNow) && !access.IsExhausted(timeNow)
 }
 
 // IsExpiredFile returns true if the file can no longer be served: the expiry timestamp passed, or
-// the download allowance is spent and the download window that spending it opened has closed. A
-// member of a folder is judged by its folder, not by itself - see DownloadAccessOf.
+// the download allowance itself is gone, regardless of whether a download window is still open
+// over it - see models.DownloadAccess.IsSpent. A member of a folder is judged by its folder, not
+// by itself - see DownloadAccessOf. This is the serving predicate; isExpiredFileWithoutDownload,
+// used only by the disposal path, keeps asking IsExhausted so content is never removed while a
+// live session token still points at it.
 func IsExpiredFile(file models.File, timeNow int64) bool {
 	access := DownloadAccessOf(file)
-	return access.IsExpired(timeNow) || access.IsExhausted(timeNow)
+	return access.IsExpired(timeNow) || access.IsSpent()
 }
 
 // isExpiredFileWithoutDownload returns true if there is no active download for an expired file

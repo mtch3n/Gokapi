@@ -32,6 +32,7 @@ import (
 	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
+	"github.com/forceu/gokapi/internal/webserver/api"
 	"github.com/forceu/gokapi/internal/webserver/authentication"
 	"github.com/forceu/gokapi/internal/webserver/authentication/csrftoken"
 	"github.com/forceu/gokapi/internal/webserver/authentication/oauth"
@@ -4196,6 +4197,23 @@ func routePattern(mux *http.ServeMux, path string) string {
 	return pattern
 }
 
+// TestPubApiRoutesAreAllRegistered is the other half of the loop api.PubApiRoutes' own doc
+// comment describes: that list is openapi_test.go's validateNoExtraPaths's second source of
+// valid paths, since api cannot import webserver to read createMux back for itself. This is what
+// keeps the list from drifting stale in the OTHER direction - a path added to PubApiRoutes but
+// never actually registered would otherwise let a documented-but-nonexistent endpoint through
+// undetected, exactly the hole validateNoExtraPaths exists to close. Checked against the
+// built-in-UI mux, not the no-UI one: every /pubapi/ route is registered unconditionally in
+// createMux (see the comment at its own call sites), so either would do, but the built-in-UI one
+// is what every other route-existence assertion in this file already uses.
+func TestPubApiRoutesAreAllRegistered(t *testing.T) {
+	webserverDir, _ := fs.Sub(staticFolderEmbedded, "web/static")
+	mux := createMux(webserverDir, false)
+	for _, path := range api.PubApiRoutes {
+		test.IsEqualString(t, routePattern(mux, path), path)
+	}
+}
+
 func TestCreateMuxDisableBuiltinUi(t *testing.T) {
 	webserverDir, _ := fs.Sub(staticFolderEmbedded, "web/static")
 
@@ -4204,25 +4222,27 @@ func TestCreateMuxDisableBuiltinUi(t *testing.T) {
 	// routes are absent here only because the test configuration uses internal auth,
 	// under which they are never registered in either mode.
 	requiredRoutes := map[string]string{
-		"/api/auth/create":       "/api/",
-		"/auth/token":            "/auth/token",
-		"/login":                 "/login",
-		"/logout":                "/logout",
-		"/error":                 "/error",
-		"/downloadFile":          "/downloadFile",
-		"/downloadPresigned":     "/downloadPresigned",
-		"/uploadChunk":           "/uploadChunk",
-		"/uploadStatus":          "/uploadStatus",
-		"/main.wasm":             "/main.wasm",
-		"/e2e.wasm":              "/e2e.wasm",
-		"/pubapi/config":         "/pubapi/config",
-		"/pubapi/file":           "/pubapi/file",
-		"/pubapi/filepassword":   "/pubapi/filepassword",
-		"/pubapi/folder":         "/pubapi/folder",
-		"/pubapi/folderpassword": "/pubapi/folderpassword",
-		"/pubapi/folderzip":      "/pubapi/folderzip",
-		"/pubapi/uploadrequest":  "/pubapi/uploadrequest",
-		"/pubapi/share/resend":   "/pubapi/share/resend",
+		"/api/auth/create":        "/api/",
+		"/auth/token":             "/auth/token",
+		"/login":                  "/login",
+		"/logout":                 "/logout",
+		"/error":                  "/error",
+		"/downloadFile":           "/downloadFile",
+		"/downloadPresigned":      "/downloadPresigned",
+		"/uploadChunk":            "/uploadChunk",
+		"/uploadStatus":           "/uploadStatus",
+		"/main.wasm":              "/main.wasm",
+		"/e2e.wasm":               "/e2e.wasm",
+		"/pubapi/config":          "/pubapi/config",
+		"/pubapi/downloadsession": "/pubapi/downloadsession",
+		"/pubapi/file":            "/pubapi/file",
+		"/pubapi/filepassword":    "/pubapi/filepassword",
+		"/pubapi/folder":          "/pubapi/folder",
+		"/pubapi/foldersession":   "/pubapi/foldersession",
+		"/pubapi/folderpassword":  "/pubapi/folderpassword",
+		"/pubapi/folderzip":       "/pubapi/folderzip",
+		"/pubapi/uploadrequest":   "/pubapi/uploadrequest",
+		"/pubapi/share/resend":    "/pubapi/share/resend",
 	}
 	// The stock UI surface, including the anonymous download doors, keyed the same way
 	uiRoutes := map[string]string{
