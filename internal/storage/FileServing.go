@@ -892,15 +892,28 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	}
 	statusId := downloadstatus.SetDownload(file)
 	headers.Write(file, w, forceDownload, false)
+	// UploadDate never changes for a given file, unlike time.Now(): a resuming client's
+	// If-Range carries whatever validator this handler returned on an earlier request, and that
+	// can only match a later one if the modtime handed to ServeContent is stable across
+	// requests. headers.Write sets Last-Modified/Etag from the same two fields for the same
+	// reason (see its doc comment).
+	modTime := time.Unix(file.UploadDate, 0)
 	if file.Encryption.IsEncrypted && !file.RequiresClientDecryption() {
-		err = encryption.DecryptReader(file.Encryption, fileHandler, w)
+		// DecryptReaderAt (internal/encryption) is backed by a chunked sio.Stream, so it only
+		// decrypts the chunk(s) a requested range touches rather than the whole file from byte
+		// zero. Bounding it to the real plaintext length turns it into the io.ReadSeeker
+		// http.ServeContent wants, so Go - not this handler - parses Range, decides 200 vs 206,
+		// and writes Content-Range/Content-Length, exactly as the unencrypted branch below
+		// already relies on it to do.
+		decryptedReaderAt, err := encryption.DecryptReaderAt(file.Encryption, fileHandler)
 		if err != nil {
 			_, _ = w.Write([]byte("Error decrypting file"))
 			fmt.Println(err)
 			return true
 		}
+		http.ServeContent(w, r, file.Name, modTime, io.NewSectionReader(decryptedReaderAt, 0, file.SizeBytes))
 	} else {
-		http.ServeContent(w, r, file.Name, time.Now(), fileHandler)
+		http.ServeContent(w, r, file.Name, modTime, fileHandler)
 	}
 	downloadstatus.SetComplete(statusId)
 	return true

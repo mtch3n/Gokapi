@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	sio "github.com/secure-io/sio-go"
 	"golang.org/x/crypto/scrypt"
 )
 
@@ -170,6 +171,61 @@ func TestEncryptDecrypt(t *testing.T) {
 	err = DecryptReader(*encInfo, &encrypted, &decrypted)
 	test.IsNil(t, err)
 	test.IsEqualByteSlice(t, plaintext, decrypted.Bytes())
+}
+
+// TestDecryptReaderAt is the test that matters for storage.ServeFile's range support: getStream
+// builds a chunked sio.Stream (sio.BufSize per chunk), so a ranged read has to decrypt only the
+// chunk(s) it touches rather than the whole file - if chunked AEAD decryption at an arbitrary
+// offset were subtly wrong, this is where it would show. Every offset read via DecryptReaderAt
+// must come back byte-identical to the same slice of a full sequential DecryptReader decrypt of
+// the same ciphertext, at the first byte, the last byte, exactly on a chunk boundary, and
+// straddling one.
+func TestDecryptReaderAt(t *testing.T) {
+	key, err := GetRandomCipher()
+	test.IsNil(t, err)
+	Init(models.Configuration{Encryption: models.Encryption{Level: FullEncryptionStored, Cipher: key}})
+
+	// Three full chunks plus a partial fourth, so offsets can land on a boundary, straddle one,
+	// or sit deep inside a single chunk.
+	plaintext := make([]byte, sio.BufSize*3+777)
+	_, err = rand.Read(plaintext)
+	test.IsNil(t, err)
+
+	encInfo := &models.EncryptionInfo{}
+	var ciphertext bytes.Buffer
+	err = Encrypt(encInfo, bytes.NewReader(plaintext), &ciphertext)
+	test.IsNil(t, err)
+
+	// The reference: a full sequential decrypt, exactly as an unranged download would produce.
+	var sequential bytes.Buffer
+	err = DecryptReader(*encInfo, bytes.NewReader(ciphertext.Bytes()), &sequential)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, plaintext, sequential.Bytes())
+
+	readerAt, err := DecryptReaderAt(*encInfo, bytes.NewReader(ciphertext.Bytes()))
+	test.IsNil(t, err)
+
+	cases := []struct {
+		name          string
+		start, length int
+	}{
+		{"first byte", 0, 1},
+		{"last byte", len(plaintext) - 1, 1},
+		{"exactly on a chunk boundary", sio.BufSize, 200},
+		{"straddling a chunk boundary", sio.BufSize - 100, 200},
+		{"straddling the second chunk boundary", sio.BufSize*2 - 50, 300},
+		{"deep inside the final partial chunk", sio.BufSize*3 + 100, 50},
+		{"the whole file", 0, len(plaintext)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := make([]byte, c.length)
+			n, err := readerAt.ReadAt(got, int64(c.start))
+			test.IsNil(t, err)
+			test.IsEqualInt(t, n, c.length)
+			test.IsEqualByteSlice(t, got, sequential.Bytes()[c.start:c.start+c.length])
+		})
+	}
 }
 
 func TestGetRandomData(t *testing.T) {
