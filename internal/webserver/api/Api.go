@@ -2441,16 +2441,12 @@ func mayUserSeeShareRecipients(resourceType int, resourceId string, user models.
 func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId string, user models.User) (shareaccess.Resource, bool) {
 	switch resourceType {
 	case models.ShareResourceFile:
-		// storage.GetFile refuses a file that is expired, exhausted, or pending deletion,
-		// the same check the public file endpoint relies on to 404 for a dead file.
+		// storage.GetFile refuses a file that is expired, spent (even within its download
+		// window - see storage.IsExpiredFile), or pending deletion, the same check the public
+		// file endpoint relies on to 404 for a dead file.
 		file, found := storage.GetFile(resourceId)
 		if !found || file.IsFileRequest() || (file.UserId != user.Id && !user.HasPermission(models.UserPermEditOtherUploads)) {
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
-			return shareaccess.Resource{}, false
-		}
-		if shareWouldGrantUnlimited(file.UnlimitedDownloads, file.DownloadsRemaining) {
-			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput,
-				"This file has no downloads remaining. Raise its download limit before sharing it.")
 			return shareaccess.Resource{}, false
 		}
 		return shareaccess.Resource{
@@ -2474,11 +2470,6 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 		}
 		if !bundleHasOnlyLiveMembers(bundle.Id) {
 			sendError(w, http.StatusNotFound, errorcodes.NotFound, "Invalid resource ID provided.")
-			return shareaccess.Resource{}, false
-		}
-		if shareWouldGrantUnlimited(bundle.UnlimitedDownloads, bundle.DownloadsRemaining) {
-			sendError(w, http.StatusBadRequest, errorcodes.InvalidUserInput,
-				"This folder has no downloads remaining. Raise its download limit before sharing it.")
 			return shareaccess.Resource{}, false
 		}
 		return shareaccess.Resource{Type: resourceType, Id: resourceId, Name: bundle.DisplayName()}, true
@@ -2507,25 +2498,15 @@ func resolveShareResource(w http.ResponseWriter, resourceType int, resourceId st
 // that is not servable, is not resolved by resolveShareResource. The servability check itself
 // mirrors bundleAvailability in internal/webserver; membership is the shared predicate both packages
 // use, so the two cannot independently drift on what counts as a member.
-// shareWouldGrantUnlimited reports whether writing a grant against a resource holding this
-// allowance would hand every recipient an unlimited one.
 //
-// The per-recipient budget is inherited from the resource's own remaining downloads when the
-// caller names no number of its own, which is every caller today (see
-// shareaccess.resolveDownloadsAllowed), and a stored budget of zero means unlimited (see
-// models.ShareRecipient.DownloadsAllowed). A resource whose allowance is already spent therefore
-// inherits zero and grants exactly the opposite of the limit its owner set.
-//
-// It is reachable because spending the last download does not end the resource: it stays live
-// for as long as its download window is open (see models.DownloadAccess.IsExhausted), which is
-// precisely when its owner is still thinking about it and most likely to share it with one more
-// person. Refusing is deliberate rather than substituting some other number: the owner set one
-// limit, that limit is spent, and inventing a fresh allowance here would be this function
-// choosing on their behalf.
-func shareWouldGrantUnlimited(unlimitedDownloads bool, downloadsRemaining int) bool {
-	return !unlimitedDownloads && downloadsRemaining < 1
-}
-
+// storage.IsExpiredFile now refuses a spent resource outright, in or out of its window (see the
+// leeway-session-token plan's storage predicates, R1), so a bundle whose allowance is spent is
+// never resolved by resolveShareResource in the first place: this liveness check, and
+// storage.GetFile's identical one on the file branch above, already end the request before any
+// question about how many downloads a new recipient should inherit is reached. The
+// shareWouldGrantUnlimited guard this function used to sit beside - "a stored budget of zero
+// means unlimited, so a spent resource would otherwise hand every new recipient an unlimited
+// one" - is removed for exactly that reason: dead code for a state that can no longer arrive here.
 func bundleHasOnlyLiveMembers(bundleId string) bool {
 	timeNow := time.Now().Unix()
 	found := false

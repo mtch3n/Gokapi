@@ -33,17 +33,15 @@ func setShareLeeway(t *testing.T, value string) {
 	})
 }
 
-// TestResolveShareResourceRefusesSpentFile covers a file whose download allowance is spent but
-// whose window is still open. shareaccess.resolveDownloadsAllowed inherits the resource's own
-// remaining downloads for every caller that names no number - which is every caller today - and a
-// stored allowance of zero means unlimited, so sharing such a file used to hand each recipient an
-// unlimited budget: the exact opposite of the limit its owner set.
-//
-// The leeway override is what makes this test mean anything rather than merely pass. At the
-// package default of 0 the file would already be exhausted, storage.GetFile would refuse it, and
-// resolveShareResource would never reach the allowance guard at all - so the GetFile assertion
-// below is the precondition, not decoration: it proves the refusal is the guard's doing and not
-// the liveness check's.
+// TestResolveShareResourceRefusesSpentFile covers a file whose download allowance is spent, with
+// its download window still open. Before storage.GetFile enforced R1 (the leeway-session-token
+// plan: a spent resource's ordinary link is dead for everyone, in or out of its window), this
+// used to reach a separate shareWouldGrantUnlimited guard - moved here because
+// shareaccess.resolveDownloadsAllowed inherits the resource's own remaining downloads for every
+// caller that names no number, and a stored allowance of zero means unlimited, so sharing a spent
+// file used to hand each new recipient an unlimited budget. Now storage.GetFile itself refuses
+// the file outright, in or out of its window, so that guard is dead code and was removed with it
+// (see bundleHasOnlyLiveMembers's doc comment) - this test now pins the refusal one level up.
 func TestResolveShareResourceRefusesSpentFile(t *testing.T) {
 	setShareLeeway(t, "1h")
 	owner := models.User{
@@ -59,21 +57,24 @@ func TestResolveShareResourceRefusesSpentFile(t *testing.T) {
 	})
 	t.Cleanup(func() { database.DeleteMetaData(fileId) })
 
-	stored, ok := storage.GetFile(fileId)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	// The window being open (leeway 1h, WindowOpenedAt just now) is what proves this: a spent
+	// file is refused even though its retry window has not closed, not merely because it is
+	// altogether exhausted - the harder, R1-specific half of the claim.
+	_, ok := storage.GetFile(fileId)
+	test.IsEqualBool(t, ok, false)
 
 	w := httptest.NewRecorder()
 	_, resolvedOk := resolveShareResource(w, models.ShareResourceFile, fileId, owner)
 	test.IsEqualBool(t, resolvedOk, false)
-	test.IsEqualInt(t, w.Code, http.StatusBadRequest)
+	test.IsEqualInt(t, w.Code, http.StatusNotFound)
 }
 
-// TestResolveShareResourceRefusesSpentFolder is the same defect on the folder path, which reaches
-// it through a different gate: the folder is admitted by bundleHasOnlyLiveMembers rather than by
-// storage.GetFile, and resolveDownloadsAllowed then inherits the FOLDER's remaining downloads.
-// A member resolves its access from its folder, so an open folder window keeps every member live
-// and the liveness gate passes while the allowance is spent.
+// TestResolveShareResourceRefusesSpentFolder is the same proof on the folder path, which reaches
+// it through a different gate: a member resolves its liveness from its folder (see
+// storage.IsExpiredFile), so bundleHasOnlyLiveMembers is what now refuses a folder whose own
+// allowance is spent, in or out of its window - the folder's ordinary link is dead for everyone,
+// exactly as a file's is, so there is nothing left here for the removed shareWouldGrantUnlimited
+// guard to ever have been reached with a spent-but-live folder.
 func TestResolveShareResourceRefusesSpentFolder(t *testing.T) {
 	setShareLeeway(t, "1h")
 	owner := models.User{
@@ -95,10 +96,10 @@ func TestResolveShareResourceRefusesSpentFolder(t *testing.T) {
 		database.DeleteFileBundle(models.FileBundle{Id: bundle.Id})
 	})
 
-	test.IsEqualBool(t, bundleHasOnlyLiveMembers(bundle.Id), true)
+	test.IsEqualBool(t, bundleHasOnlyLiveMembers(bundle.Id), false)
 
 	w := httptest.NewRecorder()
 	_, resolvedOk := resolveShareResource(w, models.ShareResourceBundle, bundle.Id, owner)
 	test.IsEqualBool(t, resolvedOk, false)
-	test.IsEqualInt(t, w.Code, http.StatusBadRequest)
+	test.IsEqualInt(t, w.Code, http.StatusNotFound)
 }

@@ -261,6 +261,15 @@ func validateNoExtraPaths(spec *OpenAPISpec) []string {
 			validPaths[route.Url] = true
 		}
 	}
+	// /pubapi/* endpoints are registered directly in webserver.createMux, not through routing.go's
+	// routes table, so a documented one would otherwise always read as "extra" - PubApiRoutes is
+	// the second source of valid paths D30 asks for, kept honest by
+	// webserver.TestPubApiRoutesAreAllRegistered on the other side (see PubApiRoutes's own doc
+	// comment). This is a real check, not a skip: a documented /pubapi/ path not in this list -
+	// e.g. one that names a handler which no longer exists, or never did - still fails below.
+	for _, path := range PubApiRoutes {
+		validPaths[path] = true
+	}
 
 	// Check each OpenAPI path
 	for path := range spec.Paths {

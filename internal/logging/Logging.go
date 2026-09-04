@@ -419,9 +419,18 @@ func recipientLogSuffix(r *http.Request) string {
 // WithActor (admin/API downloads) or WithRecipient (a share recipient downloading a restricted
 // resource); public, unrestricted share/hotlink downloads carry no identity by design and are
 // recorded as anonymous.
+//
+// A request marked via WithDownloadSession is recorded with Detail "resumed": the allowance was
+// already spent when the session token was minted, so this delivery is that same pickup
+// finishing rather than a new one, and the audit trail must say so or every in-window retry
+// would look like an extra download nobody can account for.
 func LogDownload(file models.File, r *http.Request, saveIp bool) error {
 	ip := ""
 	recipientSuffix := recipientLogSuffix(r)
+	detail := ""
+	if downloadSessionFromRequest(r) {
+		detail = "resumed"
+	}
 	if saveIp {
 		ip = GetIpAddress(r)
 		createLogEntry(categoryDownload, fmt.Sprintf("IP %s, ID %s, Useragent %s%s", ip, file.Id, sanitiseUserAgent(r), recipientSuffix), false)
@@ -436,6 +445,7 @@ func LogDownload(file models.File, r *http.Request, saveIp bool) error {
 		FileId:     file.Id,
 		Actor:      buildActorFromRequest(r),
 		FileConfig: downloadFileConfig(file),
+		Detail:     detail,
 	})
 }
 
@@ -471,6 +481,36 @@ func LogDownloadDenied(file models.File, r *http.Request, saveIp bool, reason st
 		FileConfig: downloadFileConfig(file),
 		Error:      reason,
 	})
+}
+
+// LogDownloadSession records that a download session token was minted against resourceId, i.e.
+// that the allowance backing it was just spent. This is a guarded, fail-closed event like
+// LogDownload: the endpoint that spent the allowance must refuse the request if this returns a
+// non-nil error, because by then the spend is already irreversible and an unrecorded one is
+// worse than a refused one. It is the "one session entry per pickup" half of the audit trail
+// described in the leeway-session-token plan §7; the eventual delivery - possibly more than one,
+// each a free retry inside the window - is recorded separately by LogDownload, marked resumed
+// after the first via WithDownloadSession.
+func LogDownloadSession(resourceType int, resourceId string, r *http.Request, saveIp bool) error {
+	ip := ""
+	if saveIp {
+		ip = GetIpAddress(r)
+	}
+	createLogEntry(categoryDownload, fmt.Sprintf("Download session issued for %s %s, IP %s%s",
+		shareResourceLabel(resourceType), resourceId, ip, recipientLogSuffix(r)), false)
+	entry := AuditEntry{
+		Category: categoryDownload,
+		Action:   "session-issued",
+		Outcome:  OutcomeSuccess,
+		Ip:       ip,
+		Actor:    buildActorFromRequest(r),
+	}
+	if resourceType == models.ShareResourceBundle {
+		entry.BundleId = resourceId
+	} else {
+		entry.FileId = resourceId
+	}
+	return appendAuditEntry(entry)
 }
 
 var regexUserAgent = regexp.MustCompile(`[^A-Za-z0-9/. ;:+(|)_\-,]`)

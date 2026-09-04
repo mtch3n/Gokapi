@@ -175,8 +175,13 @@ func TestSecretIsNotReReadableInsideAnyWindow(t *testing.T) {
 	test.IsEqualBool(t, IsExpiredFile(revealed, time.Now().Unix()), true)
 }
 
-// TestStatusAndExpiryFollowTheWindow covers the owner's view: a one-pickup file reports active
-// with nothing remaining while its window is open, and downloaded once it closes.
+// TestStatusAndExpiryFollowTheWindow covers the owner's view: a one-pickup file with its window
+// still open is refused by the serving predicate (IsExpiredFile, via IsSpent - R1: the ordinary
+// link is dead for everyone the moment the allowance is spent, window or not) while the owner's
+// OWN view of it (File.Status, still IsExhausted-based - the IsSpent branch is a separate, later
+// commit) reports it active until the window actually closes. The two deliberately disagree while
+// the window is open: one says "nothing to hand a plain request", the other says "not disposed
+// of yet, and the owner can still raise the limit" - see the leeway-session-token plan §4/§5.
 func TestStatusAndExpiryFollowTheWindow(t *testing.T) {
 	setDownloadLeeway(t, "1h")
 	id := "windowstatus_" + helper.GenerateRandomString(8)
@@ -191,7 +196,7 @@ func TestStatusAndExpiryFollowTheWindow(t *testing.T) {
 	database.SaveMetaData(file)
 
 	timeNow := time.Now().Unix()
-	test.IsEqualBool(t, IsExpiredFile(file, timeNow), false)
+	test.IsEqualBool(t, IsExpiredFile(file, timeNow), true)
 	test.IsEqualString(t, file.Status(DownloadAccessOf(file), timeNow), models.StatusActive)
 
 	file.WindowOpenedAt = time.Now().Add(-2 * time.Hour).Unix()
