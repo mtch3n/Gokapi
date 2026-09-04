@@ -1405,12 +1405,13 @@ func isOldTempFile(file os.DirEntry) bool {
 
 // isPendingToBeDeleted returns true if a pending deletion has to be executed.
 //
-// Strictly <, not <=: PendingDeletion can be a genuine future deadline truncated to whole
-// seconds by time.Time.Unix() (DeleteFileSchedule with a sub-second delay), which often lands on
-// the current second - a <= here would then read that as already elapsed the instant it was set,
-// letting CancelPendingFileDeletion refuse a restore that should still have most of a second left
-// to run. DeleteFile backdates PendingDeletion by a second for the immediate-delete case (see its
-// comment) specifically so it does not need <= here to be picked up promptly.
+// Strictly <, not <=: DeleteFile is the only writer of PendingDeletion, and it deliberately
+// backdates the timestamp by one second (see its own comment) rather than setting it to exactly
+// now, precisely so that this check - run moments later by the next CleanUp pass, with its own
+// timeNow a few instructions further on - reads true without racing the clock's whole-second
+// granularity. A <= here would behave identically given that backdating; < is kept only because
+// it is the comparison the backdating was written against, and there is no reason left to prefer
+// either once PendingDeletion can no longer hold a genuine future value.
 func isPendingToBeDeleted(file models.File, timeNow int64) bool {
 	if !file.IsPendingForDeletion() {
 		return false
@@ -1788,67 +1789,6 @@ func DeleteFiles(files []models.File, deleteSource bool) {
 	if deleteSource {
 		go CleanUp(false)
 	}
-}
-
-// DeleteFileSchedule schedules a file for deletion after a specified delay and optionally deletes its source.
-// Returns true if scheduling is successful, false otherwise.
-func DeleteFileSchedule(fileId string, delayMs int, deleteSource bool) bool {
-	if fileId == "" {
-		return false
-	}
-	file, ok := database.GetMetaDataById(fileId)
-	if !ok {
-		return false
-	}
-	if file.IsDisposed() {
-		purgeFile(file.Id, "removed by owner")
-		return true
-	}
-	deletionTime := time.Now().Add(time.Duration(delayMs) * time.Millisecond).Unix()
-	file.PendingDeletion = deletionTime
-	database.SaveMetaData(file)
-	// Explicit parameter to avoid accidental changes
-	go func(id string, timestamp int64) {
-		time.Sleep(time.Duration(delayMs) * time.Millisecond)
-		// A new models.File needs to be assigned to avoid a racy mutation
-		retrievedFile, exists := database.GetMetaDataById(id)
-		if !exists {
-			return
-		}
-		// To prevent race conditions, it is checked if the deletion time is the same time that was originally set
-		if retrievedFile.PendingDeletion == timestamp {
-			DeleteFile(id, deleteSource)
-		}
-	}(fileId, deletionTime)
-	return true
-}
-
-// CancelPendingFileDeletion removes the pending deletion flag for a file identified by the given ID.
-//
-// Refuses once the record is disposed of, whatever the reason - IsDisposed(), not
-// Status() == StatusDeleted: Status reports "expired" or "downloaded" rather than "deleted" for
-// two of the three disposal reasons (see models.File.Status), and there is nothing to restore for
-// any of them either way, since the content is already gone. Also refuses once the record's
-// pending deletion timer has already elapsed and CleanUp simply has not caught up to it yet -
-// without that second check, a restore requested in the gap between the timer elapsing and the
-// next sweep would succeed and then be disposed of anyway moments later, silently undoing the
-// restore.
-//
-// Returns false if the file was not found, or if it can no longer be restored.
-func CancelPendingFileDeletion(fileId string) (models.File, bool) {
-	if fileId == "" {
-		return models.File{}, false
-	}
-	file, ok := database.GetMetaDataById(fileId)
-	if !ok {
-		return models.File{}, false
-	}
-	if file.IsDisposed() || file.Status(DownloadAccessOf(file), time.Now().Unix()) == models.StatusDeleted {
-		return models.File{}, false
-	}
-	file.PendingDeletion = 0
-	database.SaveMetaData(file)
-	return file, true
 }
 
 // MigratePlaintextFileNames converts any file name that a version predating encrypted file names

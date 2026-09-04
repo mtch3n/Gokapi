@@ -708,18 +708,6 @@ func LogFolderDeleteBatch(bundle models.FileBundle, memberFiles []models.File, u
 	return appendAuditEntries(entries)
 }
 
-// LogRestore adds a log entry when the pending deletion of a file was cancelled and the file restored. Non-Blocking
-func LogRestore(file models.File, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("ID %s, restored by %s (user #%d)", file.Id, user.Name, user.Id), false)
-	appendAuditEntryAsync(AuditEntry{
-		Category: categoryEdit,
-		Action:   "file.restored",
-		Outcome:  OutcomeSuccess,
-		FileId:   file.Id,
-		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
-	})
-}
-
 // LogFileExpired records that a file's metadata (and, unless deduplicated, its stored blob)
 // was automatically disposed of by the periodic cleanup job. There is no requester to
 // attribute this to; it is a system action. Non-blocking, as this runs off the request path.

@@ -39,7 +39,7 @@ function deleteOrShowModal(requestId, requestName, count) {
 function deleteFileFr(id, frId) {
     document.getElementById("button-delete-" + id).disabled = true;
     let rowFileEntry = document.getElementById("cell-listupload-"+id);
-    apiFilesDelete(id, 10)
+    apiFilesDelete(id)
         .then(data => {
             changeFileCountFr(frId, -1);
             removeDownloadFileReference(id, frId);
@@ -47,7 +47,6 @@ function deleteFileFr(id, frId) {
 		setTimeout(() => {
 		    rowFileEntry.remove();
 		}, 290);
-	 showToastFileDeletionFr(id);
         })
         .catch(error => {
             alert("Unable to delete file: " + error);
@@ -98,38 +97,6 @@ function removeDownloadFileReference(fileId, frId) {
         btn.classList.remove('disabled');
         btn.setAttribute('onclick', `downloadFilesZipWithPresign('${fileIds.join(',')}', '${recordName}');`);
     }
-}
-
-
-function showToastFileDeletionFr(id) {
-    let notification = document.getElementById("toastnotificationUndo");
-    let filename = document.getElementById("cell-name-" + id).innerText;
-    let filenameToast = document.getElementById("toastFilename");
-    let button = document.getElementById("toastUndoButton");
-
-    filenameToast.innerText = filename;
-
-    button.dataset.fileid = id;
-    hideToast();
-    notification.classList.add("show");
-
-    clearTimeout(toastId);
-    toastId = setTimeout(() => {
-        hideFileToast();
-    }, 5000);
-}
-
-
-function handleUndoFr(button) {
-    hideFileToast();
-    apiFilesRestore(button.dataset.fileid)
-        .then(data => {
-            window.location.reload();
-        })
-        .catch(error => {
-            alert("Unable to restore file: " + error);
-            console.error('Error:', error);
-        });
 }
 
 

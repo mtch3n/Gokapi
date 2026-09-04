@@ -509,10 +509,9 @@ function getAllAvailableFiles() {
 
 function deleteFile(id) {
     document.getElementById("button-delete-" + id).disabled = true;
-    apiFilesDelete(id, 10)
+    apiFilesDelete(id)
         .then(data => {
             changeRowCount(false, document.getElementById("row-" + id));
-            showToastFileDeletion(id);
             notifyWorker({ type: "fileDeleted", id: id });
         })
         .catch(error => {
@@ -1035,45 +1034,6 @@ function showQrCode(url) {
         correctLevel: QRCode.CorrectLevel.H
     });
     overlay.addEventListener("click", hideQrCode);
-}
-
-
-function showToastFileDeletion(id) {
-    let notification = document.getElementById("toastnotificationUndo");
-    let filename = document.getElementById("cell-name-" + id).innerText;
-    let filenameToast = document.getElementById("toastFilename");
-    let button = document.getElementById("toastUndoButton");
-
-    filenameToast.innerText = filename;
-
-    button.dataset.fileid = id;
-    hideToast();
-    notification.classList.add("show");
-
-    clearTimeout(toastId);
-    toastId = setTimeout(() => {
-        hideFileToast();
-    }, 5000);
-}
-
-function hideFileToast() {
-    document.getElementById("toastnotificationUndo").classList.remove("show");
-}
-
-function handleUndo(button) {
-    hideFileToast();
-    apiFilesRestore(button.dataset.fileid)
-        .then(data => {
-            addRow(data.FileInfo);
-            notifyWorker({ type: "fileAdded", item: data.FileInfo });
-            if (isE2EEnabled) {
-                GokapiE2EDecryptMenu();
-            }
-        })
-        .catch(error => {
-            alert("Unable to restore file: " + error);
-            console.error('Error:', error);
-        });
 }
 
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forceu/gokapi/internal/test"
 )
@@ -36,6 +37,23 @@ func TestToJsonResult(t *testing.T) {
 	}
 	test.IsEqualString(t, file.ToJsonResult("serverurl/", false, file.DownloadAccess(0)), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","HotlinkId":"hotlinkid","ContentType":"text/html","ExpireAtString":"2025-06-25 11:48:28","UrlDownload":"serverurl/d?id=testId","UrlHotlink":"","FileRequestId":"","BundleId":"","UploadDate":1748180908,"ExpireAt":1750852108,"SizeBytes":10,"DownloadsRemaining":1,"DownloadCount":3,"UnlimitedDownloads":true,"UnlimitedTime":true,"DisposedAt":0,"RequiresClientSideDecryption":true,"IsEncrypted":true,"IsEndToEndEncrypted":false,"IsPasswordProtected":true,"IsSavedOnLocalStorage":false,"Status":"deleted","AllowanceGoverning":"own","AllowanceRemaining":1,"AllowanceUnlimited":true,"IsFileRequest":false,"UploaderId":2},"IncludeFilename":false}`)
 	test.IsEqualString(t, file.ToJsonResult("serverurl/", true, file.DownloadAccess(0)), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","HotlinkId":"hotlinkid","ContentType":"text/html","ExpireAtString":"2025-06-25 11:48:28","UrlDownload":"serverurl/d/testId/testName","UrlHotlink":"","FileRequestId":"","BundleId":"","UploadDate":1748180908,"ExpireAt":1750852108,"SizeBytes":10,"DownloadsRemaining":1,"DownloadCount":3,"UnlimitedDownloads":true,"UnlimitedTime":true,"DisposedAt":0,"RequiresClientSideDecryption":true,"IsEncrypted":true,"IsEndToEndEncrypted":false,"IsPasswordProtected":true,"IsSavedOnLocalStorage":false,"Status":"deleted","AllowanceGoverning":"own","AllowanceRemaining":1,"AllowanceUnlimited":true,"IsFileRequest":false,"UploaderId":2},"IncludeFilename":true}`)
+}
+
+// TestStatusPendingDeletionAlwaysMeansDeleted pins that a non-zero PendingDeletion reports
+// StatusDeleted regardless of how far in the past its timestamp is. DeleteFile is the only writer
+// of this field now that scheduled deletion is gone, and it always backdates - a future value can
+// no longer legitimately occur - but the test sets one anyway, so that reintroducing a second,
+// still-counting-down branch (what StatusPendingDeletion used to mean) fails here rather than
+// going unnoticed.
+func TestStatusPendingDeletionAlwaysMeansDeleted(t *testing.T) {
+	pastFile := File{PendingDeletion: time.Now().Add(-time.Hour).Unix(), UnlimitedTime: true, UnlimitedDownloads: true}
+	test.IsEqualString(t, pastFile.Status(pastFile.DownloadAccess(0), time.Now().Unix()), StatusDeleted)
+
+	farPastFile := File{PendingDeletion: 1, UnlimitedTime: true, UnlimitedDownloads: true}
+	test.IsEqualString(t, farPastFile.Status(farPastFile.DownloadAccess(0), time.Now().Unix()), StatusDeleted)
+
+	futureFile := File{PendingDeletion: time.Now().Add(time.Hour).Unix(), UnlimitedTime: true, UnlimitedDownloads: true}
+	test.IsEqualString(t, futureFile.Status(futureFile.DownloadAccess(0), time.Now().Unix()), StatusDeleted)
 }
 
 func TestIsLocalStorage(t *testing.T) {
