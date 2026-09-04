@@ -299,17 +299,15 @@ func TestMetaData(t *testing.T) {
 		return withoutNameEncryptedRaw(result), ok
 	}, increasedDownload, true)
 
-	// A leeway of 0 gives every window zero length, so this behaves exactly like the
-	// unconditional decrement that preceded windows: one allowance spent per call.
+	// Every granted call spends: one off DownloadsRemaining, one onto DownloadCount, and the
+	// window stamped for the disposal delay to read later.
 	acquiredAt := time.Now().Unix()
 	increasedDownload.DownloadCount = increasedDownload.DownloadCount + 1
 	increasedDownload.DownloadsRemaining = increasedDownload.DownloadsRemaining - 1
 	increasedDownload.WindowOpenedAt = acquiredAt
 
 	runAllTypesCompareTwoOutputs(t, func() (any, any) {
-		granted, opened := AcquireDownload(file.Id, acquiredAt, 0)
-		test.IsEqualBool(t, granted, true)
-		test.IsEqualBool(t, opened, true)
+		test.IsEqualBool(t, AcquireDownload(file.Id, acquiredAt), true)
 		result, ok := GetMetaDataById(file.Id)
 		return withoutNameEncryptedRaw(result), ok
 	}, increasedDownload, true)
@@ -691,83 +689,99 @@ func TestDeleteMetaDataCascadesShareGrants(t *testing.T) {
 
 // The download allowance is per recipient, not per resource, so two recipients
 // on the same file each get their own budget rather than racing for one pool.
-// TestAcquireDownloadWindow proves the window rule at the provider level, across every database
-// type: with a leeway above 0 a second request inside the window is granted without spending a
-// second allowance, and once the window has closed an exhausted file is refused again. With a
-// leeway of 0 - the shipped default - the window has zero length, so every request opens its own
-// and the behaviour is the one that preceded windows entirely (see TestMetaData above).
-func TestAcquireDownloadWindow(t *testing.T) {
-	const leeway = 3600
+// TestAcquireDownloadNeverGrantsFree proves at the facade level, across every database type,
+// that AcquireDownload always spends and never grants for free.
+//
+// This test used to be TestAcquireDownloadWindow, and asserted the opposite of what it asserts
+// now: that a second request arriving soon after the first was served without spending a second
+// allowance. That expectation was deliberately inverted. The only thing the old free ride was
+// keyed on was the resource id, which identifies nobody, so anyone holding the link could keep
+// re-triggering it and a file capped at N downloads was in practice uncapped. Resuming a genuine
+// interrupted transfer without paying twice is now the job of the signed session token checked in
+// the webserver layer, which never reaches this call.
+func TestAcquireDownloadNeverGrantsFree(t *testing.T) {
 	runAllTypesNoOutput(t, func() {
 		timeNow := time.Now().Unix()
 		id := "windowed"
 		SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1})
 
-		granted, opened := AcquireDownload(id, timeNow, leeway)
-		test.IsEqualBool(t, granted, true)
-		test.IsEqualBool(t, opened, true)
+		test.IsEqualBool(t, AcquireDownload(id, timeNow), true)
 
-		// Inside the window: served, and nothing is spent. This is the retry or the resume of
-		// the same pickup, not a second one.
-		granted, opened = AcquireDownload(id, timeNow+60, leeway)
-		test.IsEqualBool(t, granted, true)
-		test.IsEqualBool(t, opened, false)
+		// Immediately afterwards, well inside what used to be the leeway: refused, because the
+		// single allowance has already been spent. Previously this was granted for free.
+		test.IsEqualBool(t, AcquireDownload(id, timeNow+60), false)
+
+		// The refusal wrote nothing: exactly one allowance spent, one download counted, and the
+		// window still stamped at the one call that was granted.
 		stored, ok := GetMetaDataById(id)
 		test.IsEqualBool(t, ok, true)
 		test.IsEqualInt(t, stored.DownloadsRemaining, 0)
 		test.IsEqualInt(t, stored.DownloadCount, 1)
 		test.IsEqualInt64(t, stored.WindowOpenedAt, timeNow)
 
-		// After the window, with nothing remaining, the file is refused.
-		granted, opened = AcquireDownload(id, timeNow+leeway+1, leeway)
-		test.IsEqualBool(t, granted, false)
-		test.IsEqualBool(t, opened, false)
-
-		// A file that still has an allowance opens a fresh window instead, so a folder or file
-		// allowed several pickups gets a window each rather than one shared fuse.
+		// A file that still has an allowance spends it and re-stamps the window, which the
+		// disposal delay - not any grant decision - reads.
 		SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 2, WindowOpenedAt: timeNow})
-		granted, opened = AcquireDownload(id, timeNow+leeway+1, leeway)
-		test.IsEqualBool(t, granted, true)
-		test.IsEqualBool(t, opened, true)
+		test.IsEqualBool(t, AcquireDownload(id, timeNow+3601), true)
 		stored, ok = GetMetaDataById(id)
 		test.IsEqualBool(t, ok, true)
 		test.IsEqualInt(t, stored.DownloadsRemaining, 1)
-		test.IsEqualInt64(t, stored.WindowOpenedAt, timeNow+leeway+1)
+		test.IsEqualInt64(t, stored.WindowOpenedAt, timeNow+3601)
 
 		DeleteMetaData(id)
 	})
 }
 
-// TestAcquireBundleDownloadWindow is TestAcquireDownloadWindow for a folder, whose window covers
-// every member of it at once - one visit, one window, one folder.
-func TestAcquireBundleDownloadWindow(t *testing.T) {
-	const leeway = 3600
+// TestAcquireDownloadGrantsExactlyOnce is the property this whole change exists to create: two
+// consecutive calls on a file with one download left grant exactly once, and the file ends at
+// DownloadsRemaining 0 with DownloadCount incremented exactly once. Asserted at the facade so it
+// holds for every provider behind it.
+func TestAcquireDownloadGrantsExactlyOnce(t *testing.T) {
+	runAllTypesNoOutput(t, func() {
+		timeNow := time.Now().Unix()
+		id := "spendonce"
+		SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1})
+
+		test.IsEqualBool(t, AcquireDownload(id, timeNow), true)
+		test.IsEqualBool(t, AcquireDownload(id, timeNow), false)
+
+		stored, ok := GetMetaDataById(id)
+		test.IsEqualBool(t, ok, true)
+		test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+		test.IsEqualInt(t, stored.DownloadCount, 1)
+
+		DeleteMetaData(id)
+	})
+}
+
+// TestAcquireBundleDownloadNeverGrantsFree is TestAcquireDownloadNeverGrantsFree for a folder.
+// It was TestAcquireBundleDownloadWindow, and its middle assertion has been inverted for the same
+// reason as that test's: a folder's id identifies nobody either, so the second visit now spends
+// instead of riding free, and with a single allowance it is therefore refused.
+func TestAcquireBundleDownloadNeverGrantsFree(t *testing.T) {
 	runAllTypesNoOutput(t, func() {
 		timeNow := time.Now().Unix()
 		bundle := models.FileBundle{Id: "windowedbundle", Name: "windowedbundle", DownloadsRemaining: 1}
 		SaveFileBundle(bundle)
 
-		granted, opened := AcquireBundleDownload(bundle.Id, timeNow, leeway)
-		test.IsEqualBool(t, granted, true)
-		test.IsEqualBool(t, opened, true)
+		test.IsEqualBool(t, AcquireBundleDownload(bundle.Id, timeNow), true)
+		test.IsEqualBool(t, AcquireBundleDownload(bundle.Id, timeNow+60), false)
 
-		granted, opened = AcquireBundleDownload(bundle.Id, timeNow+60, leeway)
-		test.IsEqualBool(t, granted, true)
-		test.IsEqualBool(t, opened, false)
 		stored, ok := GetFileBundle(bundle.Id)
 		test.IsEqualBool(t, ok, true)
 		test.IsEqualInt(t, stored.DownloadsRemaining, 0)
 		test.IsEqualInt64(t, stored.WindowOpenedAt, timeNow)
 
-		granted, _ = AcquireBundleDownload(bundle.Id, timeNow+leeway+1, leeway)
-		test.IsEqualBool(t, granted, false)
+		test.IsEqualBool(t, AcquireBundleDownload(bundle.Id, timeNow+3601), false)
 
 		DeleteFileBundle(bundle)
 	})
 }
 
-// TestAcquireShareGrantDownloadWindow is TestAcquireDownloadWindow for a recipient's own
-// allowance, which the grant's lastdownloadat has always recorded the start of.
+// TestAcquireShareGrantDownloadWindow covers the one window that is still granted on: a
+// recipient's own allowance, whose start the grant's lastdownloadat has always recorded. Unlike
+// AcquireDownload's, this window lives on one recipient's grant row and is therefore already
+// bound to an identity, so a free ride inside it cannot be taken by anyone else.
 func TestAcquireShareGrantDownloadWindow(t *testing.T) {
 	const leeway = 3600
 	runShareTypes(t, func() {

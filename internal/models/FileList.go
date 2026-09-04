@@ -144,6 +144,34 @@ func (a DownloadAccess) IsExhausted(timeNow int64) bool {
 	return a.DownloadsRemaining < 1 && !a.UnlimitedDownloads && a.WindowOpenedAt+a.Leeway <= timeNow
 }
 
+// IsSpent reports whether the download allowance itself is gone, regardless of any window still
+// open over it. This is the question "is there anything left to give out", as distinct from
+// IsExhausted's "is this over", which waits for the window, and from IsClosed's "may an ordinary
+// caller still have it".
+func (a DownloadAccess) IsSpent() bool {
+	return a.DownloadsRemaining < 1 && !a.UnlimitedDownloads
+}
+
+// IsClosed reports whether the resource's ordinary link is dead - the question every serving path
+// asks before handing bytes to a caller who presents no download session token.
+//
+// It differs from IsExhausted precisely over what an open window means, and the difference is the
+// whole point. An anonymous window binds nobody: it is a timestamp on the resource row, so
+// treating it as "still live" hands the resource to whoever holds the link, which is what the
+// session token exists to stop. A recipient's window is different - it lives on that recipient's
+// own grant row, is enforced by the provider's AcquireShareGrantDownload against that recipient
+// alone, and a stranger never reaches it because RecipientFor refuses them first. That one is
+// already bound, so it keeps the resource open and IsExhausted is the right question for it.
+//
+// This carve-out is what makes "a share restricted to named recipients is unaffected" a fact
+// rather than a claim.
+func (a DownloadAccess) IsClosed(timeNow int64) bool {
+	if a.Governing == AllowanceGoverningRecipients {
+		return a.IsExhausted(timeNow)
+	}
+	return a.IsSpent()
+}
+
 // WithShareGrants replaces the download axes with the ones the resource's recipient grants
 // impose, keeping its expiry and its window length. It is what makes a recipient list supersede
 // the resource's own download allowance, exactly as AccessMode above makes it supersede the

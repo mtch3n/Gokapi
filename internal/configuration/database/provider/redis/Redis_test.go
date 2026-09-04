@@ -293,9 +293,7 @@ func TestDatabaseProvider_AcquireDownload(t *testing.T) {
 	test.IsEqual(t, retrievedFile, newFile)
 
 	timeNow := time.Now().Unix()
-	granted, opened := dbInstance.AcquireDownload(newFile.Id, timeNow, 0)
-	test.IsEqualBool(t, granted, true)
-	test.IsEqualBool(t, opened, true)
+	test.IsEqualBool(t, dbInstance.AcquireDownload(newFile.Id, timeNow), true)
 	retrievedFile, ok = dbInstance.GetMetaDataById(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, retrievedFile.DownloadCount, 4)
@@ -306,6 +304,42 @@ func TestDatabaseProvider_AcquireDownload(t *testing.T) {
 	retrievedFile.NameEncryptedRaw = nil
 	test.IsEqual(t, retrievedFile, newFile)
 	dbInstance.DeleteMetaData(newFile.Id)
+}
+
+// TestAcquireDownloadGrantsExactlyOnce is the property this change exists to create, on the Redis
+// provider: two consecutive calls on a file with one download left grant exactly once, and the
+// file ends at DownloadsRemaining 0 with DownloadCount incremented exactly once. The second call
+// carries the same timeNow as the first, so before this change the Lua script's leading window
+// branch would have served it free.
+func TestAcquireDownloadGrantsExactlyOnce(t *testing.T) {
+	const id = "redisspendonce"
+	dbInstance.SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1})
+	timeNow := time.Now().Unix()
+
+	test.IsEqualBool(t, dbInstance.AcquireDownload(id, timeNow), true)
+	test.IsEqualBool(t, dbInstance.AcquireDownload(id, timeNow), false)
+
+	stored, ok := dbInstance.GetMetaDataById(id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	test.IsEqualInt(t, stored.DownloadCount, 1)
+	dbInstance.DeleteMetaData(id)
+}
+
+// TestAcquireBundleDownloadGrantsExactlyOnce is TestAcquireDownloadGrantsExactlyOnce for a
+// folder, which spends an allowance without a DownloadCount to pair it with.
+func TestAcquireBundleDownloadGrantsExactlyOnce(t *testing.T) {
+	const id = "redisbundlespendonce"
+	dbInstance.SaveFileBundle(models.FileBundle{Id: id, Name: id, DownloadsRemaining: 1})
+	timeNow := time.Now().Unix()
+
+	test.IsEqualBool(t, dbInstance.AcquireBundleDownload(id, timeNow), true)
+	test.IsEqualBool(t, dbInstance.AcquireBundleDownload(id, timeNow), false)
+
+	stored, ok := dbInstance.GetFileBundle(id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	dbInstance.DeleteFileBundle(models.FileBundle{Id: id})
 }
 
 func TestE2EConfig(t *testing.T) {

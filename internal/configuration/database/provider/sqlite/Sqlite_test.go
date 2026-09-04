@@ -211,9 +211,7 @@ func TestDatabaseProvider_AcquireDownload(t *testing.T) {
 	test.IsEqual(t, retrievedFile, newFile)
 
 	timeNow := time.Now().Unix()
-	granted, opened := dbInstance.AcquireDownload(newFile.Id, timeNow, 0)
-	test.IsEqualBool(t, granted, true)
-	test.IsEqualBool(t, opened, true)
+	test.IsEqualBool(t, dbInstance.AcquireDownload(newFile.Id, timeNow), true)
 	retrievedFile, ok = dbInstance.GetMetaDataById(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualInt(t, retrievedFile.DownloadCount, 4)
@@ -226,19 +224,22 @@ func TestDatabaseProvider_AcquireDownload(t *testing.T) {
 	dbInstance.DeleteMetaData(newFile.Id)
 }
 
-// TestAcquireDownloadConcurrentFirstRequests is the test for AcquireDownload's third step. Two
-// requests arriving together on a one-pickup file both find no window open; one wins the
-// conditional UPDATE and opens it, and the other's UPDATE matches nothing because the allowance
-// is now spent. Without the re-check that follows, that loser is refused - which is exactly the
-// "your download broke, and it cost you your only one" failure the window exists to remove, just
-// moved to a race instead of a dropped connection. Both must be granted, exactly one must report
-// having opened the window, and the allowance must land on 0 rather than going negative.
+// TestAcquireDownloadConcurrentFirstRequests hammers a one-pickup file with simultaneous
+// requests. Exactly one may be granted; the rest lose the conditional UPDATE because the
+// allowance is already spent, and the allowance lands on 0 rather than going negative.
+//
+// This test previously asserted that all eight workers were granted and that only one of them
+// reported opening the window - the losers were let through free on the winner's window. That
+// expectation is deliberately inverted here. The window was keyed on the file id alone, which
+// identifies nobody, so "let the loser of the race through" was indistinguishable from "let
+// anybody with the link through", and a file capped at one download served eight. Concurrency is
+// no longer a reason to hand out a download the caller has not paid for; a genuine retry or
+// resume is carried by the signed session token in the webserver layer instead.
 //
 // Run over several iterations because the interleaving is not guaranteed on any single one.
 func TestAcquireDownloadConcurrentFirstRequests(t *testing.T) {
 	const iterations = 50
 	const workers = 8
-	const leeway = 3600
 
 	for i := 0; i < iterations; i++ {
 		id := "concurrentwindow" + strconv.Itoa(i)
@@ -246,30 +247,59 @@ func TestAcquireDownloadConcurrentFirstRequests(t *testing.T) {
 		timeNow := time.Now().Unix()
 
 		var wg sync.WaitGroup
-		var grantedCount, openedCount int32
+		var grantedCount int32
 		wg.Add(workers)
 		for j := 0; j < workers; j++ {
 			go func() {
 				defer wg.Done()
-				granted, opened := dbInstance.AcquireDownload(id, timeNow, leeway)
-				if granted {
+				if dbInstance.AcquireDownload(id, timeNow) {
 					atomic.AddInt32(&grantedCount, 1)
-				}
-				if opened {
-					atomic.AddInt32(&openedCount, 1)
 				}
 			}()
 		}
 		wg.Wait()
 
-		test.IsEqualInt(t, int(grantedCount), workers)
-		test.IsEqualInt(t, int(openedCount), 1)
+		test.IsEqualInt(t, int(grantedCount), 1)
 		stored, ok := dbInstance.GetMetaDataById(id)
 		test.IsEqualBool(t, ok, true)
 		test.IsEqualInt(t, stored.DownloadsRemaining, 0)
 		test.IsEqualInt(t, stored.DownloadCount, 1)
 		dbInstance.DeleteMetaData(id)
 	}
+}
+
+// TestAcquireDownloadGrantsExactlyOnce is the property this change exists to create, on the
+// SQLite provider: two consecutive calls on a file with one download left grant exactly once, and
+// the file ends at DownloadsRemaining 0 with DownloadCount incremented exactly once.
+func TestAcquireDownloadGrantsExactlyOnce(t *testing.T) {
+	id := "sqlitespendonce"
+	dbInstance.SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1})
+	timeNow := time.Now().Unix()
+
+	test.IsEqualBool(t, dbInstance.AcquireDownload(id, timeNow), true)
+	test.IsEqualBool(t, dbInstance.AcquireDownload(id, timeNow), false)
+
+	stored, ok := dbInstance.GetMetaDataById(id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	test.IsEqualInt(t, stored.DownloadCount, 1)
+	dbInstance.DeleteMetaData(id)
+}
+
+// TestAcquireBundleDownloadGrantsExactlyOnce is TestAcquireDownloadGrantsExactlyOnce for a
+// folder, which spends an allowance without a DownloadCount to pair it with.
+func TestAcquireBundleDownloadGrantsExactlyOnce(t *testing.T) {
+	id := "sqlitebundlespendonce"
+	dbInstance.SaveFileBundle(models.FileBundle{Id: id, Name: id, DownloadsRemaining: 1})
+	timeNow := time.Now().Unix()
+
+	test.IsEqualBool(t, dbInstance.AcquireBundleDownload(id, timeNow), true)
+	test.IsEqualBool(t, dbInstance.AcquireBundleDownload(id, timeNow), false)
+
+	stored, ok := dbInstance.GetFileBundle(id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	dbInstance.DeleteFileBundle(models.FileBundle{Id: id})
 }
 
 func TestApiKey(t *testing.T) {

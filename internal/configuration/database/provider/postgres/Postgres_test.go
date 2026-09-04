@@ -196,9 +196,7 @@ func TestFileMetaData(t *testing.T) {
 	test.IsEqualInt64(t, retrieved.WindowOpenedAt, 0)
 
 	timeNow := time.Now().Unix()
-	granted, opened := dbInstance.AcquireDownload("file-1", timeNow, 0)
-	test.IsEqualBool(t, granted, true)
-	test.IsEqualBool(t, opened, true)
+	test.IsEqualBool(t, dbInstance.AcquireDownload("file-1", timeNow), true)
 	retrieved, _ = dbInstance.GetMetaDataById("file-1")
 	test.IsEqualInt(t, retrieved.DownloadCount, 1)
 	test.IsEqualInt(t, retrieved.DownloadsRemaining, 2)
@@ -246,13 +244,13 @@ func TestAcquireDownloadAtomicAcrossInstances(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if _, opened := instanceA.AcquireDownload(id, time.Now().Unix(), 0); opened {
+			if instanceA.AcquireDownload(id, time.Now().Unix()) {
 				atomic.AddInt32(&successCount, 1)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if _, opened := instanceB.AcquireDownload(id, time.Now().Unix(), 0); opened {
+			if instanceB.AcquireDownload(id, time.Now().Unix()) {
 				atomic.AddInt32(&successCount, 1)
 			}
 		}()
@@ -294,7 +292,7 @@ func TestAcquireDownloadManyGoroutinesNeverExceedsAllowance(t *testing.T) {
 		}
 		go func() {
 			defer wg.Done()
-			if _, opened := instance.AcquireDownload(id, time.Now().Unix(), 0); opened {
+			if instance.AcquireDownload(id, time.Now().Unix()) {
 				atomic.AddInt32(&successCount, 1)
 			}
 		}()
@@ -306,6 +304,43 @@ func TestAcquireDownloadManyGoroutinesNeverExceedsAllowance(t *testing.T) {
 	test.IsEqualInt(t, hammered.DownloadsRemaining, 0)
 
 	instanceA.DeleteMetaData(id)
+}
+
+// TestAcquireDownloadGrantsExactlyOnce is the property this change exists to create, on the
+// Postgres provider: two consecutive calls on a file with one download left grant exactly once,
+// and the file ends at DownloadsRemaining 0 with DownloadCount incremented exactly once. The
+// second call is close enough behind the first to have ridden its window free before this change.
+func TestAcquireDownloadGrantsExactlyOnce(t *testing.T) {
+	testConfig(t)
+	const id = "pgspendonce"
+	dbInstance.SaveMetaData(models.File{Id: id, Name: id, DownloadsRemaining: 1})
+	timeNow := time.Now().Unix()
+
+	test.IsEqualBool(t, dbInstance.AcquireDownload(id, timeNow), true)
+	test.IsEqualBool(t, dbInstance.AcquireDownload(id, timeNow), false)
+
+	stored, ok := dbInstance.GetMetaDataById(id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	test.IsEqualInt(t, stored.DownloadCount, 1)
+	dbInstance.DeleteMetaData(id)
+}
+
+// TestAcquireBundleDownloadGrantsExactlyOnce is TestAcquireDownloadGrantsExactlyOnce for a
+// folder, which spends an allowance without a DownloadCount to pair it with.
+func TestAcquireBundleDownloadGrantsExactlyOnce(t *testing.T) {
+	testConfig(t)
+	const id = "pgbundlespendonce"
+	dbInstance.SaveFileBundle(models.FileBundle{Id: id, Name: id, DownloadsRemaining: 1})
+	timeNow := time.Now().Unix()
+
+	test.IsEqualBool(t, dbInstance.AcquireBundleDownload(id, timeNow), true)
+	test.IsEqualBool(t, dbInstance.AcquireBundleDownload(id, timeNow), false)
+
+	stored, ok := dbInstance.GetFileBundle(id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	dbInstance.DeleteFileBundle(models.FileBundle{Id: id})
 }
 
 func TestHotlinks(t *testing.T) {

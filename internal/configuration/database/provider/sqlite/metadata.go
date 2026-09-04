@@ -226,51 +226,23 @@ func (p DatabaseProvider) encryptNameForSave(file models.File) ([]byte, error) {
 	return storedName, err
 }
 
-// AcquireDownload atomically lets one request through to a capped file's content, in three steps:
-// serve free inside an open window, otherwise open a window and spend an allowance, otherwise
-// re-check the window because a concurrent caller may have opened one in between. The decrement is
-// conditional on DownloadsRemaining > 0, so the database itself refuses to go below zero, and on
-// the window still being closed, so two callers cannot both open one.
+// AcquireDownload spends one download: DownloadsRemaining-1, DownloadCount+1,
+// WindowOpenedAt=timeNow, only if DownloadsRemaining > 0. Returns whether it did.
 //
-// The third step is what makes two simultaneous first requests on a one-download file both
-// succeed: exactly one of them opens the window, the other loses the conditional UPDATE and finds
-// the winner's window on the re-check. Without it the loser would be refused, which is the failure
-// the window exists to remove.
-func (p DatabaseProvider) AcquireDownload(id string, timeNow, leeway int64) (bool, bool) {
-	windowOpenSince := timeNow - leeway
-	if p.isDownloadWindowOpen(id, windowOpenSince) {
-		return true, false
-	}
+// One conditional UPDATE is the whole operation. The decrement is conditional on
+// DownloadsRemaining > 0, so the database itself refuses to go below zero and two concurrent
+// callers on a one-download file cannot both win. There is deliberately no window predicate and
+// no free path: the id alone identifies nobody, so granting on an open window would make a capped
+// file unlimited for anyone holding its link. WindowOpenedAt is still written, because the
+// disposal delay reads it, but nothing reads it as a grant any more.
+func (p DatabaseProvider) AcquireDownload(id string, timeNow int64) bool {
 	result, err := p.sqliteDb.Exec(`UPDATE FileMetaData SET DownloadCount = DownloadCount + 1,
                         DownloadsRemaining = DownloadsRemaining - 1, WindowOpenedAt = ?
-                        WHERE id = ? AND DownloadsRemaining > 0 AND WindowOpenedAt <= ?`, timeNow, id, windowOpenSince)
+                        WHERE id = ? AND DownloadsRemaining > 0`, timeNow, id)
 	helper.Check(err)
 	rowsAffected, err := result.RowsAffected()
 	helper.Check(err)
-	if rowsAffected > 0 {
-		return true, true
-	}
-	return p.isDownloadWindowOpen(id, windowOpenSince), false
-}
-
-// isDownloadWindowOpen reports whether the file's most recent download window is still open.
-// Read with a SELECT rather than the row count of a no-op UPDATE, because this runs on the free
-// path of every request inside a window and must not write: on Postgres, where the same statement
-// is used, an UPDATE would leave a dead tuple behind per request. Reading it separately from the
-// UPDATE that follows is safe because WindowOpenedAt only ever moves forward, so a window seen
-// open cannot have closed again by the time the caller acts on it.
-func (p DatabaseProvider) isDownloadWindowOpen(id string, windowOpenSince int64) bool {
-	var windowOpenedAt int64
-	row := p.sqliteDb.QueryRow("SELECT WindowOpenedAt FROM FileMetaData WHERE Id = ?", id)
-	err := row.Scan(&windowOpenedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false
-		}
-		helper.Check(err)
-		return false
-	}
-	return windowOpenedAt > windowOpenSince
+	return rowsAffected > 0
 }
 
 // IncreaseDownloadCount atomically increases the download count of a file, leaving its allowance

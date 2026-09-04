@@ -67,10 +67,20 @@ func (w *abortingResponseWriter) Write(content []byte) (int, error) {
 
 func (w *abortingResponseWriter) WriteHeader(int) {}
 
-// TestServeFileRetriesAbortedTransferInsideWindow is the regression test for the failure the
-// window exists to remove: a one-pickup file whose first transfer breaks part way through used
-// to leave the recipient with nothing, the allowance spent and the file due for deletion.
-func TestServeFileRetriesAbortedTransferInsideWindow(t *testing.T) {
+// TestServeFileRefusesATokenlessRetryInsideTheWindow pins the rule that replaced the free ride.
+//
+// The window used to make a spent file serve anyone who asked, for nothing, until it closed: this
+// test asserted exactly that, and it was the end-to-end statement of the defect - a file limited
+// to one download served twice, with the counter moving once. A window is a timestamp on the
+// file's row, so "inside the window" identified nobody, and the recipient the leeway was meant to
+// protect was indistinguishable from anyone else holding the link.
+//
+// The retry the leeway exists for is now carried by the session token minted when the window
+// opened (see downloadsession, and webserver.serveFile, which answers a tokened request without
+// spending at all). That path cannot be exercised here: ServeFile never sees a token and never
+// mints one. What is asserted here is the half that belongs to this layer - a caller arriving
+// with nothing to prove they opened the window gets nothing.
+func TestServeFileRefusesATokenlessRetryInsideTheWindow(t *testing.T) {
 	setDownloadLeeway(t, "1h")
 	sha1 := writeBlob(t, "the whole body, delivered on the retry")
 	id := "windowretry_" + helper.GenerateRandomString(8)
@@ -95,14 +105,10 @@ func TestServeFileRetriesAbortedTransferInsideWindow(t *testing.T) {
 	test.IsEqualInt(t, spent.DownloadsRemaining, 0)
 	test.IsEqualBool(t, spent.WindowOpenedAt > 0, true)
 
-	// The file is still reachable, because its window is open, and the retry costs nothing.
-	retry, ok := GetFile(id)
-	test.IsEqualBool(t, ok, true)
+	// The window is open, so the row is not yet disposed and the file is still on disk - but a
+	// second caller presenting no token is refused, and spends nothing trying.
 	w := httptest.NewRecorder()
-	test.IsEqualBool(t, ServeFile(retry, w, httptest.NewRequest("GET", "/"+id, nil), true, true, false, true), true)
-	content, err := io.ReadAll(w.Result().Body)
-	test.IsNil(t, err)
-	test.IsEqualString(t, string(content), "the whole body, delivered on the retry")
+	test.IsEqualBool(t, ServeFile(spent, w, httptest.NewRequest("GET", "/"+id, nil), true, true, false, true), false)
 
 	after, ok := database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
@@ -262,9 +268,7 @@ func TestCleanUpDisposesEveryMemberWhenFolderIsExhausted(t *testing.T) {
 	}
 	ids := saveBundleWithMembers(t, bundle, 3)
 
-	granted, opened := database.AcquireBundleDownload(bundle.Id, time.Now().Unix(), 0)
-	test.IsEqualBool(t, granted, true)
-	test.IsEqualBool(t, opened, true)
+	test.IsEqualBool(t, database.AcquireBundleDownload(bundle.Id, time.Now().Unix()), true)
 
 	CleanUp(false)
 

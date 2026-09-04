@@ -2082,9 +2082,10 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 // models.FileBundle.DownloadsRemaining) - the folder-level counter that replaces each member's
 // now-inert DownloadsRemaining. A zip download and a single-member download both go through this
 // exactly once per request (see pubApiFolderZip), so the same allowance gates both uniformly, and
-// both are free while the visit's download window is still open. Returns false, refusing to
-// serve, once the allowance is exhausted and that window has closed; always true for an unlimited
-// bundle.
+// Returns false, refusing to serve, once the allowance is spent; always true for an unlimited
+// bundle. An open download window no longer makes this succeed: the window belongs to whoever
+// holds the session token minted when it opened, and this is the path for a visitor presenting
+// none.
 func consumeBundleDownload(bundle models.FileBundle) bool {
 	// Which counter a visit spends is storage.DownloadAccessOfBundle's decision, not this
 	// function's: a folder restricted to named recipients is metered by their grants, and its own
@@ -2095,7 +2096,7 @@ func consumeBundleDownload(bundle models.FileBundle) bool {
 	if !access.SpendsOwnCounter || access.UnlimitedDownloads {
 		return true
 	}
-	granted, _ := database.AcquireBundleDownload(bundle.Id, time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
+	_, granted := storage.SpendBundleDownload(bundle.Id, time.Now().Unix())
 	return granted
 }
 

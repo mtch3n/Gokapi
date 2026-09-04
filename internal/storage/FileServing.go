@@ -825,21 +825,15 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		// shared with three people would still stop after three, locking out the two recipients
 		// who never got theirs. All that is left to record here is that it was downloaded.
 		if access.SpendsOwnCounter && !access.UnlimitedDownloads {
-			granted, opened := database.AcquireDownload(file.Id, time.Now().Unix(), int64(LeewayFor(file).Seconds()))
+			_, granted := SpendDownload(&file, time.Now().Unix())
 			if !granted {
-				// The allowance is exhausted and no download window is open (or the atomic,
-				// floored decrement lost the race and the winner's window has since closed) -
-				// this caller must not serve the file, regardless of what the pre-fetched file
-				// struct says.
+				// The allowance is spent - this caller must not serve the file, regardless of
+				// what the pre-fetched file struct says. An open download window no longer
+				// makes this succeed: a window belongs to the party holding the session token
+				// minted when it opened, and a caller reaching ServeFile has not presented one
+				// (webserver.serveFile answers a tokened request without spending at all).
 				apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 				return false
-			}
-			// A request served inside an already-open window spends nothing: it is the same
-			// pickup as the one that opened it, retried or resumed.
-			if opened {
-				file.DownloadsRemaining = file.DownloadsRemaining - 1
-				file.DownloadCount = file.DownloadCount + 1
-				go sse.PublishDownloadCount(file)
 			}
 		} else {
 			database.IncreaseDownloadCount(file.Id)
@@ -1562,6 +1556,40 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 		return access
 	}
 	return access.WithShareGrants(grants)
+}
+
+// SpendDownload spends one download against this file's own counter and reports when the window
+// that spending it opened will close, so the caller can mint a session token that dies with it.
+//
+// Split out of ServeFile because the two callers now differ: ServeFile spends and serves in one
+// go for the owner API and the hotlink, while webserver.serveFile's tokenless leg must spend
+// WITHOUT serving - it answers with a redirect carrying the token instead, and the bytes go out
+// on the tokened request that follows. One body so the two cannot drift on what a spend is.
+//
+// Only for a file whose own counter governs it: a folder member or a recipient-restricted share
+// has already had the governing counter spent by whoever gated the request (see
+// models.DownloadAccess.SpendsOwnCounter), and this must leave its row alone.
+//
+// The file is updated in place so a caller rendering the response reports the counter it just
+// spent rather than the stale one it was handed.
+func SpendDownload(file *models.File, timeNow int64) (int64, bool) {
+	if !database.AcquireDownload(file.Id, timeNow) {
+		return 0, false
+	}
+	file.DownloadsRemaining = file.DownloadsRemaining - 1
+	file.DownloadCount = file.DownloadCount + 1
+	file.WindowOpenedAt = timeNow
+	go sse.PublishDownloadCount(*file)
+	return timeNow + int64(LeewayFor(*file).Seconds()), true
+}
+
+// SpendBundleDownload is SpendDownload's folder twin. A folder is never a secret, so its window
+// is always the configured leeway (see LeewayFor).
+func SpendBundleDownload(bundleId string, timeNow int64) (int64, bool) {
+	if !database.AcquireBundleDownload(bundleId, timeNow) {
+		return 0, false
+	}
+	return timeNow + int64(DownloadLeeway().Seconds()), true
 }
 
 // DownloadAccessOfBundle resolves the axes governing a folder itself, the folder twin of

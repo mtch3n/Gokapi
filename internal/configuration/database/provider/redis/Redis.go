@@ -435,28 +435,23 @@ func (p DatabaseProvider) increaseHashmapIntField(id string, field string) {
 	helper.Check(err)
 }
 
-// acquireWindowedDownload atomically lets one request through to a resource whose access is
-// bounded by a download window: it serves free while a window opened after windowOpenSince is
-// still open, and otherwise opens a new one, which decrements decrementField (only if it is
-// greater than 0) and stamps windowField with timeNow. incrementField, when not empty, is bumped
-// alongside the decrement - a file has a DownloadCount to pair with its DownloadsRemaining, a
-// bundle does not.
+// acquireWindowedDownload spends one download on a resource with a capped allowance: it
+// decrements decrementField, only if it is greater than 0, and stamps windowField with timeNow.
+// incrementField, when not empty, is bumped alongside the decrement - a file has a DownloadCount
+// to pair with its DownloadsRemaining, a bundle does not.
+//
+// It never grants for free. The stamped window is written because the disposal delay reads it,
+// not because anything grants on it: the resource id alone identifies nobody, so a free ride
+// inside an open window would make a capped resource unlimited for anyone holding its link. A
+// recipient's own grant row is a different matter - see AcquireShareGrantDownload in
+// sharerecipients.go, which keeps its window because that window is already bound to an identity.
 //
 // The whole sequence runs as a single Lua script, which Redis executes atomically - this is what
-// keeps the operation safe even with multiple Gokapi instances sharing this Redis server, and it
-// is also why there is no counterpart here to the SQL providers' third step: their three
-// statements are individually atomic but not collectively, so a caller that loses the race to
-// open a window has to re-check for the winner's. No caller can lose that race here, because no
-// second caller can run at all while this script does.
+// keeps the operation safe even with multiple Gokapi instances sharing this Redis server.
 //
-// Returns 0 when the request is refused, 1 when it is served inside an open window, and 2 when it
-// opened a new one.
-func (p DatabaseProvider) acquireWindowedDownload(id, windowField, decrementField, incrementField string, timeNow, windowOpenSince int64) int {
+// Returns 0 when the request is refused and 1 when it spent an allowance.
+func (p DatabaseProvider) acquireWindowedDownload(id, windowField, decrementField, incrementField string, timeNow int64) int {
 	const script = `
-local windowOpenedAt = tonumber(redis.call('HGET', KEYS[1], ARGV[1]))
-if windowOpenedAt ~= nil and windowOpenedAt > tonumber(ARGV[4]) then
-	return 1
-end
 local current = tonumber(redis.call('HGET', KEYS[1], ARGV[2]))
 if current == nil or current <= 0 then
 	return 0
@@ -465,13 +460,13 @@ redis.call('HINCRBY', KEYS[1], ARGV[2], -1)
 if ARGV[3] ~= '' then
 	redis.call('HINCRBY', KEYS[1], ARGV[3], 1)
 end
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[5])
-return 2
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[4])
+return 1
 `
 	conn := p.pool.Get()
 	defer conn.Close()
 	result, err := conn.Do("EVAL", script, "1", p.dbPrefix+id, windowField, decrementField, incrementField,
-		windowOpenSince, timeNow)
+		timeNow)
 	resultInt, err2 := redigo.Int(result, err)
 	helper.Check(err2)
 	return resultInt

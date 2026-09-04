@@ -338,11 +338,11 @@ func DeleteMetaData(id string) {
 	db.DeleteShareGrants(models.ShareResourceFile, id)
 }
 
-// AcquireDownload atomically lets one request through to a capped file's content. granted is
-// false once the allowance is exhausted and no download window is open, in which case the caller
-// must not serve the file; opened reports that this call spent an allowance to open a window.
-func AcquireDownload(id string, timeNow, leeway int64) (bool, bool) {
-	return db.AcquireDownload(id, timeNow, leeway)
+// AcquireDownload spends one download: DownloadsRemaining-1, DownloadCount+1,
+// WindowOpenedAt=timeNow, only if DownloadsRemaining > 0. Returns whether it did. Never grants
+// for free - see dbabstraction.Database.
+func AcquireDownload(id string, timeNow int64) bool {
+	return db.AcquireDownload(id, timeNow)
 }
 
 // IncreaseDownloadCount atomically increases the download count of a file, leaving its allowance
@@ -619,10 +619,11 @@ func DeleteFileBundle(bundle models.FileBundle) {
 	db.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
 }
 
-// AcquireBundleDownload atomically lets one visit through to a bundle's content. granted is false
-// once the bundle's own allowance is exhausted and no download window is open.
-func AcquireBundleDownload(id string, timeNow, leeway int64) (bool, bool) {
-	return db.AcquireBundleDownload(id, timeNow, leeway)
+// AcquireBundleDownload spends one visit to a bundle's content: DownloadsRemaining-1 and
+// WindowOpenedAt=timeNow, only if DownloadsRemaining > 0. Returns whether it did. Never grants
+// for free - see dbabstraction.Database.
+func AcquireBundleDownload(id string, timeNow int64) bool {
+	return db.AcquireBundleDownload(id, timeNow)
 }
 
 // Statistics

@@ -138,13 +138,11 @@ func (p DatabaseProvider) DeleteMetaData(id string) {
 	p.deleteKey(prefixMetaData + id)
 }
 
-// AcquireDownload atomically lets one request through to a capped file's content, via the Lua
-// script in acquireWindowedDownload - see that function for the window rule and for why Redis
-// needs no equivalent of the SQL providers' lost-race retry.
-func (p DatabaseProvider) AcquireDownload(id string, timeNow, leeway int64) (bool, bool) {
-	result := p.acquireWindowedDownload(prefixMetaData+id, "WindowOpenedAt", "DownloadsRemaining", "DownloadCount",
-		timeNow, timeNow-leeway)
-	return result > 0, result == 2
+// AcquireDownload spends one download on a capped file, via the Lua script in
+// acquireWindowedDownload - see that function for why it never grants for free.
+func (p DatabaseProvider) AcquireDownload(id string, timeNow int64) bool {
+	return p.acquireWindowedDownload(prefixMetaData+id, "WindowOpenedAt", "DownloadsRemaining", "DownloadCount",
+		timeNow) > 0
 }
 
 // IncreaseDownloadCount atomically increases the download count of a file, leaving its allowance
