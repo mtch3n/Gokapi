@@ -474,18 +474,20 @@ const (
 	ParamName
 )
 
-// ReplaceFile replaces the file content of fileId with the content of newFileContentId
-// If delete is true, the NEW file will be deleted.
-// Replacing e2e encrypted files is NOT possible
-func ReplaceFile(fileId, newFileContentId string, delete bool) (models.File, error) {
-	file, ok := GetFile(fileId)
-	if !ok {
-		return models.File{}, ErrorFileNotFound
-	}
-	newFileContent, ok := GetFile(newFileContentId)
-	if !ok {
-		return models.File{}, ErrorFileNotFound
-	}
+// ReplaceFile replaces file's content with newFileContent's, keeping file's own id, owner and
+// download allowance - only the fields that describe what is being downloaded (name, size, hash,
+// storage bucket, content type, encryption) move over. If delete is true, the record that supplied
+// the new content is removed once the swap is committed. Replacing e2e encrypted files is NOT
+// possible.
+//
+// Both files are passed in already resolved, rather than looked up here by id the way this used
+// to: DuplicateFile already takes its file by value, and re-fetching by id here duplicated the
+// caller's own lookup while quietly discarding whatever leniency it applied - specifically,
+// apiReplaceFile resolves both ids via storage.GetFileIgnoringAllowance so an owner may replace
+// their own exhausted file, and a second, strict GetFile lookup here refused it again every time,
+// leaving the endpoint unable to do the one thing it newly exists to allow. The public paths never
+// call this function at all, so leniency never reaches them through it.
+func ReplaceFile(file, newFileContent models.File, delete bool) (models.File, error) {
 	if file.Encryption.IsEndToEndEncrypted || newFileContent.Encryption.IsEndToEndEncrypted {
 		return models.File{}, ErrorReplaceE2EFile
 	}
@@ -716,7 +718,8 @@ func isVideoFile(filename, contentType string) bool {
 // or (file, true) if valid file. Refuses a file whose download allowance is spent even while its
 // window is still open - see IsExpiredFile - because a plain, tokenless request is exactly what
 // must not be allowed to ride someone else's window. GetFileInWindow is the lenient twin for a
-// caller presenting a valid session token.
+// caller presenting a valid session token; GetFileIgnoringAllowance is the lenient twin for an
+// authenticated internal-API caller, who is bound by no window at all.
 func GetFile(id string) (models.File, bool) {
 	return getFile(id, func(access models.DownloadAccess, timeNow int64) bool {
 		return access.IsExpired(timeNow) || access.IsSpent()
@@ -735,10 +738,25 @@ func GetFileInWindow(id string, timeNow int64) (models.File, bool) {
 	})
 }
 
-// getFile is GetFile's and GetFileInWindow's shared body, so the two can never drift apart on
-// anything but the one predicate that is supposed to differ between them: whether a spent-but-
-// windowed allowance refuses the file or lets it through. isExpired reports the former - true
-// means refuse, exactly like IsExpiredFile's own return value.
+// GetFileIgnoringAllowance is GetFile's lenient twin for a caller that reaches a resource through
+// its own credentials rather than by possessing a link: the download allowance is a property of
+// the link, not of the file, so it does not bind a caller who never held one. It drops the spend
+// check entirely - a resource with no downloads left is admitted regardless of window - while
+// applying every other check GetFile applies unchanged: pending deletion, disposed, expiry by
+// ExpireAt, AWS validity, blob presence. It must never be used to resolve a resource for a caller
+// that is then handed something which itself grants public access - a share, a presigned URL -
+// since that would launder a dead link into a live one; those paths (resolveShareResource,
+// downloadPresigned) keep resolving through GetFile.
+func GetFileIgnoringAllowance(id string) (models.File, bool) {
+	return getFile(id, func(access models.DownloadAccess, timeNow int64) bool {
+		return access.IsExpired(timeNow)
+	})
+}
+
+// getFile is the shared body of GetFile, GetFileInWindow and GetFileIgnoringAllowance, so the
+// three can never drift apart on anything but the one predicate that is supposed to differ
+// between them: whether, and under what leniency, a spent allowance refuses the file. isExpired
+// reports the former - true means refuse, exactly like IsExpiredFile's own return value.
 func getFile(id string, isExpired func(access models.DownloadAccess, timeNow int64) bool) (models.File, bool) {
 	var emptyResult = models.File{}
 	if id == "" {
