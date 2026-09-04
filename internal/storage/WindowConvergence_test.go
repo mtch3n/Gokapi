@@ -28,16 +28,19 @@ import (
 // tests here run CleanUp over the whole database, which disposes of the shared fixtures that
 // file's tests still expect to find, and Go runs a package's tests in source file order.
 
-// setDownloadLeeway overrides GOKAPI_DOWNLOAD_LEEWAY for the calling test, restoring this
-// package's test default of 0 once it finishes. configuration.Load re-parses the environment,
-// which is what DownloadLeeway reads. Safe against the other tests in this package for the same
-// reason MetadataRetention_test.go's setRetention is: none of them run under t.Parallel().
+// setDownloadLeeway overrides GOKAPI_DOWNLOAD_SESSION_LEEWAY and GOKAPI_DOWNLOAD_SESSION_SIGN_KEY
+// for the calling test, restoring this package's test defaults once it finishes.
+// configuration.Load re-parses the environment, which is what DownloadLeeway and
+// DownloadSessionSignKey read. Safe against the other tests in this package for the same reason
+// MetadataRetention_test.go's setRetention is: none of them run under t.Parallel().
 func setDownloadLeeway(t *testing.T, value string) {
 	t.Helper()
-	os.Setenv("GOKAPI_DOWNLOAD_LEEWAY", value)
+	os.Setenv("GOKAPI_DOWNLOAD_SESSION_LEEWAY", value)
+	os.Setenv("GOKAPI_DOWNLOAD_SESSION_SIGN_KEY", "test_key_that_is_at_least_32_characters_long__")
 	configuration.Load()
 	t.Cleanup(func() {
-		os.Setenv("GOKAPI_DOWNLOAD_LEEWAY", "0")
+		os.Setenv("GOKAPI_DOWNLOAD_SESSION_LEEWAY", "0")
+		os.Unsetenv("GOKAPI_DOWNLOAD_SESSION_SIGN_KEY")
 		configuration.Load()
 	})
 }
@@ -75,11 +78,9 @@ func (w *abortingResponseWriter) WriteHeader(int) {}
 // file's row, so "inside the window" identified nobody, and the recipient the leeway was meant to
 // protect was indistinguishable from anyone else holding the link.
 //
-// The retry the leeway exists for is now carried by the session token minted when the window
-// opened (see downloadsession, and webserver.serveFile, which answers a tokened request without
-// spending at all). That path cannot be exercised here: ServeFile never sees a token and never
-// mints one. What is asserted here is the half that belongs to this layer - a caller arriving
-// with nothing to prove they opened the window gets nothing.
+// This test asserts the current behaviour: a caller arriving with nothing to prove they opened
+// the window gets nothing, even while the window is still open. The session token scheme binds
+// window access to a specific recipient id, so the window remains protected.
 func TestServeFileRefusesATokenlessRetryInsideTheWindow(t *testing.T) {
 	setDownloadLeeway(t, "1h")
 	sha1 := writeBlob(t, "the whole body, delivered on the retry")
