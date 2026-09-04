@@ -42,3 +42,50 @@ func TestFileBundleStatusExpiredBeforeActive(t *testing.T) {
 	live := FileBundle{DownloadsRemaining: 5, UnlimitedTime: true}
 	test.IsEqualString(t, live.Status(live.DownloadAccess(0), 1000), StatusActive)
 }
+
+// TestFileBundleStatusActiveWhileAllowanceRemainsEvenWithWindowOpen is the folder twin of the
+// negative that matters most for File.Status's IsSpent branch: allowance left means IsSpent is
+// false, an open window notwithstanding. The leeway is set explicitly, since the package's zero
+// default would close the window at once and prove nothing about this case.
+func TestFileBundleStatusActiveWhileAllowanceRemainsEvenWithWindowOpen(t *testing.T) {
+	bundle := FileBundle{DownloadsRemaining: 2, UnlimitedTime: true, WindowOpenedAt: 1000}
+	test.IsEqualString(t, bundle.Status(bundle.DownloadAccess(3600), 1000), StatusActive)
+}
+
+// TestFileBundleStatusPendingDeletionOnlyWhileSpentAndWindowOpen is the folder twin of the same
+// test on File: IsSpent is also true once a folder is downloaded or expired, so the branch has to
+// sit after IsExhausted and IsExpired in FileBundle.Status or it would swallow both.
+func TestFileBundleStatusPendingDeletionOnlyWhileSpentAndWindowOpen(t *testing.T) {
+	spentOpen := FileBundle{DownloadsRemaining: 0, UnlimitedTime: true, WindowOpenedAt: 1000}
+	test.IsEqualString(t, spentOpen.Status(spentOpen.DownloadAccess(3600), 1000), StatusPendingDeletion)
+
+	spentClosed := FileBundle{DownloadsRemaining: 0, UnlimitedTime: true, WindowOpenedAt: 1000 - 7200}
+	test.IsEqualString(t, spentClosed.Status(spentClosed.DownloadAccess(3600), 1000), StatusDownloaded)
+
+	expired := FileBundle{DownloadsRemaining: 0, ExpireAt: 100, WindowOpenedAt: 1000}
+	test.IsEqualString(t, expired.Status(expired.DownloadAccess(3600), 1000), StatusExpired)
+}
+
+// TestFileBundleStatusUnlimitedDownloadsNeverPendingDeletion pins that IsSpent can never be true
+// for an unlimited-downloads folder, so it never reports pending_deletion, whatever the window is
+// doing.
+func TestFileBundleStatusUnlimitedDownloadsNeverPendingDeletion(t *testing.T) {
+	open := FileBundle{UnlimitedDownloads: true, UnlimitedTime: true, WindowOpenedAt: 1000}
+	test.IsEqualString(t, open.Status(open.DownloadAccess(3600), 1000), StatusActive)
+
+	closed := FileBundle{UnlimitedDownloads: true, UnlimitedTime: true, WindowOpenedAt: 1000 - 7200}
+	test.IsEqualString(t, closed.Status(closed.DownloadAccess(3600), 1000), StatusActive)
+}
+
+// TestFileBundleStatusRecipientsAllFinishedIsPendingDeletion extends
+// TestFileBundleStatusFollowsTheGoverningAllowance's "one recipient still has budget" case with its
+// counterpart: only once every recipient is finished does the summed allowance read spent, and
+// only then, with the window still open, does the folder report pending_deletion.
+func TestFileBundleStatusRecipientsAllFinishedIsPendingDeletion(t *testing.T) {
+	bundle := FileBundle{UnlimitedTime: true}
+	allFinished := bundle.DownloadAccess(3600).WithShareGrants([]ShareGrant{
+		{DownloadsAllowed: 1, DownloadsUsed: 1, LastDownloadAt: 1000},
+		{DownloadsAllowed: 1, DownloadsUsed: 1, LastDownloadAt: 1000},
+	})
+	test.IsEqualString(t, bundle.Status(allFinished, 1000), StatusPendingDeletion)
+}
