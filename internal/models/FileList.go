@@ -234,6 +234,15 @@ func (f *File) Status(access DownloadAccess, timeNow int64) string {
 	if access.IsExpired(timeNow) {
 		return StatusExpired
 	}
+	// A spent-and-closed allowance already matched IsExhausted above, so reaching here with
+	// IsSpent true means the window is still open: nothing is left to give out, but the content
+	// has not been disposed of yet and will be once the window closes. This has to come after
+	// IsExhausted, which reports the truer "finished" reason for the same spent allowance once the
+	// window shuts, and after IsExpired, which reports the truer reason when both are true at
+	// once - IsSpent alone would otherwise swallow both of those cases.
+	if access.IsSpent() {
+		return StatusPendingDeletion
+	}
 	return StatusActive
 }
 

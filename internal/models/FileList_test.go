@@ -173,3 +173,71 @@ func TestWindowOpenedAtNeverCrossesApiBoundary(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(strings.ToLower(string(encoded)), "windowopenedat"), false)
 	test.IsEqualBool(t, strings.Contains(string(encoded), "1750852000"), false)
 }
+
+// TestFileStatusActiveWhileAllowanceRemainsEvenWithWindowOpen is the negative that matters most
+// for the IsSpent branch below: IsSpent is false whenever any allowance is left, an open window
+// notwithstanding, so a reader who assumed "window open means pending" would get exactly this
+// case wrong. A three-download file with two left and a window open a second ago is active, not
+// pending_deletion - the package's zero default leeway would make this pass for the wrong reason,
+// so the leeway is set explicitly.
+func TestFileStatusActiveWhileAllowanceRemainsEvenWithWindowOpen(t *testing.T) {
+	now := time.Now().Unix()
+	file := File{DownloadsRemaining: 2, UnlimitedTime: true, WindowOpenedAt: now}
+	test.IsEqualString(t, file.Status(file.DownloadAccess(3600), now), StatusActive)
+}
+
+// TestFileStatusPendingDeletionOnlyWhileSpentAndWindowOpen covers the branch's one true case and
+// the two neighbours it must not swallow. IsSpent is true in all three of downloaded, expired and
+// pending_deletion, so the branch has to sit after IsExhausted and IsExpired or it would report
+// pending_deletion for a resource that is actually finished or actually expired - see the ordering
+// comment on File.Status itself.
+func TestFileStatusPendingDeletionOnlyWhileSpentAndWindowOpen(t *testing.T) {
+	now := time.Now().Unix()
+
+	// Spent, window still open: the one case pending_deletion exists for.
+	spentOpen := File{DownloadsRemaining: 0, UnlimitedTime: true, WindowOpenedAt: now}
+	test.IsEqualString(t, spentOpen.Status(spentOpen.DownloadAccess(3600), now), StatusPendingDeletion)
+
+	// Spent, window closed: IsExhausted already answers "downloaded" and that must not change now
+	// that the new branch exists right below it.
+	spentClosed := File{DownloadsRemaining: 0, UnlimitedTime: true, WindowOpenedAt: now - 7200}
+	test.IsEqualString(t, spentClosed.Status(spentClosed.DownloadAccess(3600), now), StatusDownloaded)
+
+	// Expired and spent at once: expired is the truer reason and must win, or an expired file
+	// with no downloads left would be mislabelled as merely pending.
+	expired := File{DownloadsRemaining: 0, ExpireAt: now - 100, WindowOpenedAt: now}
+	test.IsEqualString(t, expired.Status(expired.DownloadAccess(3600), now), StatusExpired)
+}
+
+// TestFileStatusUnlimitedDownloadsNeverPendingDeletion pins that IsSpent can never be true for an
+// unlimited-downloads file, so it never reports pending_deletion, whatever the window is doing.
+func TestFileStatusUnlimitedDownloadsNeverPendingDeletion(t *testing.T) {
+	now := time.Now().Unix()
+
+	open := File{UnlimitedDownloads: true, UnlimitedTime: true, WindowOpenedAt: now}
+	test.IsEqualString(t, open.Status(open.DownloadAccess(3600), now), StatusActive)
+
+	closed := File{UnlimitedDownloads: true, UnlimitedTime: true, WindowOpenedAt: now - 7200}
+	test.IsEqualString(t, closed.Status(closed.DownloadAccess(3600), now), StatusActive)
+}
+
+// TestFileStatusFollowsTheGoverningRecipientAllowance is the file half of the recipient-governed
+// case: the remaining allowance is the sum across grants, so IsSpent - and therefore
+// pending_deletion - only becomes true once every recipient is finished, not when the file's own
+// frozen counter would read spent.
+func TestFileStatusFollowsTheGoverningRecipientAllowance(t *testing.T) {
+	now := time.Now().Unix()
+	file := File{UnlimitedTime: true}
+
+	someLeft := file.DownloadAccess(3600).WithShareGrants([]ShareGrant{
+		{DownloadsAllowed: 1, DownloadsUsed: 1, LastDownloadAt: now},
+		{DownloadsAllowed: 1, DownloadsUsed: 0, LastDownloadAt: now},
+	})
+	test.IsEqualString(t, file.Status(someLeft, now), StatusActive)
+
+	allFinished := file.DownloadAccess(3600).WithShareGrants([]ShareGrant{
+		{DownloadsAllowed: 1, DownloadsUsed: 1, LastDownloadAt: now},
+		{DownloadsAllowed: 1, DownloadsUsed: 1, LastDownloadAt: now},
+	})
+	test.IsEqualString(t, file.Status(allFinished, now), StatusPendingDeletion)
+}
