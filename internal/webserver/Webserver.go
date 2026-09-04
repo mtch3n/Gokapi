@@ -27,6 +27,7 @@ import (
 	"github.com/NYTimes/gziphandler"
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
+	"github.com/forceu/gokapi/internal/downloadsession"
 	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/helper"
@@ -49,6 +50,7 @@ import (
 	"github.com/forceu/gokapi/internal/webserver/errorHandling"
 	"github.com/forceu/gokapi/internal/webserver/favicon"
 	"github.com/forceu/gokapi/internal/webserver/fileupload"
+	"github.com/forceu/gokapi/internal/webserver/headers"
 	"github.com/forceu/gokapi/internal/webserver/ratelimiter"
 	"github.com/forceu/gokapi/internal/webserver/sse"
 	"github.com/forceu/gokapi/internal/webserver/ssl"
@@ -160,10 +162,12 @@ func createMux(webserverDir fs.FS, disableBuiltinUI bool) *http.ServeMux {
 	mux.HandleFunc("/login", showLogin)
 	mux.HandleFunc("/logout", doLogout)
 	mux.HandleFunc("/pubapi/config", pubApiConfig)
+	mux.HandleFunc("/pubapi/downloadsession", pubApiDownloadSession)
 	mux.HandleFunc("/pubapi/error", pubApiError)
 	mux.HandleFunc("/pubapi/file", pubApiFileMetadata)
 	mux.HandleFunc("/pubapi/filepassword", pubApiFilePassword)
 	mux.HandleFunc("/pubapi/folder", pubApiFolder)
+	mux.HandleFunc("/pubapi/foldersession", pubApiFolderSession)
 	mux.HandleFunc("/pubapi/folderpassword", pubApiFolderPassword)
 	mux.HandleFunc("/pubapi/folderzip", pubApiFolderZip)
 	mux.HandleFunc("/pubapi/uploadrequest", pubApiUploadRequest)
@@ -1243,6 +1247,8 @@ func downloadPresigned(w http.ResponseWriter, r *http.Request) {
 func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request) {
 	addNoCacheHeader(w)
 
+	session := r.URL.Query().Get(downloadsession.ParamName)
+
 	// A bundle member's own link is a fallback, not a supported path: the folder decides
 	// password, expiry and the download allowance now (see the folder-as-unit-of-sharing design),
 	// so this redirects to the equivalent folder endpoint - which also meters the visit - rather
@@ -1250,7 +1256,22 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 	// storage.GetFile below, specifically so the member's own now-inert ExpireAt/DownloadsRemaining
 	// never gets a chance to refuse it here for a reason the bundle itself has already overridden.
 	if bundleId, ok := governingFolderOf(id); ok {
+		if session != "" {
+			// The redirect below rebuilds "/pubapi/folderzip?id=...&ids=..." from scratch and has
+			// no way to carry a session parameter along with it. Silently dropping it would turn
+			// a tokened member request into a tokenless folder one that spends an allowance the
+			// caller already paid for at the mint - refused outright instead (see the
+			// leeway-session-token plan §6.2). A member's own token would never have verified
+			// here anyway, since a session is bound to exactly the resource type and id it names.
+			refuseTokenedFile(w, r, id, "a session parameter was presented against a bundle member id")
+			return
+		}
 		redirect(w, r, "/pubapi/folderzip?id="+bundleId+"&ids="+id)
+		return
+	}
+
+	if session != "" {
+		serveFileTokened(id, session, w, r)
 		return
 	}
 
@@ -1278,56 +1299,51 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	// A file that is a member of a restricted bundle carries no grant of its own; the
-	// bundle's recipient ACL must cascade to it, or holding the member's individual file id
-	// would bypass the bundle restriction entirely. This runs regardless of whether the file
-	// itself is also independently restricted, and before anything else below, so a
-	// non-recipient never learns more than "not found".
-	if savedFile.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, savedFile.BundleId) {
-		bundleRecipientId := shareaccess.RecipientFor(w, r, models.ShareResourceBundle, savedFile.BundleId)
-		if bundleRecipientId == 0 {
-			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
-				"no valid recipient access for the file's restricted bundle"); err != nil {
-				respondAuditWriteFailed(w)
-				return
-			}
+
+	// The non-spending twin of every gate below (see ShareGuard.go's mayDownloadFile, D27): may
+	// THIS caller, specifically, have it. Answering from this rather than from the gates
+	// themselves is what lets a HEAD be answered without spending anything - on today's code the
+	// gates below ARE the spends, so running them for a HEAD would spend on a probe.
+	authResult := mayDownloadFile(w, r, savedFile)
+	r = attachRecipient(r, authResult.RecipientId)
+	if !authResult.Authorised {
+		if authResult.RequiresPassword {
 			if isRootUrl {
-				redirectOnIncorrectId(w, r, "error")
+				redirect(w, r, "d?id="+savedFile.Id)
 			} else {
-				redirectOnIncorrectId(w, r, "../../error")
+				redirect(w, r, "../../d?id="+savedFile.Id)
 			}
 			return
 		}
-		// A member downloaded via its own id, as a recipient of the restricted bundle rather
-		// than of the file itself, is still attributed to that recipient.
-		r = attachRecipient(r, bundleRecipientId)
+		// Covers every other refusal mayDownloadFile can reach: no valid recipient for the
+		// file's restricted bundle, no valid recipient for the file's own restriction, or the
+		// governing bundle's allowance already exhausted. Refused as "not found" rather than
+		// "forbidden", exactly as today: a 403 would confirm the id names a real, restricted file.
+		if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
+			authResult.DenialReason); err != nil {
+			respondAuditWriteFailed(w)
+			return
+		}
+		if isRootUrl {
+			redirectOnIncorrectId(w, r, "error")
+		} else {
+			redirectOnIncorrectId(w, r, "../../error")
+		}
+		return
 	}
-	// An identity-restricted file is refused before the passcode branch below,
-	// because a recipient list supersedes a passcode entirely. Refused as
-	// "not found" rather than "forbidden": a 403 would confirm that this ID
-	// names a real file to anyone probing IDs.
+
+	if r.Method == http.MethodHead {
+		headers.Write(savedFile, w, true, false)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// The identity-restriction spend, when the file itself carries a recipient list: the
+	// allowance is spent per recipient, so one recipient exhausting theirs does not consume
+	// anyone else's. authResult.RecipientId is exactly the id mayDownloadFile just authorised,
+	// not re-derived.
 	if database.IsShareRestricted(models.ShareResourceFile, savedFile.Id) {
-		recipientId := shareaccess.RecipientFor(w, r, models.ShareResourceFile, savedFile.Id)
-		if recipientId == 0 {
-			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
-				"no valid recipient access for a restricted file"); err != nil {
-				respondAuditWriteFailed(w)
-				return
-			}
-			if isRootUrl {
-				redirectOnIncorrectId(w, r, "error")
-			} else {
-				redirectOnIncorrectId(w, r, "../../error")
-			}
-			return
-		}
-		// Attached before the allowance check below, and before storage.ServeFile is reached,
-		// so both a denial for an exhausted allowance and the eventual download are attributed
-		// to this recipient rather than recorded as anonymous.
-		r = attachRecipient(r, recipientId)
-		// The allowance is spent per recipient, so one recipient exhausting
-		// theirs does not consume anyone else's.
-		if shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, recipientId, int64(storage.LeewayFor(savedFile).Seconds())) != nil {
+		if shareaccess.ConsumeDownload(models.ShareResourceFile, savedFile.Id, authResult.RecipientId, int64(storage.LeewayFor(savedFile).Seconds())) != nil {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"recipient download allowance exhausted"); err != nil {
 				respondAuditWriteFailed(w)
@@ -1340,20 +1356,14 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 			}
 			return
 		}
-	} else if savedFile.PasswordHash != "" {
-		if !(isValidPwCookie(r, savedFile)) {
-			if isRootUrl {
-				redirect(w, r, "d?id="+savedFile.Id)
-			} else {
-				redirect(w, r, "../../d?id="+savedFile.Id)
-			}
-			return
-		}
 	}
 	// The bundle's own allowance is spent only once every other check has passed and the file
 	// is actually about to be served, mirroring how pubApiFolderZip meters the bundle.
+	// authResult.BundleRecipientId is the identity mayDownloadFile already resolved against the
+	// bundle specifically - threaded through rather than re-derived a narrower way; see
+	// consumeShareDownload's doc comment for why the two must not disagree.
 	if savedFile.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, savedFile.BundleId) {
-		if !consumeShareDownload(r, models.ShareResourceBundle, savedFile.BundleId, int64(storage.DownloadLeeway().Seconds())) {
+		if !consumeShareDownload(models.ShareResourceBundle, savedFile.BundleId, authResult.BundleRecipientId, int64(storage.DownloadLeeway().Seconds())) {
 			if err := logging.LogDownloadDenied(savedFile, r, configuration.Get().SaveIp,
 				"bundle download allowance exhausted"); err != nil {
 				respondAuditWriteFailed(w)
@@ -1382,6 +1392,68 @@ func serveFile(id string, isRootUrl bool, w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
+}
+
+// serveFileTokened is serveFile's leg for a request carrying a session=<token> parameter (see
+// the leeway-session-token plan §2.4). It spends nothing: the allowance was already spent when
+// the token was minted, by POST /pubapi/downloadsession, and this leg exists only to let that
+// same pickup be retried or resumed for as long as the window it opened stays open. Order is
+// load-bearing: verify, re-check a named recipient's grant is still live, THEN the HEAD
+// short-circuit, then resolve and serve - never the other way around, or a HEAD would either
+// leak headers for a since-revoked recipient or a forged/expired token would reach ServeFile.
+func serveFileTokened(id, session string, w http.ResponseWriter, r *http.Request) {
+	claims, ok := downloadsession.Verify(session, models.ShareResourceFile, id, time.Now().Unix())
+	if !ok {
+		refuseTokenedFile(w, r, id, "invalid or expired download session")
+		return
+	}
+	if claims.RecipientId != 0 && !recipientGrantStillValid(models.ShareResourceFile, id, claims.RecipientId) {
+		// D23: mid-window revocation. A stateless bearer token has no revocation list of its
+		// own, so this re-check is what makes blocking or removing the recipient take effect on
+		// the very next request instead of waiting out the rest of the window.
+		refuseTokenedFile(w, r, id, "recipient access revoked mid-window")
+		return
+	}
+
+	// GetFileInWindow, unlike GetFile, tolerates a spent allowance while the window that spending
+	// it opened is still open - but refuses everything else GetFile refuses: pending deletion,
+	// disposed, ExpireAt passed, AWS validity, blob missing. A token does not survive any of those.
+	savedFile, ok := storage.GetFileInWindow(id, time.Now().Unix())
+	if !ok {
+		refuseTokenedFile(w, r, id, "file no longer available")
+		return
+	}
+	r = attachRecipient(r, claims.RecipientId)
+
+	if r.Method == http.MethodHead {
+		headers.Write(savedFile, w, true, false)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// The passcode gate and every recipient gate are skipped here on purpose (D8): the token
+	// exists only because the mint already passed them, and a download manager holding a copied
+	// tokened URL carries none of the cookies those gates would otherwise ask for.
+	r = logging.WithDownloadSession(r)
+	validFile := storage.ServeFile(savedFile, w, r, true, false, false, true)
+	if !validFile {
+		refuseTokenedFile(w, r, id, "link expired or download allowance exhausted")
+	}
+}
+
+// refuseTokenedFile answers a refused session-backed request with a bare 404 (D17) - never the
+// redirect-to-/error the tokenless leg above still uses. That redirect is an HTML page, and a
+// session URL is a machine URL a download manager or a second click may be retrying: Chrome
+// follows a 307 and saves the resulting error.html as if it were the file, which is the exact
+// regression this plan exists to fix. A bare 404 makes it report a failed download and write
+// nothing.
+func refuseTokenedFile(w http.ResponseWriter, r *http.Request, fileId, reason string) {
+	ratelimiter.WaitOnFailedId(r)
+	if err := logging.LogDownloadDenied(models.File{Id: fileId}, r, configuration.Get().SaveIp, reason); err != nil {
+		respondAuditWriteFailed(w)
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
 }
 
 // Handling of /pubapi/file
@@ -1566,6 +1638,269 @@ func pubApiFilePassword(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, "{\"ok\":false}")
+}
+
+// Handling of POST /pubapi/downloadsession
+//
+// Mints the short-lived, stateless token that lets the party about to spend a file's allowance
+// retry or resume the download for the rest of its leeway window (see the leeway-session-token
+// plan, §2.1-§2.3). This exists as its own endpoint, rather than something folded into the
+// download itself, because a <a download> navigation never exposes a redirect's target back to
+// the page's own JavaScript - there is no other way to hand the SPA its token before the click.
+//
+// POST only, so a link-preview bot or the browser's own prefetch - neither of which ever issues
+// anything but GET - cannot spend an allowance merely by existing.
+func pubApiDownloadSession(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	keyId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	if keyId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	// A bundle member's own link redirects to its folder - see the identical, more fully
+	// commented check at the top of serveFile. A folder token binds the bundle, not any one
+	// member (D21), so this must hand a file page a FOLDER token, never mint a file-shaped one
+	// against a member id.
+	if bundleId, ok := governingFolderOf(keyId); ok {
+		http.Redirect(w, r, "/pubapi/foldersession?id="+bundleId, http.StatusTemporaryRedirect)
+		return
+	}
+
+	file, ok := storage.GetFile(keyId)
+	if !ok || file.IsFileRequest() {
+		respondPubApiNotFound(w, r)
+		return
+	}
+
+	// The same non-spending authorisation serveFile's tokenless leg now runs (D27): this
+	// endpoint must answer the identical verdict a download attempt would, or a caller could be
+	// told to mint here and then be refused when it actually tries to collect.
+	authResult := mayDownloadFile(w, r, file)
+	r = attachRecipient(r, authResult.RecipientId)
+	if !authResult.Authorised {
+		if authResult.RequiresPassword {
+			// A lapsed 5-minute passcode cookie must not read as "gone" (D29): the window this
+			// endpoint would otherwise open is 30 minutes, so re-prompting is correct here, not
+			// the same "not found" a truly dead link gets.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"requiresPassword": true})
+			return
+		}
+		respondPubApiNotFound(w, r)
+		return
+	}
+
+	leeway := storage.LeewayFor(file)
+	if leeway <= 0 {
+		// Every secret (LeewayFor is always 0 for one) and any server with the leeway left
+		// unset land here: there is no window to protect, so nothing is spent by this endpoint
+		// at all - minting a token that would expire before it could ever be used would be
+		// worse than pointless. The eventual bare download spends exactly once, on its own.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"expiresAt": 0})
+		return
+	}
+
+	access := storage.DownloadAccessOf(file)
+	now := time.Now().Unix()
+
+	// Ordered to match storage.ServeFile's own condition exactly (FileServing.go: "access.
+	// SpendsOwnCounter && !access.UnlimitedDownloads"): SpendsOwnCounter is checked first, not
+	// UnlimitedDownloads, because a recipient-governed resource can itself be UnlimitedDownloads
+	// (true whenever ANY one recipient's own grant is unlimited - see
+	// models.DownloadAccess.WithShareGrants) while THIS recipient's own grant is finite. Checking
+	// the aggregate flag first would wrongly skip minting - and spending nothing - for a
+	// recipient whose own allowance is real and about to run out, just because some other
+	// recipient on the same share happens to have an unlimited one.
+	if !access.SpendsOwnCounter {
+		// Governed by a folder or a recipient list rather than its own row (see
+		// models.DownloadAccess.SpendsOwnCounter): the allowance actually worth spending is the
+		// recipient's own grant, not this file's DownloadsRemaining, so that is spent for real
+		// here - refusing exactly as serveFile's tokenless leg would.
+		//
+		// A token IS minted here, unlike a first reading of the plan's §2.2 might suggest. That
+		// section reasoned that before shareaccess's provider-level free ride is removed (D24, a
+		// separate later commit), a recipient's in-window retry stays free with no token at all,
+		// so minting one here would be redundant. That reasoning assumed storage.GetFile would
+		// still admit a spent-but-windowed aggregate - exactly the free ride Part 1 of this
+		// commit removes, at a different layer (IsSpent, not the window-aware IsExhausted).
+		// Without a token here, a recipient whose combined allowance this very spend might just
+		// have exhausted would have no way to retry at all once GetFile refuses them, which
+		// contradicts R2. See webserver.serveFileTokened and storage.GetFileInWindow, neither of
+		// which cares whether SpendsOwnCounter is true - minting for this case costs nothing
+		// extra there.
+		if database.IsShareRestricted(models.ShareResourceFile, file.Id) {
+			if shareaccess.ConsumeDownload(models.ShareResourceFile, file.Id, authResult.RecipientId, int64(leeway.Seconds())) != nil {
+				respondPubApiNotFound(w, r)
+				return
+			}
+		}
+		if file.BundleId != "" && database.IsShareRestricted(models.ShareResourceBundle, file.BundleId) {
+			if !consumeShareDownload(models.ShareResourceBundle, file.BundleId, authResult.BundleRecipientId, int64(storage.DownloadLeeway().Seconds())) {
+				respondPubApiNotFound(w, r)
+				return
+			}
+		}
+		// Mirrors ServeFile's own "otherwise" branch for the same reason as the unlimited case
+		// below: the file's own DownloadCount/SSE must not go silent just because this file
+		// happens to be governed by a recipient list rather than its own counter. file.DownloadCount
+		// is bumped in memory too, not just in the database, before publishing - storage.ServeFile
+		// does the same (FileServing.go's "otherwise" branch) precisely because
+		// sse.PublishDownloadCount reads the count off the struct it is handed, not a fresh row;
+		// skipping this would publish the pre-spend count to every listener.
+		database.IncreaseDownloadCount(file.Id)
+		file.DownloadCount = file.DownloadCount + 1
+		go sse.PublishDownloadCount(file)
+	} else if access.UnlimitedDownloads {
+		// Nothing to protect - an unlimited file can always be re-fetched from the bare URL, so
+		// no token is minted. The pickup is still counted, replicating the "otherwise" half of
+		// storage.ServeFile's own spend branch (FileServing.go:820-843), so an unlimited file's
+		// DownloadCount and SSE event are not silently skipped just because this path was used
+		// instead of a direct download.
+		database.IncreaseDownloadCount(file.Id)
+		file.DownloadCount = file.DownloadCount + 1
+		go sse.PublishDownloadCount(file)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"expiresAt": 0})
+		return
+	} else {
+		// The ordinary case: a real, limited allowance on the file's own row is about to be
+		// spent.
+		if _, granted := storage.SpendDownload(&file, now); !granted {
+			respondPubApiNotFound(w, r)
+			return
+		}
+	}
+
+	// Fail closed, the same reasoning storage.ServeFile uses around logging.LogDownload: the
+	// allowance is already gone by this point, so a caller must not be told a session exists
+	// with no durable record of the spend behind it.
+	if err := logging.LogDownloadSession(models.ShareResourceFile, file.Id, r, configuration.Get().SaveIp); err != nil {
+		respondAuditWriteFailed(w)
+		return
+	}
+
+	// Known, accepted edge case: authResult.RecipientId is normally this FILE's own recipient
+	// (or 0), but in the rare case of a dangling bundle reference - governingFolderOf's own
+	// comment: "a member whose folder is gone" - IsShareRestricted(ShareResourceBundle, ...) can
+	// still be true for orphaned grants while DownloadAccessOf's separate, existence-checking
+	// resolution finds no live bundle, so this branch is reached with a BUNDLE-scoped id and
+	// signs it into a FILE-scoped (ShareResourceFile) token anyway. serveFileTokened's D23
+	// re-check (recipientGrantStillValid, also ShareResourceFile-typed) then finds no grant under
+	// that type and refuses the retry. This fails closed - a legitimate retry is denied, not a
+	// wrong one granted - and is not reachable through normal use, since governingFolderOf routes
+	// every live bundle member through the folder endpoint instead. Left unfixed here: doing so
+	// would mean carrying the resolved resource type into the token alongside the recipient id,
+	// which is more than this edge case's likelihood justifies.
+	expiresAt := now + int64(leeway.Seconds())
+	token := downloadsession.Sign(models.ShareResourceFile, file.Id, authResult.RecipientId, expiresAt)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"session":   token,
+		"expiresAt": expiresAt,
+	})
+}
+
+// Handling of POST /pubapi/foldersession
+//
+// pubApiDownloadSession's folder twin. The token it mints binds the bundle itself, not any
+// particular selection (D21): the folder's own counter meters visits, not downloads, so one
+// visit buys a pass to the folder's contents for the whole window - any subset, any number of
+// times. This endpoint therefore takes no ids at all; the SPA appends whatever it currently has
+// selected onto the eventual /pubapi/folderzip URL itself.
+func pubApiFolderSession(w http.ResponseWriter, r *http.Request) {
+	addNoCacheHeader(w)
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	folderId := queryUrl(w, r, "id", errorHandling.TypeFileNotFound)
+	if folderId == "" {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "{\"error\":\"not found\"}")
+		return
+	}
+
+	bundle, ok := filebundle.Get(folderId)
+	if !ok {
+		respondPubApiNotFound(w, r)
+		return
+	}
+
+	authResult := mayDownloadBundle(w, r, bundle)
+	if authResult.RecipientId != 0 {
+		r = attachRecipient(r, authResult.RecipientId)
+	}
+	if !authResult.Authorised {
+		if authResult.RequiresPassword {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"requiresPassword": true})
+			return
+		}
+		respondPubApiNotFound(w, r)
+		return
+	}
+
+	// A folder is never a secret, but the server-wide leeway can still be left unset - same
+	// reasoning as pubApiDownloadSession's identical check.
+	leeway := storage.DownloadLeeway()
+	if leeway <= 0 {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"expiresAt": 0})
+		return
+	}
+
+	access := storage.DownloadAccessOfBundle(bundle)
+	now := time.Now().Unix()
+
+	// Ordered to match storage.ServeFile's/pubApiDownloadSession's precedence: SpendsOwnCounter
+	// is checked before UnlimitedDownloads, because a recipient-governed bundle can itself be
+	// UnlimitedDownloads (true whenever any ONE recipient's own grant is unlimited) while THIS
+	// recipient's own grant is finite - see pubApiDownloadSession's identical comment.
+	if !access.SpendsOwnCounter {
+		// Governed by the recipients' own grants rather than the folder's own visit counter:
+		// spend that grant for real. A token IS minted for this case - see
+		// pubApiDownloadSession's identical branch for why: storage.IsAvailableBundle now
+		// refuses a spent-but-windowed aggregate exactly as storage.GetFile does (IsSpent, not
+		// the window-aware IsExhausted a §2.2 first reading assumed still applied), so without a
+		// token a recipient whose combined allowance this spend may just have exhausted would
+		// have no way to retry inside their own window at all.
+		if !consumeShareDownload(models.ShareResourceBundle, bundle.Id, authResult.RecipientId, int64(leeway.Seconds())) {
+			respondPubApiNotFound(w, r)
+			return
+		}
+	} else if access.UnlimitedDownloads {
+		// Nothing to protect, and unlike a file a folder carries no separate display counter to
+		// keep moving here - consumeBundleDownload is itself a no-op for an unlimited bundle -
+		// so there is nothing left to do but report that no token is needed.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"expiresAt": 0})
+		return
+	} else {
+		// The ordinary case: a real, limited visit allowance on the folder's own row is about to
+		// be spent.
+		if _, granted := storage.SpendBundleDownload(bundle.Id, now); !granted {
+			respondPubApiNotFound(w, r)
+			return
+		}
+	}
+
+	if err := logging.LogDownloadSession(models.ShareResourceBundle, bundle.Id, r, configuration.Get().SaveIp); err != nil {
+		respondAuditWriteFailed(w)
+		return
+	}
+
+	expiresAt := now + int64(leeway.Seconds())
+	token := downloadsession.Sign(models.ShareResourceBundle, bundle.Id, authResult.RecipientId, expiresAt)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"session":   token,
+		"expiresAt": expiresAt,
+	})
 }
 
 // effectiveGuestMaxSizeMB returns the smallest of serverMaxSizeMB (the server's own
@@ -1921,29 +2256,70 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// See the identical check in pubApiFolder: a restricted bundle is refused as
-	// "not found" for a non-authorised requester, before any bytes are served.
-	// RecipientFor is used instead of mayAccessShare so the id is available to attach below;
-	// for an unrestricted bundle it returns 0 and attachRecipient below is then a no-op.
-	if database.IsShareRestricted(models.ShareResourceBundle, bundle.Id) {
-		bundleRecipientId := shareaccess.RecipientFor(w, r, models.ShareResourceBundle, bundle.Id)
-		if bundleRecipientId == 0 {
+	// A session token binds the bundle itself, not any particular selection (D21): within its
+	// window the holder may download the zip, any subset, or any single member, any number of
+	// times, free - one visit buys a pass to the folder's contents, not to the ids requested at
+	// mint time. Verified against the resource resolved strictly above, so a token minted for
+	// one bundle can never be replayed against another that merely reuses its query parameters.
+	session := r.URL.Query().Get(downloadsession.ParamName)
+	tokened := false
+	var claims downloadsession.Claims
+	if session != "" {
+		var valid bool
+		claims, valid = downloadsession.Verify(session, models.ShareResourceBundle, bundle.Id, time.Now().Unix())
+		if !valid {
 			respondPubApiNotFound(w, r)
 			return
 		}
-		// Attached once here, before either the zip branch or the single-member branch below
-		// serves anything, so every LogDownload entry that follows - one per zip member, or the
-		// one for a single requested member - is attributed to this recipient.
+		if claims.RecipientId != 0 && !recipientGrantStillValid(models.ShareResourceBundle, bundle.Id, claims.RecipientId) {
+			// D23: mid-window revocation. The bearer token carries no revocation list of its
+			// own, so this re-check is what makes blocking or removing the recipient take
+			// effect on the very next request rather than waiting out the rest of the window.
+			respondPubApiNotFound(w, r)
+			return
+		}
+		tokened = true
+	}
+
+	var bundleRecipientId int
+	if tokened {
+		bundleRecipientId = claims.RecipientId
 		r = attachRecipient(r, bundleRecipientId)
+	} else {
+		// The non-spending twin of every gate this function would otherwise only reach by
+		// spending (see ShareGuard.go's mayDownloadBundle, D27): bundle identity and the
+		// folder's own password, answering the same verdict consumeShareDownload/
+		// consumeBundleDownload below would reach without touching either. This is what lets a
+		// HEAD be answered further down without spending anything. Does not cover a member's
+		// OWN restriction, independent of the bundle's - that is accessibleBundleMembers'
+		// question, below.
+		authResult := mayDownloadBundle(w, r, bundle)
+		bundleRecipientId = authResult.RecipientId
+		if bundleRecipientId != 0 {
+			// Attached once here, before either the zip branch or the single-member branch below
+			// serves anything, so every LogDownload entry that follows - one per zip member, or
+			// the one for a single requested member - is attributed to this recipient.
+			r = attachRecipient(r, bundleRecipientId)
+		}
+		if !authResult.Authorised {
+			if authResult.RequiresPassword {
+				// Same shape isValidFolderPassword used to write directly: only id and
+				// requiresPassword, never the folder's name or its members.
+				w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":               bundle.Id,
+					"requiresPassword": true,
+				})
+				return
+			}
+			respondPubApiNotFound(w, r)
+			return
+		}
 	}
 
 	// Get all files once, do exactly one database scan
 	allFiles := database.GetAllMetadata()
-
-	// Check password gate
-	if !isValidFolderPassword(w, r, bundle) {
-		return
-	}
 
 	// The folder itself - not any member's own now-inert ExpireAt/DownloadsRemaining - decides
 	// whether it can be served at all. Rechecked fresh here rather than trusting the allFiles
@@ -1952,7 +2328,15 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// rather than leaking, through the 400 that resolution can produce, whether an id names a
 	// member of it - which also stops the answer depending on whether a CleanUp sweep has caught
 	// up with disposing the members of a folder that just became unavailable.
-	if !storage.IsAvailableBundle(bundle, time.Now().Unix()) {
+	//
+	// The tokened leg tolerates a spent visit allowance while the window that spending it opened
+	// is still open; the tokenless leg does not, or a plain, tokenless request could ride a
+	// window it never opened - see storage.IsAvailableBundle/IsAvailableBundleInWindow.
+	available := storage.IsAvailableBundle(bundle, time.Now().Unix())
+	if tokened {
+		available = storage.IsAvailableBundleInWindow(bundle, time.Now().Unix())
+	}
+	if !available {
 		respondPubApiNotFound(w, r)
 		return
 	}
@@ -1966,14 +2350,19 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the requester's full true membership - not yet narrowed by servability - the
 	// same set pubApiFolder uses, so the two endpoints agree on what "a member of this
-	// bundle" means. A member can carry its own restriction independent of the bundle's.
+	// bundle" means. A member can carry its own restriction independent of the bundle's, asked
+	// fresh from the current request's own cookies/tokens regardless of whether a bundle-level
+	// session is also present: a folder token authorises the bundle, not a member's separate
+	// restriction.
 	members := accessibleBundleMembers(w, r, bundleMembers(bundle.Id, allFiles))
 
 	// Narrow to the requested set: either the explicit ids, validated as true members of
 	// this bundle, or every member. Membership is checked against the full true set, not a
 	// servability-narrowed one, so requesting the id of a member that merely happens to be
 	// expired still reaches the "refuse the whole request" check below instead of a
-	// confusing 400.
+	// confusing 400. ids are read fresh on every request, tokened or not - the token authorises
+	// the bundle, not a frozen id list, so a member removed from it mid-window is still
+	// correctly refused rather than served from a stale selection.
 	var requestedMembers []models.File
 	if len(requestedIds) > 0 {
 		for _, requestedId := range requestedIds {
@@ -2006,6 +2395,26 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A HEAD never spends and never mints (D9/D20): every gate above has already run, so this
+	// answers with exactly the headers the eventual GET would set - and nothing else, no spend,
+	// no zip body, no per-member audit entries.
+	if r.Method == http.MethodHead {
+		if len(requestedMembers) == 1 {
+			headers.Write(requestedMembers[0], w, true, false)
+		} else {
+			zipName := bundle.Name
+			if zipName == "" {
+				zipName = "Gokapi"
+			}
+			w.Header().Set("Content-Type", "application/zip")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", helper.SanitiseFilename(zipName)))
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	leeway := int64(storage.DownloadLeeway().Seconds())
+
 	// Serve single file raw, or multiple files as zip. Every member of requestedMembers is a
 	// confirmed current member of an available bundle at this point, so reaching this branch
 	// with exactly one never means filtering silently narrowed a larger set down to one - it
@@ -2013,24 +2422,32 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// one member to begin with.
 	if len(requestedMembers) == 1 {
 		file := requestedMembers[0]
-		// A member that is itself identity-restricted spends its own recipient
-		// allowance, same as a direct single-file download would.
-		if !consumeShareDownload(r, models.ShareResourceFile, file.Id, int64(storage.DownloadLeeway().Seconds())) {
+		// A member that is itself identity-restricted spends its own recipient allowance, same
+		// as a direct single-file download would. Resolved fresh via RecipientFor rather than a
+		// narrower re-derivation, so it agrees with accessibleBundleMembers' own verdict for
+		// this exact member - see consumeShareDownload's doc comment for why the two must not
+		// diverge. This still runs on the tokened leg too: before D24 it is free for the rest of
+		// the recipient's own window regardless (see the leeway-session-token plan §6.3), and it
+		// is what keeps a DIFFERENT recipient's own member-level grant meaningful.
+		if !consumeShareDownload(models.ShareResourceFile, file.Id,
+			shareaccess.RecipientFor(w, r, models.ShareResourceFile, file.Id), leeway) {
 			respondPubApiNotFound(w, r)
 			return
 		}
 		// The per-recipient bundle allowance (ShareGrants), when the bundle is restricted to
 		// named recipients, is metered here alongside the file-level one above.
-		if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id, int64(storage.DownloadLeeway().Seconds())) {
+		if !consumeShareDownload(models.ShareResourceBundle, bundle.Id, bundleRecipientId, leeway) {
 			respondPubApiNotFound(w, r)
 			return
 		}
-		// The folder's own visit allowance (models.FileBundle.DownloadsRemaining) is spent last,
-		// immediately before serveBundleFile can start writing bytes - so a failure in anything
-		// above never burns it for a download that is never delivered.
-		if !consumeBundleDownload(bundle) {
-			respondPubApiNotFound(w, r)
-			return
+		// The folder's own visit allowance (models.FileBundle.DownloadsRemaining) is what a
+		// session token stands in for: D21 binds it to the bundle for the life of the window,
+		// so the tokened leg never spends it again - this is the ONLY spend the token skips.
+		if !tokened {
+			if !consumeBundleDownload(bundle) {
+				respondPubApiNotFound(w, r)
+				return
+			}
 		}
 		// Serve raw file
 		serveBundleFile(w, r, file)
@@ -2048,7 +2465,8 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	for _, file := range requestedMembers {
 		// A member that is itself identity-restricted also spends its own recipient
 		// allowance; refuse the whole request rather than excluding just this member.
-		if !consumeShareDownload(r, models.ShareResourceFile, file.Id, int64(storage.DownloadLeeway().Seconds())) {
+		if !consumeShareDownload(models.ShareResourceFile, file.Id,
+			shareaccess.RecipientFor(w, r, models.ShareResourceFile, file.Id), leeway) {
 			respondPubApiNotFound(w, r)
 			return
 		}
@@ -2059,7 +2477,7 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// recipients, is metered here - after every member's own allowance above, and before the
 	// folder's own visit allowance just below, for the same "never burn an allowance on a
 	// request that is refused after this point" reasoning as the single-member branch.
-	if !consumeShareDownload(r, models.ShareResourceBundle, bundle.Id, int64(storage.DownloadLeeway().Seconds())) {
+	if !consumeShareDownload(models.ShareResourceBundle, bundle.Id, bundleRecipientId, leeway) {
 		respondPubApiNotFound(w, r)
 		return
 	}
@@ -2068,10 +2486,12 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// cover a failure once the zip stream itself has started: ServeFilesAsZip writes the
 	// response header before its first entry, so a failure partway through streaming (a storage
 	// read error, an aborted connection) happens after this is already spent, with no refund
-	// primitive to undo it.
-	if !consumeBundleDownload(bundle) {
-		respondPubApiNotFound(w, r)
-		return
+	// primitive to undo it. Skipped on the tokened leg - see the single-member branch above.
+	if !tokened {
+		if !consumeBundleDownload(bundle) {
+			respondPubApiNotFound(w, r)
+			return
+		}
 	}
 
 	// Serve as zip - keep the audit logging that ServeFilesAsZip already performs per entry
@@ -2082,9 +2502,10 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 // models.FileBundle.DownloadsRemaining) - the folder-level counter that replaces each member's
 // now-inert DownloadsRemaining. A zip download and a single-member download both go through this
 // exactly once per request (see pubApiFolderZip), so the same allowance gates both uniformly, and
-// both are free while the visit's download window is still open. Returns false, refusing to
-// serve, once the allowance is exhausted and that window has closed; always true for an unlimited
-// bundle.
+// Returns false, refusing to serve, once the allowance is spent; always true for an unlimited
+// bundle. An open download window no longer makes this succeed: the window belongs to whoever
+// holds the session token minted when it opened, and this is the path for a visitor presenting
+// none.
 func consumeBundleDownload(bundle models.FileBundle) bool {
 	// Which counter a visit spends is storage.DownloadAccessOfBundle's decision, not this
 	// function's: a folder restricted to named recipients is metered by their grants, and its own
@@ -2095,7 +2516,7 @@ func consumeBundleDownload(bundle models.FileBundle) bool {
 	if !access.SpendsOwnCounter || access.UnlimitedDownloads {
 		return true
 	}
-	granted, _ := database.AcquireBundleDownload(bundle.Id, time.Now().Unix(), int64(storage.DownloadLeeway().Seconds()))
+	_, granted := storage.SpendBundleDownload(bundle.Id, time.Now().Unix())
 	return granted
 }
 
@@ -2163,30 +2584,6 @@ func bundleAvailability(bundle models.FileBundle, members []models.File) bool {
 		return false
 	}
 	return storage.IsAvailableBundle(bundle, time.Now().Unix())
-}
-
-// isValidFolderPassword reports whether the folder's own password gate (see
-// models.FileBundle.PasswordHash) is satisfied: either the bundle carries no password, or the
-// caller holds a valid session cookie for it. Writes the "requiresPassword" response itself and
-// returns false when it is not.
-func isValidFolderPassword(w http.ResponseWriter, r *http.Request, bundle models.FileBundle) bool {
-	if bundle.PasswordHash == "" {
-		return true
-	}
-
-	if isValidPwCookieBundle(r, bundle) {
-		return true
-	}
-
-	// Password protection required, no valid cookie
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	response := map[string]interface{}{
-		"id":               bundle.Id,
-		"requiresPassword": true,
-	}
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
-	return false
 }
 
 // Helper function to check if a valid password cookie exists for a bundle

@@ -2025,32 +2025,20 @@ func TestDeleteFile(t *testing.T) {
 		DownloadsRemaining: 1,
 		UserId:             idSuperAdmin,
 	})
-	database.SaveMetaData(models.File{
-		Id:                 "smalltestfileDelay",
-		Name:               "smalltestfileDelay",
-		SHA1:               "03cfd743661f07975fa2f1220c5194cbaff48451",
-		ExpireAt:           2147483646,
-		DownloadsRemaining: 1,
-		UserId:             idUser,
-	})
 	_, ok := database.GetMetaDataById("smalltestfile1")
 	test.IsEqualBool(t, ok, true)
 	_, ok = database.GetMetaDataById("smalltestfile2")
 	test.IsEqualBool(t, ok, true)
-	_, ok = database.GetMetaDataById("smalltestfileDelay")
-	test.IsEqualBool(t, ok, true)
 
 	apiKey := testAuthorisation(t, "/files/delete", models.ApiPermDelete)
-	testDeleteFileCall(t, apiKey, "", "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
-	testDeleteFileCall(t, apiKey, "invalid", "", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided.","ErrorCode":5}`)
-	testDeleteFileCall(t, apiKey, "smalltestfile1", "invalid", 400, `{"Result":"error","ErrorMessage":"invalid value in header delay supplied","ErrorCode":4}`)
-	testDeleteFileCall(t, apiKey, "smalltestfile1", "", 200, "")
-	testDeleteFileCall(t, apiKey, "smalltestfileDelay", "1", 200, "")
-	testDeleteFileCall(t, apiKey, "smalltestfile2", "", 401, `{"Result":"error","ErrorMessage":"No permission to delete this file","ErrorCode":6}`)
+	testDeleteFileCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
+	testDeleteFileCall(t, apiKey, "invalid", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided.","ErrorCode":5}`)
+	testDeleteFileCall(t, apiKey, "smalltestfile1", 200, "")
+	testDeleteFileCall(t, apiKey, "smalltestfile2", 401, `{"Result":"error","ErrorMessage":"No permission to delete this file","ErrorCode":6}`)
 	_, ok = database.GetMetaDataById("smalltestfile2")
 	test.IsEqualBool(t, ok, true)
 	grantUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
-	testDeleteFileCall(t, apiKey, "smalltestfile2", "", 200, "")
+	testDeleteFileCall(t, apiKey, "smalltestfile2", 200, "")
 	removeUserPermission(t, idUser, models.UserPermDeleteOtherUploads)
 
 	time.Sleep(200 * time.Millisecond)
@@ -2058,26 +2046,15 @@ func TestDeleteFile(t *testing.T) {
 	test.IsEqualBool(t, ok, false)
 	_, ok = database.GetMetaDataById("smalltestfile2")
 	test.IsEqualBool(t, ok, false)
-	file, ok := database.GetMetaDataById("smalltestfileDelay")
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-
-	time.Sleep(900 * time.Millisecond)
-	_, ok = database.GetMetaDataById("smalltestfileDelay")
-	test.IsEqualBool(t, ok, false)
 }
 
-func testDeleteFileCall(t *testing.T, apiKey models.ApiKey, fileId, delay string, resultCode int, expectedResponse string) {
+func testDeleteFileCall(t *testing.T, apiKey models.ApiKey, fileId string, resultCode int, expectedResponse string) {
 	t.Helper()
 	const apiUrl = "/files/delete"
 	const headerFileId = "id"
-	const headerDelay = "delay"
 	headers := []test.Header{{}}
 	if fileId != "" {
 		headers = append(headers, test.Header{Name: headerFileId, Value: fileId})
-	}
-	if delay != "" {
-		headers = append(headers, test.Header{Name: headerDelay, Value: delay})
 	}
 	w, r := getRecorder(apiUrl, apiKey.Id, headers)
 	Process(w, r)
@@ -2088,117 +2065,6 @@ func testDeleteFileCall(t *testing.T, apiKey models.ApiKey, fileId, delay string
 
 	defer test.ExpectPanic(t)
 	apiDeleteFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
-}
-
-func TestRestoreFile(t *testing.T) {
-	config := configuration.Get()
-	fileUser := models.File{
-		Id:                 "pendingdeletion1",
-		Name:               "pendingdeletion1",
-		SHA1:               "pendingdeletion",
-		ExpireAt:           2147483646,
-		DownloadsRemaining: 1,
-		UserId:             idUser,
-	}
-	fileAdmin := models.File{
-		Id:                 "pendingdeletion2",
-		Name:               "pendingdeletion2",
-		SHA1:               "pendingdeletion",
-		ExpireAt:           2147483646,
-		DownloadsRemaining: 1,
-		UserId:             idSuperAdmin,
-	}
-	database.SaveMetaData(fileUser)
-	database.SaveMetaData(fileAdmin)
-	_, ok := database.GetMetaDataById(fileUser.Id)
-	test.IsEqualBool(t, ok, true)
-	_, ok = database.GetMetaDataById(fileAdmin.Id)
-	test.IsEqualBool(t, ok, true)
-
-	apiKey := testAuthorisation(t, "/files/restore", models.ApiPermDelete)
-	testRestoreFileCall(t, apiKey, "", 400, `{"Result":"error","ErrorMessage":"header id is required","ErrorCode":4}`)
-	testRestoreFileCall(t, apiKey, "invalid", 404, `{"Result":"error","ErrorMessage":"Invalid file ID provided or file has already been deleted.","ErrorCode":5}`)
-	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(fileUser)))
-	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
-
-	storage.DeleteFileSchedule(fileUser.Id, 500, true)
-	storage.DeleteFileSchedule(fileAdmin.Id, 500, true)
-
-	file, ok := database.GetMetaDataById(fileUser.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-	file, ok = database.GetMetaDataById(fileAdmin.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-
-	testRestoreFileCall(t, apiKey, fileUser.Id, 200, fileUser.ToJsonResult(config.ServerUrl, config.IncludeFilename, storage.DownloadAccessOf(fileUser)))
-	testRestoreFileCall(t, apiKey, fileAdmin.Id, 401, `{"Result":"error","ErrorMessage":"No permission to restore this file","ErrorCode":6}`)
-
-	file, ok = database.GetMetaDataById(fileUser.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualInt64(t, file.PendingDeletion, 0)
-	file, ok = database.GetMetaDataById(fileAdmin.Id)
-	test.IsEqualBool(t, ok, true)
-	test.IsEqualBool(t, file.PendingDeletion != 0, true)
-
-	startTime := time.Now()
-	for {
-		if time.Since(startTime) > 10*time.Second {
-			t.Errorf("Timeout waiting for file to be deleted")
-			break
-		}
-		_, ok = database.GetMetaDataById(fileAdmin.Id)
-		if !ok {
-			break
-		} else {
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-
-	startTime = time.Now()
-	for {
-		if time.Since(startTime) > 10*time.Second {
-			t.Errorf("Timeout waiting for file to be restored")
-			break
-		}
-		file, ok = database.GetMetaDataById(fileUser.Id)
-		if !ok {
-			t.Errorf("File was deleted")
-			break
-		}
-		if file.PendingDeletion == 0 {
-			break
-		} else {
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-	test.IsEqualInt64(t, file.PendingDeletion, 0)
-	// Removed directly rather than via storage.DeleteFile(id, true): that only schedules
-	// disposal and fires CleanUp in a background goroutine, racing TestList (the very next
-	// top-level test), which asserts idUser has no files the moment it starts. A direct
-	// database.DeleteMetaData guarantees the row is gone before this test returns, without
-	// running a full CleanUp sweep over every other fixture row this package's other tests
-	// still depend on.
-	database.DeleteMetaData(fileUser.Id)
-}
-
-func testRestoreFileCall(t *testing.T, apiKey models.ApiKey, fileId string, resultCode int, expectedResponse string) {
-	t.Helper()
-	const apiUrl = "/files/restore"
-	const headerFileId = "id"
-	headers := []test.Header{{}}
-	if fileId != "" {
-		headers = append(headers, test.Header{Name: headerFileId, Value: fileId})
-	}
-	w, r := getRecorder(apiUrl, apiKey.Id, headers)
-	Process(w, r)
-	test.IsEqualInt(t, w.Code, resultCode)
-	if expectedResponse != "" {
-		test.ResponseBodyIs(t, w, expectedResponse)
-	}
-
-	defer test.ExpectPanic(t)
-	apiRestoreFile(w, &paramAuthCreate{}, models.User{Id: 7}, apiKey)
 }
 
 func TestList(t *testing.T) {
@@ -3744,6 +3610,67 @@ func TestFileReplace(t *testing.T) {
 	test.IsEqualBool(t, ok, true)
 	_, ok = storage.GetFile(newFile.Id)
 	test.IsEqualBool(t, ok, false)
+}
+
+// TestApiReplaceFileActuallyReplacesSpentFile is the regression for the bug a reviewer found by
+// running the handler: storage.ReplaceFile used to re-resolve both files by id with the strict,
+// allowance-checking storage.GetFile, so replacing an owner's own exhausted file 404'd - "A file
+// with such an ID could not be found" - despite apiReplaceFile having already admitted it via
+// storage.GetFileIgnoringAllowance, and despite that 404 an "allowance-bypass" audit entry still
+// got written, since it used to be recorded before the (failing) replace rather than after. This
+// confirms both halves: the replace actually happens (content moves over in the database), and
+// the audit entry is only written because it genuinely happened.
+func TestApiReplaceFileActuallyReplacesSpentFile(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermReplace)
+	database.SaveApiKey(apiKey)
+
+	original := models.File{
+		Id:                 "replaceSpentOriginal",
+		Name:               "old-spent.txt",
+		Size:               "1KB",
+		SHA1:               "replacetest1",
+		ContentType:        "text/plain",
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		UnlimitedTime:      true,
+		SizeBytes:          1024,
+		UserId:             idUser,
+	}
+	newContent := models.File{
+		Id:                 "replaceSpentNewContent",
+		Name:               "new-spent.txt",
+		Size:               "2KB",
+		SHA1:               "replacetest2",
+		ContentType:        "text/plain2",
+		UnlimitedDownloads: true,
+		UnlimitedTime:      true,
+		SizeBytes:          2048,
+		UserId:             idUser,
+	}
+	database.SaveMetaData(original)
+	database.SaveMetaData(newContent)
+
+	testReplaceFileCall(t, apiKey, original.Id, newContent.Id, false, 200, "")
+
+	stored, ok := database.GetMetaDataById(original.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, stored.Name, newContent.Name)
+	test.IsEqualString(t, stored.SHA1, newContent.SHA1)
+	test.IsEqualString(t, stored.ContentType, newContent.ContentType)
+	// The original's own allowance is untouched by a replace - it is a property of the file
+	// record being kept, not of the content being swapped in.
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	found := false
+	for _, entry := range entries {
+		if entry.Action == "allowance-bypass" && entry.FileId == original.Id {
+			found = true
+			test.IsEqualString(t, string(entry.Outcome), "success")
+		}
+	}
+	test.IsEqualBool(t, found, true)
 }
 
 func TestChunkCompleteSanitisation(t *testing.T) {
@@ -5950,6 +5877,223 @@ func TestCollaboratorCanSeeReceivedFiles(t *testing.T) {
 	stranger, _ := database.GetUser(idStranger)
 	_, code, _, _ = checkDownloadAllowed(file.Id, stranger)
 	test.IsEqualInt(t, code, 401)
+}
+
+// TestInternalApiBypassNeverBecomesAccessControlHole confirms the internal API's allowance bypass
+// removes only the allowance check, never mayViewFile's permission check: a file whose download
+// allowance is fully spent is served to a caller who may otherwise view it (here, a collaborator
+// on the file request it was received through), but a stranger with no view right is still
+// refused with exactly the same 401 they would get for a live file - the bypass must never turn
+// into a way to read someone else's spent file.
+func TestInternalApiBypassNeverBecomesAccessControlHole(t *testing.T) {
+	database.SaveUser(models.User{
+		Id: idStranger, Name: "TestStranger", Permissions: models.UserPermissionNone,
+		UserLevel: models.UserLevelUser, AuthProvider: models.AuthProviderInternal,
+	}, false)
+	fr := models.FileRequest{
+		Id: "bypassAccessRequest", Name: "Bypass access request", UserId: idAdmin,
+		ApiKey: "bypassAccessRequestKey", CreationDate: time.Now().Unix(),
+	}
+	fr.SetCollaboratorIds([]int{idUser})
+	database.SaveFileRequest(fr)
+	file := models.File{
+		Id: "bypassAccessFile", Name: "bypassaccess.txt", SHA1: "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		DownloadsRemaining: 0, UnlimitedDownloads: false, UnlimitedTime: true,
+		UserId: idAdmin, UploadRequestId: fr.Id,
+	}
+	database.SaveMetaData(file)
+
+	collaborator, _ := database.GetUser(idUser)
+	_, code, _, _ := checkDownloadAllowed(file.Id, collaborator)
+	test.IsEqualInt(t, code, 0)
+
+	stranger, _ := database.GetUser(idStranger)
+	_, code, _, _ = checkDownloadAllowed(file.Id, stranger)
+	test.IsEqualInt(t, code, 401)
+}
+
+// TestInternalApiServesSpentFileToOwnerWithoutCounting is the central regression for this change:
+// the download allowance is a property of the link, not of the file, so the authenticated
+// internal API serves an owner their own already-exhausted file rather than refusing it the way
+// the public download path (rightly) does - and it moves no counter doing so, since the request
+// never asked to increase one (IncreaseCounter defaults to false and stays the caller's choice).
+func TestInternalApiServesSpentFileToOwnerWithoutCounting(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	file := models.File{
+		Id:                 "bypassSpentDownload",
+		Name:               "bypassSpentDownload",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		DownloadCount:      3,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(file)
+
+	w, r := getRecorder("/api/files/download/"+file.Id, apiKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	stored, ok := database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	test.IsEqualInt(t, stored.DownloadCount, 3)
+}
+
+// TestInternalApiAuditsAllowanceBypassOnlyWhenSpent confirms the audit side of the bypass: the
+// same request that serves a spent file through the internal API writes an "allowance-bypass"
+// audit entry attributed to the caller, while the identical request against a resource whose
+// allowance is not spent writes nothing - only the policy exception gets a trail.
+func TestInternalApiAuditsAllowanceBypassOnlyWhenSpent(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	spentFile := models.File{
+		Id:                 "bypassAuditSpent",
+		Name:               "bypassAuditSpent",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(spentFile)
+	notSpentFile := models.File{
+		Id:                 "bypassAuditNotSpent",
+		Name:               "bypassAuditNotSpent",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 5,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(notSpentFile)
+
+	w, r := getRecorder("/api/files/download/"+spentFile.Id, apiKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	w, r = getRecorder("/api/files/download/"+notSpentFile.Id, apiKey.Id, nil)
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 200)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	foundSpent := false
+	foundNotSpent := false
+	for _, entry := range entries {
+		if entry.Action != "allowance-bypass" {
+			continue
+		}
+		if entry.FileId == spentFile.Id {
+			foundSpent = true
+			test.IsEqualInt(t, entry.Actor.UserId, idUser)
+		}
+		if entry.FileId == notSpentFile.Id {
+			foundNotSpent = true
+		}
+	}
+	test.IsEqualBool(t, foundSpent, true)
+	test.IsEqualBool(t, foundNotSpent, false)
+}
+
+// TestApiDownloadRefusesPresignMintOfSpentFile is the mint-side twin of
+// TestDownloadPresignedRefusesSpentFile (internal/webserver/Webserver_test.go): a presigned URL is
+// a public credential exactly like a share, so /api/files/download must refuse to mint one for a
+// spent file rather than handing back a URL that downloadPresigned would only refuse later on
+// redemption. Strict at both ends of that flow is the point of the pair. Refusing here also means
+// no bypass happened, so unlike the plain-download case this must not write an allowance-bypass
+// audit entry - only the ordinary denial LogDownloadDenied already writes for any refused download.
+func TestApiDownloadRefusesPresignMintOfSpentFile(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	file := models.File{
+		Id:                 "bypassPresignSpent",
+		Name:               "bypassPresignSpent",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(file)
+
+	w, r := getRecorder("/api/files/download/"+file.Id, apiKey.Id, []test.Header{{Name: "presignUrl", Value: "true"}})
+	Process(w, r)
+	test.IsEqualInt(t, w.Code, 404)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	foundDenied := false
+	foundBypass := false
+	for _, entry := range entries {
+		if entry.FileId != file.Id {
+			continue
+		}
+		if entry.Action == "allowance-bypass" {
+			foundBypass = true
+		}
+		if entry.Action == "download" && entry.Outcome == logging.OutcomeDenied {
+			foundDenied = true
+		}
+	}
+	test.IsEqualBool(t, foundDenied, true)
+	test.IsEqualBool(t, foundBypass, false)
+}
+
+// TestApiDownloadFailedIncreaseCounterDoesNotAuditSuccess is the regression for the second bug a
+// reviewer found by running the handler: apiDownloadSingle discarded storage.ServeFile's bool
+// return, so requesting increaseCounter=true against a spent file - now reachable at all only
+// because checkDownloadAllowed bypasses the allowance - fell through to an implicit 200 with an
+// empty body once SpendDownload failed to acquire, after an audit entry had already claimed the
+// bypass succeeded. Nothing was actually served, so the response must be a real refusal, the
+// allowance must be untouched, and no "allowance-bypass" success entry may exist for this file.
+func TestApiDownloadFailedIncreaseCounterDoesNotAuditSuccess(t *testing.T) {
+	apiKey := generateNewKey(false, idUser, "", "")
+	apiKey.GrantPermission(models.ApiPermDownload)
+	database.SaveApiKey(apiKey)
+
+	file := models.File{
+		Id:                 "bypassSpentIncreaseCounter",
+		Name:               "bypassSpentIncreaseCounter",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		DownloadCount:      4,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+		UserId:             idUser,
+	}
+	database.SaveMetaData(file)
+
+	w, r := getRecorder("/api/files/download/"+file.Id, apiKey.Id, []test.Header{{Name: "increaseCounter", Value: "true"}})
+	Process(w, r)
+
+	test.IsEqualBool(t, w.Code == http.StatusOK, false)
+	test.IsEqualBool(t, w.Body.Len() > 0, true)
+
+	stored, ok := database.GetMetaDataById(file.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualInt(t, stored.DownloadsRemaining, 0)
+	test.IsEqualInt(t, stored.DownloadCount, 4)
+
+	entries, _ := logging.GetAuditEntriesSince(0, 5000)
+	for _, entry := range entries {
+		if entry.FileId != file.Id {
+			continue
+		}
+		// No success of any shape may exist for this file: nothing was served.
+		test.IsEqualBool(t, entry.Outcome == logging.OutcomeSuccess, false)
+	}
 }
 
 // TestResolveShareResourceRefusesReceivedFile is a regression test for a gap in

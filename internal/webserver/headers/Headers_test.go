@@ -1,8 +1,10 @@
 package headers
 
 import (
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
@@ -46,13 +48,25 @@ func TestWriteDownloadHeaders(t *testing.T) {
 	test.IsEqualBool(t, strings.Contains(disposition, "%2B"), true)
 	test.IsEqualBool(t, strings.Contains(disposition, "filename*=UTF-8''build%2B%283%29.zip"), true)
 
-	// --- Encrypted file: Accept-Ranges and Last-Modified must be present ---
-	file = models.File{Name: "secret.bin", ContentType: "application/octet-stream", SizeBytes: 512}
+	// --- Encrypted file: Last-Modified and Etag must be present and derived from UploadDate/SHA1,
+	// not the current time - a resuming client's If-Range can only ever match a validator that
+	// stays the same across requests. Accept-Ranges is left to http.ServeContent, which is the
+	// component that actually knows whether the reader it was handed can seek.
+	file = models.File{Name: "secret.bin", ContentType: "application/octet-stream", SizeBytes: 512, UploadDate: 1700000000, SHA1: "abc123"}
 	file.Encryption.IsEncrypted = true
 	w, _ = test.GetRecorder("GET", "/test", nil, nil, nil)
 	Write(file, w, false, false)
-	test.IsEqualString(t, w.Result().Header.Get("Accept-Ranges"), "bytes")
-	test.IsNotEmpty(t, w.Result().Header.Get("Last-Modified"))
+	test.IsEqualString(t, w.Result().Header.Get("Accept-Ranges"), "")
+	test.IsEqualString(t, w.Result().Header.Get("Last-Modified"), time.Unix(1700000000, 0).UTC().Format(http.TimeFormat))
+	test.IsEqualString(t, w.Result().Header.Get("Etag"), `"abc123"`)
+
+	// --- Two requests for the same file must return the identical validators, not a fresh one
+	// each time (this is the pin for the resume bug: a validator that changes every request can
+	// never be matched by a later If-Range). ---
+	w2, _ := test.GetRecorder("GET", "/test", nil, nil, nil)
+	Write(file, w2, false, false)
+	test.IsEqualString(t, w2.Result().Header.Get("Last-Modified"), w.Result().Header.Get("Last-Modified"))
+	test.IsEqualString(t, w2.Result().Header.Get("Etag"), w.Result().Header.Get("Etag"))
 
 	// --- Encrypted file that requires client decryption: Content-Type must be octet-stream ---
 	file.Encryption.IsEndToEndEncrypted = true

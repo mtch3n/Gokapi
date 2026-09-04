@@ -419,9 +419,18 @@ func recipientLogSuffix(r *http.Request) string {
 // WithActor (admin/API downloads) or WithRecipient (a share recipient downloading a restricted
 // resource); public, unrestricted share/hotlink downloads carry no identity by design and are
 // recorded as anonymous.
+//
+// A request marked via WithDownloadSession is recorded with Detail "resumed": the allowance was
+// already spent when the session token was minted, so this delivery is that same pickup
+// finishing rather than a new one, and the audit trail must say so or every in-window retry
+// would look like an extra download nobody can account for.
 func LogDownload(file models.File, r *http.Request, saveIp bool) error {
 	ip := ""
 	recipientSuffix := recipientLogSuffix(r)
+	detail := ""
+	if downloadSessionFromRequest(r) {
+		detail = "resumed"
+	}
 	if saveIp {
 		ip = GetIpAddress(r)
 		createLogEntry(categoryDownload, fmt.Sprintf("IP %s, ID %s, Useragent %s%s", ip, file.Id, sanitiseUserAgent(r), recipientSuffix), false)
@@ -436,6 +445,7 @@ func LogDownload(file models.File, r *http.Request, saveIp bool) error {
 		FileId:     file.Id,
 		Actor:      buildActorFromRequest(r),
 		FileConfig: downloadFileConfig(file),
+		Detail:     detail,
 	})
 }
 
@@ -471,6 +481,65 @@ func LogDownloadDenied(file models.File, r *http.Request, saveIp bool, reason st
 		FileConfig: downloadFileConfig(file),
 		Error:      reason,
 	})
+}
+
+// LogDownloadAllowanceBypassed records that an authenticated internal-API caller was served a
+// resource whose download allowance was already spent - exactly the case storage.GetFile (and so
+// the public download path) would have refused. The allowance is a property of the link, not of
+// the file, so the internal API does not enforce it, but every such exception is recorded here so
+// an operator reading the log can see every time it happened and to whom. This is a guarded,
+// fail-closed event like LogDownload: the caller must not proceed to serve or return anything
+// about the resource if this returns a non-nil error - refuse the request instead. It is written
+// in addition to, never instead of, whatever the caller's own action already logs (e.g.
+// LogDownload for an actual byte-serving download); a request against a resource whose allowance
+// is not spent writes nothing here at all.
+func LogDownloadAllowanceBypassed(file models.File, r *http.Request, saveIp bool) error {
+	ip := ""
+	if saveIp {
+		ip = GetIpAddress(r)
+	}
+	createLogEntry(categoryDownload, fmt.Sprintf("ID %s, IP %s, internal API served a spent download allowance, Useragent %s%s",
+		file.Id, ip, sanitiseUserAgent(r), recipientLogSuffix(r)), false)
+	return appendAuditEntry(AuditEntry{
+		Category:   categoryDownload,
+		Action:     "allowance-bypass",
+		Outcome:    OutcomeSuccess,
+		Ip:         ip,
+		FileId:     file.Id,
+		Actor:      buildActorFromRequest(r),
+		FileConfig: downloadFileConfig(file),
+		Detail:     "internal API bypassed spent download allowance",
+	})
+}
+
+// LogDownloadSession records that a download session token was minted against resourceId, i.e.
+// that the allowance backing it was just spent. This is a guarded, fail-closed event like
+// LogDownload: the endpoint that spent the allowance must refuse the request if this returns a
+// non-nil error, because by then the spend is already irreversible and an unrecorded one is
+// worse than a refused one. It is the "one session entry per pickup" half of the audit trail
+// described in the leeway-session-token plan §7; the eventual delivery - possibly more than one,
+// each a free retry inside the window - is recorded separately by LogDownload, marked resumed
+// after the first via WithDownloadSession.
+func LogDownloadSession(resourceType int, resourceId string, r *http.Request, saveIp bool) error {
+	ip := ""
+	if saveIp {
+		ip = GetIpAddress(r)
+	}
+	createLogEntry(categoryDownload, fmt.Sprintf("Download session issued for %s %s, IP %s%s",
+		shareResourceLabel(resourceType), resourceId, ip, recipientLogSuffix(r)), false)
+	entry := AuditEntry{
+		Category: categoryDownload,
+		Action:   "session-issued",
+		Outcome:  OutcomeSuccess,
+		Ip:       ip,
+		Actor:    buildActorFromRequest(r),
+	}
+	if resourceType == models.ShareResourceBundle {
+		entry.BundleId = resourceId
+	} else {
+		entry.FileId = resourceId
+	}
+	return appendAuditEntry(entry)
 }
 
 var regexUserAgent = regexp.MustCompile(`[^A-Za-z0-9/. ;:+(|)_\-,]`)
@@ -706,18 +775,6 @@ func LogFolderDeleteBatch(bundle models.FileBundle, memberFiles []models.File, u
 		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
 	})
 	return appendAuditEntries(entries)
-}
-
-// LogRestore adds a log entry when the pending deletion of a file was cancelled and the file restored. Non-Blocking
-func LogRestore(file models.File, user models.User) {
-	createLogEntry(categoryEdit, fmt.Sprintf("ID %s, restored by %s (user #%d)", file.Id, user.Name, user.Id), false)
-	appendAuditEntryAsync(AuditEntry{
-		Category: categoryEdit,
-		Action:   "file.restored",
-		Outcome:  OutcomeSuccess,
-		FileId:   file.Id,
-		Actor:    AuditActor{UserId: user.Id, Email: user.Name},
-	})
 }
 
 // LogFileExpired records that a file's metadata (and, unless deduplicated, its stored blob)

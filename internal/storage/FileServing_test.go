@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -94,6 +95,78 @@ func TestGetFile(t *testing.T) {
 	test.IsEqualBool(t, result, true)
 	// Clean up test data
 	database.DeleteMetaData(pendingFile.Id)
+}
+
+// TestGetFileIgnoringAllowance covers the one predicate that is supposed to differ from GetFile
+// (a spent allowance is admitted, not refused) and confirms every other check getFile applies is
+// still applied unchanged - one case each, so a future edit to getFile cannot quietly widen this
+// beyond the allowance it is meant to ignore.
+func TestGetFileIgnoringAllowance(t *testing.T) {
+	const realBlobSha1 = "e017693e4a04a59d0b0f400fe98177fe7ee13cf7" // shared blob already seeded by testconfiguration
+
+	spentFile := models.File{
+		Id:                 "ignoringallowance-spent",
+		Name:               "ignoringallowance-spent",
+		SHA1:               realBlobSha1,
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/html",
+	}
+	database.SaveMetaData(spentFile)
+	file, ok := GetFileIgnoringAllowance(spentFile.Id)
+	test.IsEqualBool(t, ok, true)
+	test.IsEqualString(t, file.Id, spentFile.Id)
+	// GetFile is the strict twin: it must still refuse the very same resource on the allowance
+	// alone, confirming the two have not drifted onto the same predicate by accident.
+	_, strictOk := GetFile(spentFile.Id)
+	test.IsEqualBool(t, strictOk, false)
+
+	pendingDeletionFile := models.File{
+		Id:                 "ignoringallowance-pendingdeletion",
+		Name:               "ignoringallowance-pendingdeletion",
+		SHA1:               realBlobSha1,
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		PendingDeletion:    time.Now().Add(time.Hour).Unix(),
+	}
+	database.SaveMetaData(pendingDeletionFile)
+	_, ok = GetFileIgnoringAllowance(pendingDeletionFile.Id)
+	test.IsEqualBool(t, ok, false)
+
+	disposedFile := models.File{
+		Id:                 "ignoringallowance-disposed",
+		Name:               "ignoringallowance-disposed",
+		SHA1:               realBlobSha1,
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		DisposedAt:         time.Now().Unix() - 10,
+	}
+	database.SaveMetaData(disposedFile)
+	_, ok = GetFileIgnoringAllowance(disposedFile.Id)
+	test.IsEqualBool(t, ok, false)
+
+	expiredFile := models.File{
+		Id:                 "ignoringallowance-expired",
+		Name:               "ignoringallowance-expired",
+		SHA1:               realBlobSha1,
+		ExpireAt:           time.Now().Add(-time.Hour).Unix(),
+		DownloadsRemaining: 0,
+	}
+	database.SaveMetaData(expiredFile)
+	_, ok = GetFileIgnoringAllowance(expiredFile.Id)
+	test.IsEqualBool(t, ok, false)
+
+	missingBlobFile := models.File{
+		Id:                 "ignoringallowance-missingblob",
+		Name:               "ignoringallowance-missingblob",
+		SHA1:               "no-such-blob-on-disk",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+	}
+	database.SaveMetaData(missingBlobFile)
+	_, ok = GetFileIgnoringAllowance(missingBlobFile.Id)
+	test.IsEqualBool(t, ok, false)
 }
 
 func TestGetFileByHotlink(t *testing.T) {
@@ -1211,6 +1284,166 @@ func TestDuplicateFileSharesBlobEvenWhenEncrypted(t *testing.T) {
 	test.FileDoesNotExist(t, configuration.Get().DataDir+"/"+originalFile.SHA1)
 }
 
+// createEncryptedRangeTestFile uploads deterministic content spanning multiple sio chunks
+// (sio.BufSize == 16384, see internal/encryption's getStream) as a local, server-side encrypted
+// file, so the range tests below exercise chunk boundaries rather than a single chunk. Mirrors
+// the encryption setup TestNewFileFromChunkEncryptedNeverDeduplicated uses.
+func createEncryptedRangeTestFile(t *testing.T) (models.File, []byte) {
+	t.Helper()
+	return createEncryptedTestFileOfSize(t, 16384*2+500)
+}
+
+// createEncryptedTestFileOfSize is the same fixture with the plaintext length chosen by the
+// caller, so a test can cover a file that fits inside a single encryption chunk as well as one
+// that spans several. The chunk size is sio.BufSize, 16384.
+func createEncryptedTestFileOfSize(t *testing.T, size int) (models.File, []byte) {
+	t.Helper()
+	configuration.Get().Encryption.Level = 1
+	cipher, err := encryption.GetRandomCipher()
+	test.IsNil(t, err)
+	encryption.Init(models.Configuration{Encryption: models.Encryption{
+		Level:  encryption.LocalEncryptionStored,
+		Cipher: cipher,
+	}})
+	t.Cleanup(func() { configuration.Get().Encryption.Level = 0 })
+
+	content := make([]byte, size)
+	_, err = rand.Read(content)
+	test.IsNil(t, err)
+
+	header, request := createRawTestFile(content)
+	request.UnlimitedDownload = true
+	file, err := NewFile(bytes.NewReader(content), &header, 63, request)
+	test.IsNil(t, err)
+	return file, content
+}
+
+// TestServeFileEncryptedRangeRequest is the one that matters: a ranged request against an
+// encrypted file must come back 206 with exactly the requested bytes, byte-identical to the same
+// slice of a full download. The range straddles the chunk boundary at 16384, so it also exercises
+// encryption.DecryptReaderAt's chunk-crossing path, not just a single chunk.
+func TestServeFileEncryptedRangeRequest(t *testing.T) {
+	file, content := createEncryptedRangeTestFile(t)
+
+	start, end := 16384-100, 16384+100
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	w := httptest.NewRecorder()
+	served := ServeFile(file, w, r, true, false, false, false)
+	test.IsEqualBool(t, served, true)
+	test.IsEqualInt(t, w.Code, http.StatusPartialContent)
+	test.IsEqualString(t, w.Result().Header.Get("Content-Range"), fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+	body, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, body, content[start:end+1])
+}
+
+// TestServeFileEncryptedNoRangeReturnsWholeFileUnchanged pins the non-ranged path: a request
+// without a Range header must still come back 200 with the complete, correctly decrypted file.
+func TestServeFileEncryptedNoRangeReturnsWholeFileUnchanged(t *testing.T) {
+	file, content := createEncryptedRangeTestFile(t)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	served := ServeFile(file, w, r, true, false, false, false)
+	test.IsEqualBool(t, served, true)
+	test.IsEqualInt(t, w.Code, http.StatusOK)
+	body, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, body, content)
+}
+
+// TestServeFileEncryptedResume is bug 2: a stable validator is what lets a resuming client's
+// If-Range actually match. A request carrying the Etag the server issued on an earlier response
+// must resume with a 206; one carrying a stale validator (e.g. from a different upload) must be
+// refused and restarted from byte zero with a full 200, since the server can no longer be sure
+// the client's partial copy corresponds to what it is about to send.
+func TestServeFileEncryptedResume(t *testing.T) {
+	file, content := createEncryptedRangeTestFile(t)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	test.IsEqualBool(t, ServeFile(file, w, r, true, false, false, false), true)
+	etag := w.Result().Header.Get("Etag")
+	test.IsNotEmpty(t, etag)
+
+	r = httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Range", "bytes=100-199")
+	r.Header.Set("If-Range", etag)
+	w = httptest.NewRecorder()
+	test.IsEqualBool(t, ServeFile(file, w, r, true, false, false, false), true)
+	test.IsEqualInt(t, w.Code, http.StatusPartialContent)
+	body, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, body, content[100:200])
+
+	r = httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Range", "bytes=100-199")
+	r.Header.Set("If-Range", `"stale-etag-from-a-different-upload"`)
+	w = httptest.NewRecorder()
+	test.IsEqualBool(t, ServeFile(file, w, r, true, false, false, false), true)
+	test.IsEqualInt(t, w.Code, http.StatusOK)
+	body, err = io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, body, content)
+}
+
+// TestServeFileEncryptedValidatorsAreStable is the direct pin for bug 2: two separate requests
+// for the same file must get back the same Etag and Last-Modified. Before this fix both were
+// derived from time.Now() on every request, so no resume could ever match.
+func TestServeFileEncryptedValidatorsAreStable(t *testing.T) {
+	file, _ := createEncryptedRangeTestFile(t)
+
+	r1 := httptest.NewRequest("GET", "/", nil)
+	w1 := httptest.NewRecorder()
+	test.IsEqualBool(t, ServeFile(file, w1, r1, true, false, false, false), true)
+
+	r2 := httptest.NewRequest("GET", "/", nil)
+	w2 := httptest.NewRecorder()
+	test.IsEqualBool(t, ServeFile(file, w2, r2, true, false, false, false), true)
+
+	test.IsNotEmpty(t, w1.Result().Header.Get("Etag"))
+	test.IsEqualString(t, w1.Result().Header.Get("Etag"), w2.Result().Header.Get("Etag"))
+	test.IsEqualString(t, w1.Result().Header.Get("Last-Modified"), w2.Result().Header.Get("Last-Modified"))
+}
+
+// TestServeFileEncryptedHeadRequest confirms a HEAD still answers headers only, exactly like the
+// unencrypted branch already did via http.ServeContent - now that the encrypted branch goes
+// through ServeContent too, it gets this for free rather than needing its own HEAD handling.
+func TestServeFileEncryptedHeadRequest(t *testing.T) {
+	file, _ := createEncryptedRangeTestFile(t)
+
+	r := httptest.NewRequest("HEAD", "/", nil)
+	w := httptest.NewRecorder()
+	served := ServeFile(file, w, r, true, false, false, false)
+	test.IsEqualBool(t, served, true)
+	test.IsEqualInt(t, w.Code, http.StatusOK)
+	test.IsEqualString(t, w.Result().Header.Get("Content-Length"), fmt.Sprintf("%d", file.SizeBytes))
+	body, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualInt(t, len(body), 0)
+}
+
+// TestServeFileUnencryptedRangeRequestUnchanged pins the baseline: unencrypted local files
+// already went through http.ServeContent before this change and must keep working exactly the
+// same way - still 206, still the exact requested bytes.
+func TestServeFileUnencryptedRangeRequestUnchanged(t *testing.T) {
+	newFile, err := createTestFile()
+	test.IsNil(t, err)
+	file := newFile.File
+	database.SaveMetaData(file)
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Range", "bytes=5-9")
+	w := httptest.NewRecorder()
+	served := ServeFile(file, w, r, true, false, false, false)
+	test.IsEqualBool(t, served, true)
+	test.IsEqualInt(t, w.Code, http.StatusPartialContent)
+	body, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualString(t, string(body), string(newFile.Content[5:10]))
+}
+
 func TestDeleteAllEncrypted(t *testing.T) {
 	file := models.File{
 		Id:            "testEncDelEnc",
@@ -1296,14 +1529,14 @@ func TestReplaceFile(t *testing.T) {
 	database.SaveMetaData(e2eFile)
 	_, ok = database.GetMetaDataById(e2eFile.Id)
 	test.IsEqualBool(t, ok, true)
-	_, err := ReplaceFile("invalidfile", originalFile.Id, false)
-	test.IsNotNil(t, err)
-	_, err = ReplaceFile(originalFile.Id, "invalidfile", false)
-	test.IsNotNil(t, err)
-	_, err = ReplaceFile(originalFile.Id, e2eFile.Id, false)
+
+	// ReplaceFile takes both files already resolved by value - the id-based lookup, and so the
+	// invalid-id error case, now lives entirely in the caller (see apiReplaceFile). The one error
+	// this function still produces itself is the E2E refusal, which does not depend on a lookup.
+	_, err := ReplaceFile(originalFile, e2eFile, false)
 	test.IsNotNil(t, err)
 
-	_, err = ReplaceFile(originalFile.Id, newFile.Id, false)
+	_, err = ReplaceFile(originalFile, newFile, false)
 	test.IsNil(t, err)
 	file, ok := GetFile(originalFile.Id)
 	test.IsEqualBool(t, ok, true)
@@ -1317,7 +1550,10 @@ func TestReplaceFile(t *testing.T) {
 	_, ok = GetFile(newFile.Id)
 	test.IsEqualBool(t, ok, true)
 
-	_, err = ReplaceFile(originalFile.Id, newFile.Id, true)
+	// file is the row as it stands after the first replace (originalFile.Id, now carrying
+	// newFile's content) - passed in by value exactly as a caller who just re-resolved it would.
+	_, err = ReplaceFile(file, newFile, true)
+	test.IsNil(t, err)
 	_, ok = GetFile(originalFile.Id)
 	test.IsEqualBool(t, ok, true)
 	_, ok = GetFile(newFile.Id)
@@ -1786,4 +2022,51 @@ func TestDuplicateFileDoesNotInheritTheSourceShareKey(t *testing.T) {
 	stored, ok := database.GetMetaDataById(duplicate.Id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, string(stored.EncryptedSharePassword) == string(sourceKey), false)
+}
+
+// TestServeFileEncryptedOpenEndedRange covers the range shape a resuming client actually sends.
+// Chrome asks for "bytes=<offset>-" with no end, so this is the path that matters most in
+// practice, and it goes through parseRange's open-ended branch rather than the bounded one the
+// other range test exercises. Content-Length is asserted here because ServeContent recomputes it
+// for a partial response, and headers.Write has already written the full-file length by then.
+func TestServeFileEncryptedOpenEndedRange(t *testing.T) {
+	file, content := createEncryptedRangeTestFile(t)
+
+	start := 16384 + 1234
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+	w := httptest.NewRecorder()
+	served := ServeFile(file, w, r, true, false, false, false)
+	test.IsEqualBool(t, served, true)
+	test.IsEqualInt(t, w.Code, http.StatusPartialContent)
+	test.IsEqualString(t, w.Result().Header.Get("Content-Range"), fmt.Sprintf("bytes %d-%d/%d", start, len(content)-1, len(content)))
+	test.IsEqualString(t, w.Result().Header.Get("Content-Length"), fmt.Sprintf("%d", len(content)-start))
+	body, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, body, content[start:])
+}
+
+// TestServeFileEncryptedSmallerThanOneChunk pins the file that never crosses a chunk boundary at
+// all. Every other encrypted fixture here spans several chunks, so without this the single-chunk
+// case - the common one for small uploads - would go untested through the range path.
+func TestServeFileEncryptedSmallerThanOneChunk(t *testing.T) {
+	file, content := createEncryptedTestFileOfSize(t, 4096)
+
+	start, end := 100, 3000
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	w := httptest.NewRecorder()
+	served := ServeFile(file, w, r, true, false, false, false)
+	test.IsEqualBool(t, served, true)
+	test.IsEqualInt(t, w.Code, http.StatusPartialContent)
+	body, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, body, content[start:end+1])
+
+	r = httptest.NewRequest("GET", "/", nil)
+	w = httptest.NewRecorder()
+	test.IsEqualBool(t, ServeFile(file, w, r, true, false, false, false), true)
+	whole, err := io.ReadAll(w.Result().Body)
+	test.IsNil(t, err)
+	test.IsEqualByteSlice(t, whole, content)
 }

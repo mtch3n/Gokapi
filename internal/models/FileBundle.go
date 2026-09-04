@@ -88,8 +88,12 @@ func (b *FileBundle) DownloadAccess(leeway int64) DownloadAccess {
 }
 
 // Status computes which of the Status* values applies to this folder, the folder twin of
-// File.Status. Same order of tests, minus the pending-deletion branch: a folder is never
-// scheduled for deletion, only its members are, so pending_deletion has no folder-level meaning.
+// File.Status. Same order of tests, minus the disposed/scheduled-deletion branches: a folder is
+// never scheduled for deletion, only its members are, so IsDeleted is the only way a folder
+// itself reports StatusDeleted. It still reports StatusPendingDeletion, the same as a file - a
+// folder whose own allowance is spent while its window is open is closed and waiting to be
+// disposed of exactly like a file in that state, even though nothing ever schedules its deletion
+// the way a file's PendingDeletion field can.
 //
 // Membership is deliberately not part of it. storage.IsAvailableBundle answers "may a visitor
 // open this", which needs to know whether anything is in it; this answers "what state is the
@@ -104,6 +108,14 @@ func (b *FileBundle) Status(access DownloadAccess, timeNow int64) string {
 	}
 	if access.IsExpired(timeNow) {
 		return StatusExpired
+	}
+	// See File.Status for why this has to come after IsExhausted and IsExpired. A spent-and-closed
+	// allowance already matched IsExhausted above, whose "finished" reason is truer than "pending
+	// deletion" for the same spent allowance; a spent-and-expired one is truer still reported as
+	// expired. Reaching here with IsSpent true leaves only the remaining case: the allowance is
+	// gone but the window is still open.
+	if access.IsSpent() {
+		return StatusPendingDeletion
 	}
 	return StatusActive
 }

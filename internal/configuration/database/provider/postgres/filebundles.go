@@ -122,39 +122,17 @@ func (p DatabaseProvider) SaveFileBundle(bundle models.FileBundle) {
 	helper.Check(err)
 }
 
-// AcquireBundleDownload atomically lets one visit through to a bundle's content - mirrors
-// metadata.go's AcquireDownload exactly, including its three steps and the reasoning behind each;
-// see that function. A bundle has no DownloadCount to increment alongside the allowance it spends.
-func (p DatabaseProvider) AcquireBundleDownload(id string, timeNow, leeway int64) (bool, bool) {
-	windowOpenSince := timeNow - leeway
-	if p.isBundleWindowOpen(id, windowOpenSince) {
-		return true, false
-	}
+// AcquireBundleDownload spends one visit to a bundle's content - mirrors metadata.go's
+// AcquireDownload exactly, including the reasoning for the single conditional UPDATE and for the
+// absence of any window predicate; see that function. A bundle has no DownloadCount to increment
+// alongside the allowance it spends.
+func (p DatabaseProvider) AcquireBundleDownload(id string, timeNow int64) bool {
 	result, err := p.exec(`UPDATE FileBundles SET DownloadsRemaining = DownloadsRemaining - 1,
-		WindowOpenedAt = $1 WHERE id = $2 AND DownloadsRemaining > 0 AND WindowOpenedAt <= $3`, timeNow, id, windowOpenSince)
+		WindowOpenedAt = $1 WHERE id = $2 AND DownloadsRemaining > 0`, timeNow, id)
 	helper.Check(err)
 	rowsAffected, err := result.RowsAffected()
 	helper.Check(err)
-	if rowsAffected > 0 {
-		return true, true
-	}
-	return p.isBundleWindowOpen(id, windowOpenSince), false
-}
-
-// isBundleWindowOpen reports whether the bundle's most recent download window is still open. See
-// metadata.go's isDownloadWindowOpen for why this is a SELECT.
-func (p DatabaseProvider) isBundleWindowOpen(id string, windowOpenSince int64) bool {
-	var windowOpenedAt int64
-	row := p.queryRow("SELECT WindowOpenedAt FROM FileBundles WHERE id = $1", id)
-	err := row.Scan(&windowOpenedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false
-		}
-		helper.Check(err)
-		return false
-	}
-	return windowOpenedAt > windowOpenSince
+	return rowsAffected > 0
 }
 
 // encryptBundleNameForSave returns the value to store in NameEncrypted for this bundle. Mirrors

@@ -28,16 +28,19 @@ import (
 // tests here run CleanUp over the whole database, which disposes of the shared fixtures that
 // file's tests still expect to find, and Go runs a package's tests in source file order.
 
-// setDownloadLeeway overrides GOKAPI_DOWNLOAD_LEEWAY for the calling test, restoring this
-// package's test default of 0 once it finishes. configuration.Load re-parses the environment,
-// which is what DownloadLeeway reads. Safe against the other tests in this package for the same
-// reason MetadataRetention_test.go's setRetention is: none of them run under t.Parallel().
+// setDownloadLeeway overrides GOKAPI_DOWNLOAD_SESSION_LEEWAY and GOKAPI_DOWNLOAD_SESSION_SIGN_KEY
+// for the calling test, restoring this package's test defaults once it finishes.
+// configuration.Load re-parses the environment, which is what DownloadLeeway and
+// DownloadSessionSignKey read. Safe against the other tests in this package for the same reason
+// MetadataRetention_test.go's setRetention is: none of them run under t.Parallel().
 func setDownloadLeeway(t *testing.T, value string) {
 	t.Helper()
-	os.Setenv("GOKAPI_DOWNLOAD_LEEWAY", value)
+	os.Setenv("GOKAPI_DOWNLOAD_SESSION_LEEWAY", value)
+	os.Setenv("GOKAPI_DOWNLOAD_SESSION_SIGN_KEY", "test_key_that_is_at_least_32_characters_long__")
 	configuration.Load()
 	t.Cleanup(func() {
-		os.Setenv("GOKAPI_DOWNLOAD_LEEWAY", "0")
+		os.Setenv("GOKAPI_DOWNLOAD_SESSION_LEEWAY", "0")
+		os.Unsetenv("GOKAPI_DOWNLOAD_SESSION_SIGN_KEY")
 		configuration.Load()
 	})
 }
@@ -67,10 +70,18 @@ func (w *abortingResponseWriter) Write(content []byte) (int, error) {
 
 func (w *abortingResponseWriter) WriteHeader(int) {}
 
-// TestServeFileRetriesAbortedTransferInsideWindow is the regression test for the failure the
-// window exists to remove: a one-pickup file whose first transfer breaks part way through used
-// to leave the recipient with nothing, the allowance spent and the file due for deletion.
-func TestServeFileRetriesAbortedTransferInsideWindow(t *testing.T) {
+// TestServeFileRefusesATokenlessRetryInsideTheWindow pins the rule that replaced the free ride.
+//
+// The window used to make a spent file serve anyone who asked, for nothing, until it closed: this
+// test asserted exactly that, and it was the end-to-end statement of the defect - a file limited
+// to one download served twice, with the counter moving once. A window is a timestamp on the
+// file's row, so "inside the window" identified nobody, and the recipient the leeway was meant to
+// protect was indistinguishable from anyone else holding the link.
+//
+// This test asserts the current behaviour: a caller arriving with nothing to prove they opened
+// the window gets nothing, even while the window is still open. The session token scheme binds
+// window access to a specific recipient id, so the window remains protected.
+func TestServeFileRefusesATokenlessRetryInsideTheWindow(t *testing.T) {
 	setDownloadLeeway(t, "1h")
 	sha1 := writeBlob(t, "the whole body, delivered on the retry")
 	id := "windowretry_" + helper.GenerateRandomString(8)
@@ -95,14 +106,10 @@ func TestServeFileRetriesAbortedTransferInsideWindow(t *testing.T) {
 	test.IsEqualInt(t, spent.DownloadsRemaining, 0)
 	test.IsEqualBool(t, spent.WindowOpenedAt > 0, true)
 
-	// The file is still reachable, because its window is open, and the retry costs nothing.
-	retry, ok := GetFile(id)
-	test.IsEqualBool(t, ok, true)
+	// The window is open, so the row is not yet disposed and the file is still on disk - but a
+	// second caller presenting no token is refused, and spends nothing trying.
 	w := httptest.NewRecorder()
-	test.IsEqualBool(t, ServeFile(retry, w, httptest.NewRequest("GET", "/"+id, nil), true, true, false, true), true)
-	content, err := io.ReadAll(w.Result().Body)
-	test.IsNil(t, err)
-	test.IsEqualString(t, string(content), "the whole body, delivered on the retry")
+	test.IsEqualBool(t, ServeFile(spent, w, httptest.NewRequest("GET", "/"+id, nil), true, true, false, true), false)
 
 	after, ok := database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
@@ -168,8 +175,14 @@ func TestSecretIsNotReReadableInsideAnyWindow(t *testing.T) {
 	test.IsEqualBool(t, IsExpiredFile(revealed, time.Now().Unix()), true)
 }
 
-// TestStatusAndExpiryFollowTheWindow covers the owner's view: a one-pickup file reports active
-// with nothing remaining while its window is open, and downloaded once it closes.
+// TestStatusAndExpiryFollowTheWindow covers the owner's view: a one-pickup file with its window
+// still open is refused by the serving predicate (IsExpiredFile, via IsSpent - R1: the ordinary
+// link is dead for everyone the moment the allowance is spent, window or not). The owner's OWN
+// view of it (File.Status) now names that same state explicitly - pending_deletion, the branch
+// added alongside this test's rewrite (models.File.Status gained the IsSpent case that this
+// test's original comment said was "a separate, later commit") - rather than reporting active as
+// it used to before that branch existed. Once the window actually closes, the two converge on
+// the same disposal reason: downloaded.
 func TestStatusAndExpiryFollowTheWindow(t *testing.T) {
 	setDownloadLeeway(t, "1h")
 	id := "windowstatus_" + helper.GenerateRandomString(8)
@@ -184,8 +197,8 @@ func TestStatusAndExpiryFollowTheWindow(t *testing.T) {
 	database.SaveMetaData(file)
 
 	timeNow := time.Now().Unix()
-	test.IsEqualBool(t, IsExpiredFile(file, timeNow), false)
-	test.IsEqualString(t, file.Status(DownloadAccessOf(file), timeNow), models.StatusActive)
+	test.IsEqualBool(t, IsExpiredFile(file, timeNow), true)
+	test.IsEqualString(t, file.Status(DownloadAccessOf(file), timeNow), models.StatusPendingDeletion)
 
 	file.WindowOpenedAt = time.Now().Add(-2 * time.Hour).Unix()
 	database.SaveMetaData(file)
@@ -262,9 +275,7 @@ func TestCleanUpDisposesEveryMemberWhenFolderIsExhausted(t *testing.T) {
 	}
 	ids := saveBundleWithMembers(t, bundle, 3)
 
-	granted, opened := database.AcquireBundleDownload(bundle.Id, time.Now().Unix(), 0)
-	test.IsEqualBool(t, granted, true)
-	test.IsEqualBool(t, opened, true)
+	test.IsEqualBool(t, database.AcquireBundleDownload(bundle.Id, time.Now().Unix()), true)
 
 	CleanUp(false)
 

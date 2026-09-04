@@ -452,43 +452,8 @@ async function apiFilesModify(id, allowedDownloads, expiry, password, removePass
 
 
 
-async function apiFilesDelete(id, delay) {
+async function apiFilesDelete(id) {
     const apiUrl = './api/files/delete';
-    const reqPerm = 'PERM_DELETE';
-
-    let token;
-
-    try {
-        token = await getToken(reqPerm, false);
-    } catch (error) {
-        console.error("Unable to gain permission token:", error);
-        throw error;
-    }
-
-    const requestOptions = {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'apikey': token,
-            'id': id,
-            'delay': delay
-        },
-    };
-
-    try {
-        const response = await fetch(apiUrl, requestOptions);
-        if (!response.ok) {
-            throw new Error(`Request failed with status: ${response.status}`);
-        }
-    } catch (error) {
-        console.error("Error in apiFilesDelete:", error);
-        throw error;
-    }
-}
-
-
-async function apiFilesRestore(id) {
-    const apiUrl = './api/files/restore';
     const reqPerm = 'PERM_DELETE';
 
     let token;
@@ -514,10 +479,8 @@ async function apiFilesRestore(id) {
         if (!response.ok) {
             throw new Error(`Request failed with status: ${response.status}`);
         }
-        const data = await response.json();
-        return data;
     } catch (error) {
-        console.error("Error in apiFilesRestore:", error);
+        console.error("Error in apiFilesDelete:", error);
         throw error;
     }
 }

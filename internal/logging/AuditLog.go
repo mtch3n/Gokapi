@@ -434,6 +434,7 @@ type actorContextKey int
 
 const requestActorContextKey actorContextKey = 0
 const requestRecipientContextKey actorContextKey = 1
+const requestDownloadSessionContextKey actorContextKey = 2
 
 // WithActor returns a shallow copy of r with user attached, so that a download served through
 // r can be attributed to an authenticated admin/API user instead of being recorded as an
@@ -468,6 +469,25 @@ func recipientFromRequest(r *http.Request) (models.ShareRecipient, bool) {
 	}
 	recipient, ok := r.Context().Value(requestRecipientContextKey).(models.ShareRecipient)
 	return recipient, ok
+}
+
+// WithDownloadSession returns a shallow copy of r marked as having been served against a valid
+// download session token rather than a fresh spend - see the leeway-session-token plan, D6: the
+// pickup was already counted at the spend that minted the token, so a delivery served on this
+// leg is that same pickup finishing, not a new one. LogDownload reads this back via
+// downloadSessionFromRequest to record the entry as resumed rather than silently indistinguishable
+// from an ordinary download.
+func WithDownloadSession(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), requestDownloadSessionContextKey, true))
+}
+
+// downloadSessionFromRequest reports whether r was marked via WithDownloadSession.
+func downloadSessionFromRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	resumed, _ := r.Context().Value(requestDownloadSessionContextKey).(bool)
+	return resumed
 }
 
 // buildActorFromRequest builds an AuditActor from a request that may have gone through

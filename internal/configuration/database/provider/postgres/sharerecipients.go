@@ -295,10 +295,19 @@ func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string)
 // Login tokens and sessions
 // ---------------------------------------------------------------------------
 
-// AcquireShareGrantDownload atomically records one download by this recipient - mirrors
-// AcquireDownload in metadata.go exactly, including its three steps and the reasoning behind each;
-// see that function. The grant's lastdownloadat, which this already wrote before windows existed,
-// is the window start. A downloadsallowed of 0 means unlimited.
+// AcquireShareGrantDownload atomically records one download by this recipient, in three steps:
+// serve free inside an open window, otherwise open a window and spend an allowance, otherwise
+// re-check the window because a concurrent caller may have opened one in between. The third step
+// is what makes two simultaneous first requests both succeed: exactly one opens the window, the
+// other loses the conditional UPDATE and finds the winner's window on the re-check.
+//
+// The grant's lastdownloadat, which this already wrote before windows existed, is the window
+// start. A downloadsallowed of 0 means unlimited.
+//
+// This is the one window still granted on. metadata.go's AcquireDownload dropped its own, because
+// a file id identifies nobody and a free ride keyed on it uncaps the file for anyone with the
+// link. This window is keyed on one recipient's grant row, so it is already bound to an identity
+// and no one else can ride it.
 func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
 	windowOpenSince := timeNow - leeway
 	if p.isShareGrantWindowOpen(resourceType, resourceId, recipientId, windowOpenSince) {
@@ -320,7 +329,11 @@ func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId
 }
 
 // isShareGrantWindowOpen reports whether the grant's most recent download window is still open.
-// See metadata.go's isDownloadWindowOpen for why this is a SELECT.
+// Read with a SELECT rather than the row count of a no-op UPDATE, because this runs on the free
+// path of every request inside a window and must not write: an UPDATE would leave a dead tuple
+// behind per request, for a check that changes nothing. Reading it separately from the UPDATE
+// that follows is safe because lastdownloadat only ever moves forward, so a window seen open
+// cannot have closed again by the time the caller acts on it.
 func (p DatabaseProvider) isShareGrantWindowOpen(resourceType int, resourceId string, recipientId int, windowOpenSince int64) bool {
 	var lastDownloadAt int64
 	row := p.queryRow(`SELECT lastdownloadat FROM ShareGrants

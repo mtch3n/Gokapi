@@ -29,9 +29,11 @@ import (
 	"github.com/forceu/gokapi/internal/shareaccess"
 	"github.com/forceu/gokapi/internal/storage/chunking/chunkreservation"
 	"github.com/forceu/gokapi/internal/storage/filebundle"
+	"github.com/forceu/gokapi/internal/storage/presign"
 	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
+	"github.com/forceu/gokapi/internal/webserver/api"
 	"github.com/forceu/gokapi/internal/webserver/authentication"
 	"github.com/forceu/gokapi/internal/webserver/authentication/csrftoken"
 	"github.com/forceu/gokapi/internal/webserver/authentication/oauth"
@@ -879,6 +881,38 @@ func TestPublicApiFileUnprotected(t *testing.T) {
 	if contentType, ok := response["contentType"]; !ok || contentType != "text/html" {
 		t.Errorf("Expected contentType 'text/html', got %v", contentType)
 	}
+}
+
+// TestDownloadPresignedRefusesSpentFile confirms downloadPresigned stays strict even though the
+// internal API now bypasses the allowance check: it mints public access (the presign key needs no
+// credential to redeem), so it must keep resolving through storage.GetFile and refuse a spent
+// file exactly as an ordinary public download would - unlike checkDownloadAllowed, which may have
+// let the mint through in the first place.
+func TestDownloadPresignedRefusesSpentFile(t *testing.T) {
+	file := models.File{
+		Id:                 "presignspentfile1234",
+		Name:               "presignspentfile1234",
+		SHA1:               "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:           2147483646,
+		DownloadsRemaining: 0,
+		UnlimitedDownloads: false,
+		ContentType:        "text/plain",
+		UserId:             5,
+	}
+	database.SaveMetaData(file)
+
+	presignedUrl := models.Presign{
+		Id:      "presignspentfilekey1234",
+		FileIds: []string{file.Id},
+		Expiry:  time.Now().Add(time.Second * 30).Unix(),
+	}
+	presign.Save(presignedUrl)
+
+	r := httptest.NewRequest(http.MethodGet, "/downloadPresigned?key="+presignedUrl.Id, nil)
+	w := httptest.NewRecorder()
+	downloadPresigned(w, r)
+
+	test.IsEqualInt(t, w.Code, http.StatusBadRequest)
 }
 
 // TestPublicApiFilePasswordProtected tests GET /pubapi/file for a password-protected file
@@ -4196,6 +4230,23 @@ func routePattern(mux *http.ServeMux, path string) string {
 	return pattern
 }
 
+// TestPubApiRoutesAreAllRegistered is the other half of the loop api.PubApiRoutes' own doc
+// comment describes: that list is openapi_test.go's validateNoExtraPaths's second source of
+// valid paths, since api cannot import webserver to read createMux back for itself. This is what
+// keeps the list from drifting stale in the OTHER direction - a path added to PubApiRoutes but
+// never actually registered would otherwise let a documented-but-nonexistent endpoint through
+// undetected, exactly the hole validateNoExtraPaths exists to close. Checked against the
+// built-in-UI mux, not the no-UI one: every /pubapi/ route is registered unconditionally in
+// createMux (see the comment at its own call sites), so either would do, but the built-in-UI one
+// is what every other route-existence assertion in this file already uses.
+func TestPubApiRoutesAreAllRegistered(t *testing.T) {
+	webserverDir, _ := fs.Sub(staticFolderEmbedded, "web/static")
+	mux := createMux(webserverDir, false)
+	for _, path := range api.PubApiRoutes {
+		test.IsEqualString(t, routePattern(mux, path), path)
+	}
+}
+
 func TestCreateMuxDisableBuiltinUi(t *testing.T) {
 	webserverDir, _ := fs.Sub(staticFolderEmbedded, "web/static")
 
@@ -4204,25 +4255,27 @@ func TestCreateMuxDisableBuiltinUi(t *testing.T) {
 	// routes are absent here only because the test configuration uses internal auth,
 	// under which they are never registered in either mode.
 	requiredRoutes := map[string]string{
-		"/api/auth/create":       "/api/",
-		"/auth/token":            "/auth/token",
-		"/login":                 "/login",
-		"/logout":                "/logout",
-		"/error":                 "/error",
-		"/downloadFile":          "/downloadFile",
-		"/downloadPresigned":     "/downloadPresigned",
-		"/uploadChunk":           "/uploadChunk",
-		"/uploadStatus":          "/uploadStatus",
-		"/main.wasm":             "/main.wasm",
-		"/e2e.wasm":              "/e2e.wasm",
-		"/pubapi/config":         "/pubapi/config",
-		"/pubapi/file":           "/pubapi/file",
-		"/pubapi/filepassword":   "/pubapi/filepassword",
-		"/pubapi/folder":         "/pubapi/folder",
-		"/pubapi/folderpassword": "/pubapi/folderpassword",
-		"/pubapi/folderzip":      "/pubapi/folderzip",
-		"/pubapi/uploadrequest":  "/pubapi/uploadrequest",
-		"/pubapi/share/resend":   "/pubapi/share/resend",
+		"/api/auth/create":        "/api/",
+		"/auth/token":             "/auth/token",
+		"/login":                  "/login",
+		"/logout":                 "/logout",
+		"/error":                  "/error",
+		"/downloadFile":           "/downloadFile",
+		"/downloadPresigned":      "/downloadPresigned",
+		"/uploadChunk":            "/uploadChunk",
+		"/uploadStatus":           "/uploadStatus",
+		"/main.wasm":              "/main.wasm",
+		"/e2e.wasm":               "/e2e.wasm",
+		"/pubapi/config":          "/pubapi/config",
+		"/pubapi/downloadsession": "/pubapi/downloadsession",
+		"/pubapi/file":            "/pubapi/file",
+		"/pubapi/filepassword":    "/pubapi/filepassword",
+		"/pubapi/folder":          "/pubapi/folder",
+		"/pubapi/foldersession":   "/pubapi/foldersession",
+		"/pubapi/folderpassword":  "/pubapi/folderpassword",
+		"/pubapi/folderzip":       "/pubapi/folderzip",
+		"/pubapi/uploadrequest":   "/pubapi/uploadrequest",
+		"/pubapi/share/resend":    "/pubapi/share/resend",
 	}
 	// The stock UI surface, including the anonymous download doors, keyed the same way
 	uiRoutes := map[string]string{

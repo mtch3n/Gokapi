@@ -59,6 +59,11 @@ func main() {
 	fmt.Println("Gokapi v" + versionGokapi + " starting")
 	setup.RunIfFirstStart()
 	configuration.Load()
+	if len(configuration.GetEnvironment().DownloadSessionSignKey) < 32 && configuration.GetEnvironment().DownloadLeeway > 0 {
+		fmt.Println("Error: GOKAPI_DOWNLOAD_SESSION_SIGN_KEY must be at least 32 characters when GOKAPI_DOWNLOAD_SESSION_LEEWAY is greater than zero")
+		fmt.Println("Set GOKAPI_DOWNLOAD_SESSION_LEEWAY=0 to disable download sessions, or provide a key with GOKAPI_DOWNLOAD_SESSION_SIGN_KEY")
+		os.Exit(1)
+	}
 	if !reconfigureServer(passedFlags) {
 		configuration.ConnectDatabase()
 	}

@@ -335,6 +335,23 @@ func createDecryptReader(encInfo models.EncryptionInfo, input io.Reader) (*sio.D
 	return stream.DecryptReader(input, nonce, nil), nil
 }
 
+// DecryptReaderAt returns a random-access reader over an encrypted file's plaintext. It exists
+// beside DecryptReader for callers that need to serve a byte range rather than the whole file -
+// storage.ServeFile wraps the result in an io.SectionReader so http.ServeContent can answer HTTP
+// Range requests against encrypted files. getStream's underlying sio.Stream is chunked, so
+// DecReaderAt.ReadAt only has to decrypt the chunk(s) a given offset falls into rather than the
+// entire file from byte zero. Same zero-nonce convention as createDecryptReader: safe because
+// this key was only ever paired with the one plaintext it encrypted.
+func DecryptReaderAt(encInfo models.EncryptionInfo, input io.ReaderAt) (io.ReaderAt, error) {
+	key, err := GetCipherFromFile(encInfo)
+	if err != nil {
+		return nil, err
+	}
+	stream := getStream(key)
+	nonce := make([]byte, stream.NonceSize())
+	return stream.DecryptReaderAt(input, nonce, nil), nil
+}
+
 // DecryptReader modifies a reader so it can decrypt encrypted files
 func DecryptReader(encInfo models.EncryptionInfo, input io.Reader, output io.Writer) error {
 	reader, err := createDecryptReader(encInfo, input)

@@ -106,13 +106,12 @@ func (p DatabaseProvider) DeleteFileBundle(bundle models.FileBundle) {
 	p.deleteKey(prefixFileBundles + bundle.Id)
 }
 
-// AcquireBundleDownload atomically lets one visit through to a bundle's content, via the Lua
-// script in acquireWindowedDownload - see that function. A bundle has no DownloadCount to
-// increment alongside the allowance it spends, hence the empty increment field.
-func (p DatabaseProvider) AcquireBundleDownload(id string, timeNow, leeway int64) (bool, bool) {
-	result := p.acquireWindowedDownload(prefixFileBundles+id, "WindowOpenedAt", "DownloadsRemaining", "",
-		timeNow, timeNow-leeway)
-	return result > 0, result == 2
+// AcquireBundleDownload spends one visit to a bundle's content, via the Lua script in
+// acquireWindowedDownload - see that function. A bundle has no DownloadCount to increment
+// alongside the allowance it spends, hence the empty increment field.
+func (p DatabaseProvider) AcquireBundleDownload(id string, timeNow int64) bool {
+	return p.acquireWindowedDownload(prefixFileBundles+id, "WindowOpenedAt", "DownloadsRemaining", "",
+		timeNow) > 0
 }
 
 // migrateFileBundleNames re-encrypts every bundle name still stored in the plaintext name hash

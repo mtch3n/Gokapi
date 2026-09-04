@@ -331,10 +331,15 @@ func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string)
 // Login tokens and sessions
 // ---------------------------------------------------------------------------
 
-// AcquireShareGrantDownload atomically records one download by this recipient, under the window
-// rule AcquireDownload applies to a file: the recipient's allowance is spent only when this call
-// opens a window, and a request arriving inside an open window is granted for free. The grant's
-// LastDownloadAt, which this already wrote before windows existed, is the window start.
+// AcquireShareGrantDownload atomically records one download by this recipient, under a window
+// rule: the recipient's allowance is spent only when this call opens a window, and a request
+// arriving inside an open window is granted for free. The grant's LastDownloadAt, which this
+// already wrote before windows existed, is the window start.
+//
+// This is the one window still granted on. metadata.go's AcquireDownload dropped its own, because
+// a file id identifies nobody and a free ride keyed on it uncaps the file for anyone with the
+// link. This window is keyed on one recipient's grant row, so it is already bound to an identity
+// and no one else can ride it.
 //
 // The existence check, the window check, the allowance test and the increment all run inside one
 // Lua script, which Redis executes atomically. This follows acquireWindowedDownload in Redis.go,

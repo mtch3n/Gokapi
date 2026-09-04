@@ -97,17 +97,22 @@ type Environment struct {
 	// storage.CleanUp re-reads it from the environment on every sweep, so it must be present on
 	// every start.
 	FileRequestRetention Duration `env:"FILEREQUEST_RETENTION" envDefault:"0"`
-	// Sets how long a download window stays open. A window opens when a request is let through
-	// to the bytes and spends one of the resource's download allowance; every further request
-	// that arrives before the window closes is served without spending another one, so a broken
-	// or resumed transfer does not cost the recipient their download. Access to a resource ends
-	// at whichever comes first, its own expiry or the close of its window. Accepts a Go duration
-	// such as "30m", plus "d" (day) and "w" (week) suffixes. 0 (default) gives every window zero
-	// length, which is the behaviour prior to this setting existing: every request spends an
-	// allowance. A negative value is reset to 0. Not persistent, for the same reason as
-	// GOKAPI_MAX_EXPIRY: it is re-read from the environment on every use, so it must be present
-	// on every start.
-	DownloadLeeway Duration `env:"DOWNLOAD_LEEWAY" envDefault:"0" onlyPositive:"true"`
+	// Sets how long a download window stays open. A window opens when a request spends one of the
+	// resource's download allowance; the holder of the session token minted at that moment may
+	// retry until the window closes, as protection against broken or resumed transfers costing
+	// a download. Access to a resource ends at whichever comes first, its own expiry or the close
+	// of its window. Accepts a Go duration such as "30m", plus "d" (day) and "w" (week) suffixes.
+	// 0 (default) gives every window zero length, which is the behaviour prior to this setting
+	// existing: every request spends an allowance. A negative value is reset to 0. Not persistent,
+	// for the same reason as GOKAPI_MAX_EXPIRY: it is re-read from the environment on every use,
+	// so it must be present on every start.
+	DownloadLeeway Duration `env:"DOWNLOAD_SESSION_LEEWAY" envDefault:"0" onlyPositive:"true"`
+	// The HMAC key used to sign download session tokens. Required whenever DownloadLeeway is
+	// greater than zero, and unused when it is zero, because a server with no window never mints
+	// a token. At least 32 characters: a short key would silently weaken every token signed with
+	// it, so it is refused rather than padded. Not persistent - it is read from the environment
+	// on every start, the same way GOKAPI_MAX_EXPIRY is.
+	DownloadSessionSignKey string `env:"DOWNLOAD_SESSION_SIGN_KEY"`
 	// Sets the expiry presets a client offers for a new upload, e.g. "1h,1d,7d,14d,30d,365d".
 	// Comma separated, same format as GOKAPI_MAX_EXPIRY per entry. An entry that is not
 	// positive, a duplicate, or greater than GOKAPI_MAX_EXPIRY is dropped; if that empties

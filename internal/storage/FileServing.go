@@ -474,18 +474,20 @@ const (
 	ParamName
 )
 
-// ReplaceFile replaces the file content of fileId with the content of newFileContentId
-// If delete is true, the NEW file will be deleted.
-// Replacing e2e encrypted files is NOT possible
-func ReplaceFile(fileId, newFileContentId string, delete bool) (models.File, error) {
-	file, ok := GetFile(fileId)
-	if !ok {
-		return models.File{}, ErrorFileNotFound
-	}
-	newFileContent, ok := GetFile(newFileContentId)
-	if !ok {
-		return models.File{}, ErrorFileNotFound
-	}
+// ReplaceFile replaces file's content with newFileContent's, keeping file's own id, owner and
+// download allowance - only the fields that describe what is being downloaded (name, size, hash,
+// storage bucket, content type, encryption) move over. If delete is true, the record that supplied
+// the new content is removed once the swap is committed. Replacing e2e encrypted files is NOT
+// possible.
+//
+// Both files are passed in already resolved, rather than looked up here by id the way this used
+// to: DuplicateFile already takes its file by value, and re-fetching by id here duplicated the
+// caller's own lookup while quietly discarding whatever leniency it applied - specifically,
+// apiReplaceFile resolves both ids via storage.GetFileIgnoringAllowance so an owner may replace
+// their own exhausted file, and a second, strict GetFile lookup here refused it again every time,
+// leaving the endpoint unable to do the one thing it newly exists to allow. The public paths never
+// call this function at all, so leniency never reaches them through it.
+func ReplaceFile(file, newFileContent models.File, delete bool) (models.File, error) {
 	if file.Encryption.IsEndToEndEncrypted || newFileContent.Encryption.IsEndToEndEncrypted {
 		return models.File{}, ErrorReplaceE2EFile
 	}
@@ -713,8 +715,49 @@ func isVideoFile(filename, contentType string) bool {
 }
 
 // GetFile gets the file by id. Returns (empty File, false) if invalid / expired file
-// or (file, true) if valid file
+// or (file, true) if valid file. Refuses a file whose download allowance is spent even while its
+// window is still open - see IsExpiredFile - because a plain, tokenless request is exactly what
+// must not be allowed to ride someone else's window. GetFileInWindow is the lenient twin for a
+// caller presenting a valid session token; GetFileIgnoringAllowance is the lenient twin for an
+// authenticated internal-API caller, who is bound by no window at all.
 func GetFile(id string) (models.File, bool) {
+	return getFile(id, func(access models.DownloadAccess, timeNow int64) bool {
+		return access.IsExpired(timeNow) || access.IsSpent()
+	})
+}
+
+// GetFileInWindow is GetFile's lenient twin for a caller presenting a valid download session
+// token: it tolerates a spent allowance while the download window that spending it opened is
+// still open, refusing on IsExhausted rather than IsSpent, but applies every other check GetFile
+// applies - pending deletion, disposed, expiry, AWS validity, blob presence - unchanged. A token
+// does not survive the owner deleting the file, ExpireAt passing, or disposal; it only buys a
+// retry against an allowance that is otherwise gone.
+func GetFileInWindow(id string, timeNow int64) (models.File, bool) {
+	return getFile(id, func(access models.DownloadAccess, now int64) bool {
+		return access.IsExpired(now) || access.IsExhausted(now)
+	})
+}
+
+// GetFileIgnoringAllowance is GetFile's lenient twin for a caller that reaches a resource through
+// its own credentials rather than by possessing a link: the download allowance is a property of
+// the link, not of the file, so it does not bind a caller who never held one. It drops the spend
+// check entirely - a resource with no downloads left is admitted regardless of window - while
+// applying every other check GetFile applies unchanged: pending deletion, disposed, expiry by
+// ExpireAt, AWS validity, blob presence. It must never be used to resolve a resource for a caller
+// that is then handed something which itself grants public access - a share, a presigned URL -
+// since that would launder a dead link into a live one; those paths (resolveShareResource,
+// downloadPresigned) keep resolving through GetFile.
+func GetFileIgnoringAllowance(id string) (models.File, bool) {
+	return getFile(id, func(access models.DownloadAccess, timeNow int64) bool {
+		return access.IsExpired(timeNow)
+	})
+}
+
+// getFile is the shared body of GetFile, GetFileInWindow and GetFileIgnoringAllowance, so the
+// three can never drift apart on anything but the one predicate that is supposed to differ
+// between them: whether, and under what leniency, a spent allowance refuses the file. isExpired
+// reports the former - true means refuse, exactly like IsExpiredFile's own return value.
+func getFile(id string, isExpired func(access models.DownloadAccess, timeNow int64) bool) (models.File, bool) {
 	var emptyResult = models.File{}
 	if id == "" {
 		return emptyResult, false
@@ -727,13 +770,13 @@ func GetFile(id string) (models.File, bool) {
 		return emptyResult, false
 	}
 	// A disposed record is owner-visible history and nothing else: every public path treats it
-	// exactly like a record that was deleted outright. GetFile is the single choke point every
+	// exactly like a record that was deleted outright. getFile is the single choke point every
 	// public path (download, hotlink, share resend, ...) resolves a file through, so the check
 	// belongs here rather than duplicated at each caller.
 	if file.IsDisposed() {
 		return emptyResult, false
 	}
-	if IsExpiredFile(file, time.Now().Unix()) {
+	if isExpired(DownloadAccessOf(file), time.Now().Unix()) {
 		return emptyResult, false
 	}
 	if !checkIfValidAws(file) {
@@ -825,21 +868,15 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		// shared with three people would still stop after three, locking out the two recipients
 		// who never got theirs. All that is left to record here is that it was downloaded.
 		if access.SpendsOwnCounter && !access.UnlimitedDownloads {
-			granted, opened := database.AcquireDownload(file.Id, time.Now().Unix(), int64(LeewayFor(file).Seconds()))
+			_, granted := SpendDownload(&file, time.Now().Unix())
 			if !granted {
-				// The allowance is exhausted and no download window is open (or the atomic,
-				// floored decrement lost the race and the winner's window has since closed) -
-				// this caller must not serve the file, regardless of what the pre-fetched file
-				// struct says.
+				// The allowance is spent - this caller must not serve the file, regardless of
+				// what the pre-fetched file struct says. An open download window no longer
+				// makes this succeed: a window belongs to the party holding the session token
+				// minted when it opened, and a caller reaching ServeFile has not presented one
+				// (webserver.serveFile answers a tokened request without spending at all).
 				apimutex.Unlock(apimutex.TypeMetaData, file.Id)
 				return false
-			}
-			// A request served inside an already-open window spends nothing: it is the same
-			// pickup as the one that opened it, retried or resumed.
-			if opened {
-				file.DownloadsRemaining = file.DownloadsRemaining - 1
-				file.DownloadCount = file.DownloadCount + 1
-				go sse.PublishDownloadCount(file)
 			}
 		} else {
 			database.IncreaseDownloadCount(file.Id)
@@ -898,15 +935,28 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	}
 	statusId := downloadstatus.SetDownload(file)
 	headers.Write(file, w, forceDownload, false)
+	// UploadDate never changes for a given file, unlike time.Now(): a resuming client's
+	// If-Range carries whatever validator this handler returned on an earlier request, and that
+	// can only match a later one if the modtime handed to ServeContent is stable across
+	// requests. headers.Write sets Last-Modified/Etag from the same two fields for the same
+	// reason (see its doc comment).
+	modTime := time.Unix(file.UploadDate, 0)
 	if file.Encryption.IsEncrypted && !file.RequiresClientDecryption() {
-		err = encryption.DecryptReader(file.Encryption, fileHandler, w)
+		// DecryptReaderAt (internal/encryption) is backed by a chunked sio.Stream, so it only
+		// decrypts the chunk(s) a requested range touches rather than the whole file from byte
+		// zero. Bounding it to the real plaintext length turns it into the io.ReadSeeker
+		// http.ServeContent wants, so Go - not this handler - parses Range, decides 200 vs 206,
+		// and writes Content-Range/Content-Length, exactly as the unencrypted branch below
+		// already relies on it to do.
+		decryptedReaderAt, err := encryption.DecryptReaderAt(file.Encryption, fileHandler)
 		if err != nil {
 			_, _ = w.Write([]byte("Error decrypting file"))
 			fmt.Println(err)
 			return true
 		}
+		http.ServeContent(w, r, file.Name, modTime, io.NewSectionReader(decryptedReaderAt, 0, file.SizeBytes))
 	} else {
-		http.ServeContent(w, r, file.Name, time.Now(), fileHandler)
+		http.ServeContent(w, r, file.Name, modTime, fileHandler)
 	}
 	downloadstatus.SetComplete(statusId)
 	return true
@@ -1398,12 +1448,13 @@ func isOldTempFile(file os.DirEntry) bool {
 
 // isPendingToBeDeleted returns true if a pending deletion has to be executed.
 //
-// Strictly <, not <=: PendingDeletion can be a genuine future deadline truncated to whole
-// seconds by time.Time.Unix() (DeleteFileSchedule with a sub-second delay), which often lands on
-// the current second - a <= here would then read that as already elapsed the instant it was set,
-// letting CancelPendingFileDeletion refuse a restore that should still have most of a second left
-// to run. DeleteFile backdates PendingDeletion by a second for the immediate-delete case (see its
-// comment) specifically so it does not need <= here to be picked up promptly.
+// Strictly <, not <=: DeleteFile is the only writer of PendingDeletion, and it deliberately
+// backdates the timestamp by one second (see its own comment) rather than setting it to exactly
+// now, precisely so that this check - run moments later by the next CleanUp pass, with its own
+// timeNow a few instructions further on - reads true without racing the clock's whole-second
+// granularity. A <= here would behave identically given that backdating; < is kept only because
+// it is the comparison the backdating was written against, and there is no reason left to prefer
+// either once PendingDeletion can no longer hold a genuine future value.
 func isPendingToBeDeleted(file models.File, timeNow int64) bool {
 	if !file.IsPendingForDeletion() {
 		return false
@@ -1564,6 +1615,40 @@ func downloadAccessOf(file models.File, bundle models.FileBundle, hasBundle bool
 	return access.WithShareGrants(grants)
 }
 
+// SpendDownload spends one download against this file's own counter and reports when the window
+// that spending it opened will close, so the caller can mint a session token that dies with it.
+//
+// Split out of ServeFile because the two callers now differ: ServeFile spends and serves in one
+// go for the owner API and the hotlink, while webserver.serveFile's tokenless leg must spend
+// WITHOUT serving - it answers with a redirect carrying the token instead, and the bytes go out
+// on the tokened request that follows. One body so the two cannot drift on what a spend is.
+//
+// Only for a file whose own counter governs it: a folder member or a recipient-restricted share
+// has already had the governing counter spent by whoever gated the request (see
+// models.DownloadAccess.SpendsOwnCounter), and this must leave its row alone.
+//
+// The file is updated in place so a caller rendering the response reports the counter it just
+// spent rather than the stale one it was handed.
+func SpendDownload(file *models.File, timeNow int64) (int64, bool) {
+	if !database.AcquireDownload(file.Id, timeNow) {
+		return 0, false
+	}
+	file.DownloadsRemaining = file.DownloadsRemaining - 1
+	file.DownloadCount = file.DownloadCount + 1
+	file.WindowOpenedAt = timeNow
+	go sse.PublishDownloadCount(*file)
+	return timeNow + int64(LeewayFor(*file).Seconds()), true
+}
+
+// SpendBundleDownload is SpendDownload's folder twin. A folder is never a secret, so its window
+// is always the configured leeway (see LeewayFor).
+func SpendBundleDownload(bundleId string, timeNow int64) (int64, bool) {
+	if !database.AcquireBundleDownload(bundleId, timeNow) {
+		return 0, false
+	}
+	return timeNow + int64(DownloadLeeway().Seconds()), true
+}
+
 // DownloadAccessOfBundle resolves the axes governing a folder itself, the folder twin of
 // DownloadAccessOf and the one place they are decided. A folder restricted to named recipients is
 // governed by their grants exactly as a file is: the owner's one number is each recipient's own
@@ -1604,15 +1689,29 @@ func IsAvailableBundle(bundle models.FileBundle, timeNow int64) bool {
 		return false
 	}
 	access := DownloadAccessOfBundle(bundle)
+	return !access.IsExpired(timeNow) && !access.IsSpent()
+}
+
+// IsAvailableBundleInWindow is IsAvailableBundle's lenient twin for a caller presenting a valid
+// download session token: it tolerates a spent visit allowance while the download window that
+// spending it opened is still open, keeping today's IsExhausted body rather than IsSpent.
+func IsAvailableBundleInWindow(bundle models.FileBundle, timeNow int64) bool {
+	if bundle.IsDeleted() {
+		return false
+	}
+	access := DownloadAccessOfBundle(bundle)
 	return !access.IsExpired(timeNow) && !access.IsExhausted(timeNow)
 }
 
 // IsExpiredFile returns true if the file can no longer be served: the expiry timestamp passed, or
-// the download allowance is spent and the download window that spending it opened has closed. A
-// member of a folder is judged by its folder, not by itself - see DownloadAccessOf.
+// the download allowance itself is gone, regardless of whether a download window is still open
+// over it - see models.DownloadAccess.IsSpent. A member of a folder is judged by its folder, not
+// by itself - see DownloadAccessOf. This is the serving predicate; isExpiredFileWithoutDownload,
+// used only by the disposal path, keeps asking IsExhausted so content is never removed while a
+// live session token still points at it.
 func IsExpiredFile(file models.File, timeNow int64) bool {
 	access := DownloadAccessOf(file)
-	return access.IsExpired(timeNow) || access.IsExhausted(timeNow)
+	return access.IsExpired(timeNow) || access.IsSpent()
 }
 
 // isExpiredFileWithoutDownload returns true if there is no active download for an expired file
@@ -1747,67 +1846,6 @@ func DeleteFiles(files []models.File, deleteSource bool) {
 	if deleteSource {
 		go CleanUp(false)
 	}
-}
-
-// DeleteFileSchedule schedules a file for deletion after a specified delay and optionally deletes its source.
-// Returns true if scheduling is successful, false otherwise.
-func DeleteFileSchedule(fileId string, delayMs int, deleteSource bool) bool {
-	if fileId == "" {
-		return false
-	}
-	file, ok := database.GetMetaDataById(fileId)
-	if !ok {
-		return false
-	}
-	if file.IsDisposed() {
-		purgeFile(file.Id, "removed by owner")
-		return true
-	}
-	deletionTime := time.Now().Add(time.Duration(delayMs) * time.Millisecond).Unix()
-	file.PendingDeletion = deletionTime
-	database.SaveMetaData(file)
-	// Explicit parameter to avoid accidental changes
-	go func(id string, timestamp int64) {
-		time.Sleep(time.Duration(delayMs) * time.Millisecond)
-		// A new models.File needs to be assigned to avoid a racy mutation
-		retrievedFile, exists := database.GetMetaDataById(id)
-		if !exists {
-			return
-		}
-		// To prevent race conditions, it is checked if the deletion time is the same time that was originally set
-		if retrievedFile.PendingDeletion == timestamp {
-			DeleteFile(id, deleteSource)
-		}
-	}(fileId, deletionTime)
-	return true
-}
-
-// CancelPendingFileDeletion removes the pending deletion flag for a file identified by the given ID.
-//
-// Refuses once the record is disposed of, whatever the reason - IsDisposed(), not
-// Status() == StatusDeleted: Status reports "expired" or "downloaded" rather than "deleted" for
-// two of the three disposal reasons (see models.File.Status), and there is nothing to restore for
-// any of them either way, since the content is already gone. Also refuses once the record's
-// pending deletion timer has already elapsed and CleanUp simply has not caught up to it yet -
-// without that second check, a restore requested in the gap between the timer elapsing and the
-// next sweep would succeed and then be disposed of anyway moments later, silently undoing the
-// restore.
-//
-// Returns false if the file was not found, or if it can no longer be restored.
-func CancelPendingFileDeletion(fileId string) (models.File, bool) {
-	if fileId == "" {
-		return models.File{}, false
-	}
-	file, ok := database.GetMetaDataById(fileId)
-	if !ok {
-		return models.File{}, false
-	}
-	if file.IsDisposed() || file.Status(DownloadAccessOf(file), time.Now().Unix()) == models.StatusDeleted {
-		return models.File{}, false
-	}
-	file.PendingDeletion = 0
-	database.SaveMetaData(file)
-	return file, true
 }
 
 // MigratePlaintextFileNames converts any file name that a version predating encrypted file names
