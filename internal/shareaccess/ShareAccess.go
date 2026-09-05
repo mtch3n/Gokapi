@@ -299,12 +299,15 @@ func ValidateToken(rawToken string, resourceType int, resourceId string) (recipi
 	return recipient, firstUse, nil
 }
 
-// ConsumeDownload records one download against the recipient's own allowance.
-// It returns ErrDownloadsExhausted when nothing is left and no download window
-// is open, in which case the caller must not serve the resource. leeway is how
-// long a window stays open, in seconds; the caller resolves it for the resource
-// being served (see storage.LeewayFor) rather than this deciding it, so there
-// is one rule and only the window's length varies.
+// ConsumeDownload records one download against the recipient's own allowance. It returns
+// ErrDownloadsExhausted when nothing is left, in which case the caller must not serve the
+// resource. A request arriving inside the window a previous spend opened used to be let through
+// here for free - that free ride is gone (see the leeway-session-token plan, D24), superseded by
+// the download session token, which is stronger: it is re-checked against the grant on every use
+// and can be revoked mid-window. leeway is still accepted and still passed to
+// database.AcquireShareGrantDownload, which still records it against lastdownloadat for
+// disposal's sake (see models.DownloadAccess.WithShareGrants), but it no longer decides whether
+// this call succeeds.
 func ConsumeDownload(resourceType int, resourceId string, recipientId int, leeway int64) error {
 	granted, _ := database.AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), leeway)
 	if granted {
@@ -313,11 +316,12 @@ func ConsumeDownload(resourceType int, resourceId string, recipientId int, leewa
 	return ErrDownloadsExhausted
 }
 
-// IsExhausted reports whether this recipient has finished with the resource:
-// their own allowance is spent and the download window that spending it opened
-// has closed, so they may no longer see it at all. leeway is how long that
-// window stays open, in seconds; the caller resolves it for the resource in
-// question (see storage.LeewayFor), the same way ConsumeDownload takes it.
+// IsExhausted reports whether this recipient has finished with the resource: their own allowance
+// is spent, so they may no longer see it at all. Refused the instant it is spent now, not once a
+// window has also closed - that window used to keep a spent recipient visible and servable for
+// its length (D24), which is gone the same way ConsumeDownload's free ride is. leeway is still
+// accepted, matching ConsumeDownload's own signature, but models.ShareGrant.IsExhausted no
+// longer consults it.
 //
 // A recipient holding no grant at all is not exhausted - that is a membership
 // question, which HasShareGrant answers. This is only about someone who was

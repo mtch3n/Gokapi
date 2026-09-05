@@ -7,10 +7,12 @@ import (
 )
 
 // The owner's one download limit is each recipient's own budget, so a grant carries that number
-// and is spent against it alone. When it runs out the recipient is finished with the resource -
-// they stop seeing it as well as being refused it - but not before the download window that
-// spending their last one opened has closed, or a broken transfer would cost them the download
-// the window exists to protect.
+// and is spent against it alone. When it runs out the recipient is finished with the resource
+// immediately - they stop seeing it as well as being refused it (leeway-session-token plan, D24).
+// This used to wait out the download window that spending their last one opened, so a broken
+// transfer would not cost them the download; that job now belongs to the download session token,
+// which is stronger - it is re-checked against the grant on every use and can be revoked
+// mid-window, where a bare window bound to nothing but a timestamp could do neither.
 
 func TestShareGrantIsExhaustedCountsAgainstItsOwnAllowance(t *testing.T) {
 	grant := ShareGrant{DownloadsAllowed: 3, DownloadsUsed: 2}
@@ -27,13 +29,16 @@ func TestShareGrantIsNeverExhaustedWhenUnlimited(t *testing.T) {
 	test.IsEqualBool(t, grant.IsExhausted(1000, 0), false)
 }
 
-// The window is the same one every other resource follows: the recipient keeps their access for
-// the leeway after their last download, and loses it once that window closes.
-func TestShareGrantKeepsAccessUntilItsWindowCloses(t *testing.T) {
+// TestShareGrantIsExhaustedImmediatelyRegardlessOfLeeway used to be
+// TestShareGrantKeepsAccessUntilItsWindowCloses, and asserted the opposite: that the recipient
+// kept their access for the leeway after their last download, and lost it only once that window
+// closed. That expectation was deliberately inverted (D24) - a spent recipient is refused the
+// instant they are spent, and leeway no longer buys them anything here, however large it is.
+func TestShareGrantIsExhaustedImmediatelyRegardlessOfLeeway(t *testing.T) {
 	grant := ShareGrant{DownloadsAllowed: 2, DownloadsUsed: 2, LastDownloadAt: 1000}
 
-	test.IsEqualBool(t, grant.IsExhausted(1000, 3600), false)
-	test.IsEqualBool(t, grant.IsExhausted(4599, 3600), false)
+	test.IsEqualBool(t, grant.IsExhausted(1000, 3600), true)
+	test.IsEqualBool(t, grant.IsExhausted(4599, 3600), true)
 	test.IsEqualBool(t, grant.IsExhausted(4600, 3600), true)
 }
 

@@ -2291,9 +2291,11 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 		var name string
 		var expiresAt int64
 		var size int64
-		// grantLeeway is how long a download window stays open for this resource, which is what
-		// decides when a recipient who has spent their allowance actually stops seeing it - see
-		// the filter below. A secret has none, so it leaves the inbox the moment it is read.
+		// grantLeeway matches grant.IsExhausted's signature and the window storage.CleanUp still
+		// waits out before disposing the resource (D24), but it no longer decides when a
+		// recipient who has spent their allowance stops seeing it - see the filter below, which
+		// now refuses the instant the allowance is gone. A secret has no leeway at all, so it
+		// leaves the inbox the moment it is read, exactly as before.
 		grantLeeway := leeway
 
 		switch grant.ResourceType {
@@ -2328,11 +2330,14 @@ func apiShareInbox(w http.ResponseWriter, _ requestParser, user models.User, _ m
 			continue
 		}
 
-		// A recipient who has spent their own allowance is finished with this resource and stops
-		// seeing it entirely, while every other recipient's own budget carries on. Listing it
-		// anyway offered an Open link that could only fail - see models.ShareGrant.IsExhausted,
-		// which is the same rule the download itself is refused by, window included: a broken
-		// transfer can still be retried while that window is open, so the row survives with it.
+		// A recipient who has spent their own allowance is finished with this resource the instant
+		// they do, and stops seeing it entirely, while every other recipient's own budget carries
+		// on. Listing it anyway offered an Open link that could only fail - see
+		// models.ShareGrant.IsExhausted, the same rule the download itself is refused by. Used to
+		// keep the row listed for the length of the window a broken transfer could still be
+		// retried in (window included); that window is gone here too (D24), superseded by the
+		// download session token, so the row leaves the inbox at the same moment the download
+		// itself would refuse it.
 		if grant.IsExhausted(timeNow, grantLeeway) {
 			continue
 		}

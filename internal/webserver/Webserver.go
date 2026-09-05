@@ -1503,9 +1503,10 @@ func pubApiFileMetadata(w http.ResponseWriter, r *http.Request) {
 	if accessMode == models.AccessModeIdentity {
 		recipientId := shareaccess.RecipientFor(w, r, models.ShareResourceFile, keyId)
 		isAuthorisedRecipient = recipientId != 0
-		// A recipient who has spent their own allowance, and whose download window has closed
-		// with it, is finished with this file: they are no longer entitled to its name, its size
-		// or even its existence, however much budget the other recipients still have. Refused as
+		// A recipient who has spent their own allowance is finished with this file the instant
+		// they do - D24 removed the window that used to keep them looking at it for a while
+		// longer - and is no longer entitled to its name, its size or even its existence, however
+		// much budget the other recipients still have. Refused as
 		// "not found", exactly as an unknown id is - never as "forbidden" - and through
 		// respondPubApiNotFound so the rate limiter's delay applies too, or a real-but-finished
 		// id would answer faster than an invented one and say so.
@@ -2099,7 +2100,10 @@ func pubApiFolder(w http.ResponseWriter, r *http.Request) {
 	// yet filtered by servability. A member can carry its own, separate restriction
 	// independent of the bundle's.
 	allFiles := database.GetAllMetadata()
-	memberFiles := accessibleBundleMembers(w, r, bundleMembers(bundle.Id, allFiles))
+	// No folder token on this leg (D28 does not apply here - see accessibleBundleMembers'
+	// exemptRecipientId doc): this is the metadata listing, which mayAccessShare above already
+	// answered from a fresh cookie/token resolution, not from a folder session's claims.
+	memberFiles := accessibleBundleMembers(w, r, bundleMembers(bundle.Id, allFiles), 0)
 
 	// A bundle that cannot be served in full - no members at all, or the bundle itself expired
 	// or exhausted - must be indistinguishable from one that never existed: no name, and no
@@ -2354,7 +2358,17 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// fresh from the current request's own cookies/tokens regardless of whether a bundle-level
 	// session is also present: a folder token authorises the bundle, not a member's separate
 	// restriction.
-	members := accessibleBundleMembers(w, r, bundleMembers(bundle.Id, allFiles))
+	//
+	// exemptRecipientId is the token holder's own identity on the tokened leg (0 otherwise, D28):
+	// without it, a member whose own grant this same recipient's mint may have just spent would
+	// be exhausted the instant D24 stopped that exhaustion waiting out a window, and a retry
+	// re-running this filter would silently drop it. Every OTHER recipient's own grant on a
+	// member is still filtered by its real exhaustion, tokened leg or not.
+	var exemptRecipientId int
+	if tokened {
+		exemptRecipientId = bundleRecipientId
+	}
+	members := accessibleBundleMembers(w, r, bundleMembers(bundle.Id, allFiles), exemptRecipientId)
 
 	// Narrow to the requested set: either the explicit ids, validated as true members of
 	// this bundle, or every member. Membership is checked against the full true set, not a
@@ -2423,27 +2437,31 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	if len(requestedMembers) == 1 {
 		file := requestedMembers[0]
 		// A member that is itself identity-restricted spends its own recipient allowance, same
-		// as a direct single-file download would. Resolved fresh via RecipientFor rather than a
-		// narrower re-derivation, so it agrees with accessibleBundleMembers' own verdict for
-		// this exact member - see consumeShareDownload's doc comment for why the two must not
-		// diverge. This still runs on the tokened leg too: before D24 it is free for the rest of
-		// the recipient's own window regardless (see the leeway-session-token plan §6.3), and it
-		// is what keeps a DIFFERENT recipient's own member-level grant meaningful.
-		if !consumeShareDownload(models.ShareResourceFile, file.Id,
-			shareaccess.RecipientFor(w, r, models.ShareResourceFile, file.Id), leeway) {
-			respondPubApiNotFound(w, r)
-			return
-		}
-		// The per-recipient bundle allowance (ShareGrants), when the bundle is restricted to
-		// named recipients, is metered here alongside the file-level one above.
-		if !consumeShareDownload(models.ShareResourceBundle, bundle.Id, bundleRecipientId, leeway) {
-			respondPubApiNotFound(w, r)
-			return
-		}
-		// The folder's own visit allowance (models.FileBundle.DownloadsRemaining) is what a
-		// session token stands in for: D21 binds it to the bundle for the life of the window,
-		// so the tokened leg never spends it again - this is the ONLY spend the token skips.
+		// as a direct single-file download would - and the per-recipient bundle allowance
+		// (ShareGrants), when the bundle is restricted to named recipients, is metered here
+		// alongside it. Resolved fresh via RecipientFor rather than a narrower re-derivation, so
+		// it agrees with accessibleBundleMembers' own verdict for this exact member - see
+		// consumeShareDownload's doc comment for why the two must not diverge.
+		//
+		// Skipped on the tokened leg (D24), together with the folder's own visit allowance just
+		// below: both grants were already spent, or exempted from re-spending, at or before the
+		// mint, and charging them again on every retry would refuse the very retry a token exists
+		// to allow. D23's HasShareGrant re-check (above, at token verification) and D28's
+		// exhaustion exemption (accessibleBundleMembers, above) are what keep identity enforced
+		// on this leg instead.
 		if !tokened {
+			if !consumeShareDownload(models.ShareResourceFile, file.Id,
+				shareaccess.RecipientFor(w, r, models.ShareResourceFile, file.Id), leeway) {
+				respondPubApiNotFound(w, r)
+				return
+			}
+			if !consumeShareDownload(models.ShareResourceBundle, bundle.Id, bundleRecipientId, leeway) {
+				respondPubApiNotFound(w, r)
+				return
+			}
+			// The folder's own visit allowance (models.FileBundle.DownloadsRemaining) is what a
+			// session token stands in for: D21 binds it to the bundle for the life of the
+			// window, so the tokened leg never spends it again.
 			if !consumeBundleDownload(bundle) {
 				respondPubApiNotFound(w, r)
 				return
@@ -2463,12 +2481,15 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// partial state a concurrent request can catch it in.
 	filesToServeInZip := make([]models.File, 0, len(requestedMembers))
 	for _, file := range requestedMembers {
-		// A member that is itself identity-restricted also spends its own recipient
-		// allowance; refuse the whole request rather than excluding just this member.
-		if !consumeShareDownload(models.ShareResourceFile, file.Id,
-			shareaccess.RecipientFor(w, r, models.ShareResourceFile, file.Id), leeway) {
-			respondPubApiNotFound(w, r)
-			return
+		// A member that is itself identity-restricted also spends its own recipient allowance;
+		// refuse the whole request rather than excluding just this member. Skipped on the
+		// tokened leg (D24) - see the single-member branch above for why.
+		if !tokened {
+			if !consumeShareDownload(models.ShareResourceFile, file.Id,
+				shareaccess.RecipientFor(w, r, models.ShareResourceFile, file.Id), leeway) {
+				respondPubApiNotFound(w, r)
+				return
+			}
 		}
 		filesToServeInZip = append(filesToServeInZip, file)
 	}
@@ -2476,10 +2497,13 @@ func pubApiFolderZip(w http.ResponseWriter, r *http.Request) {
 	// The per-recipient bundle allowance (ShareGrants), when the bundle is restricted to named
 	// recipients, is metered here - after every member's own allowance above, and before the
 	// folder's own visit allowance just below, for the same "never burn an allowance on a
-	// request that is refused after this point" reasoning as the single-member branch.
-	if !consumeShareDownload(models.ShareResourceBundle, bundle.Id, bundleRecipientId, leeway) {
-		respondPubApiNotFound(w, r)
-		return
+	// request that is refused after this point" reasoning as the single-member branch. Skipped
+	// on the tokened leg (D24) for the same reason as that branch too.
+	if !tokened {
+		if !consumeShareDownload(models.ShareResourceBundle, bundle.Id, bundleRecipientId, leeway) {
+			respondPubApiNotFound(w, r)
+			return
+		}
 	}
 	// The folder's own visit allowance is spent once for the whole zip, not once per member -
 	// consumed last, immediately before ServeFilesAsZip can start writing bytes. This does not

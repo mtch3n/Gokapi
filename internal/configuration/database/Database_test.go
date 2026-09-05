@@ -778,11 +778,19 @@ func TestAcquireBundleDownloadNeverGrantsFree(t *testing.T) {
 	})
 }
 
-// TestAcquireShareGrantDownloadWindow covers the one window that is still granted on: a
-// recipient's own allowance, whose start the grant's lastdownloadat has always recorded. Unlike
-// AcquireDownload's, this window lives on one recipient's grant row and is therefore already
-// bound to an identity, so a free ride inside it cannot be taken by anyone else.
-func TestAcquireShareGrantDownloadWindow(t *testing.T) {
+// TestAcquireShareGrantDownloadNeverGrantsFree is TestAcquireDownloadNeverGrantsFree's recipient
+// twin (leeway-session-token plan, D24), and asserted the opposite of what it asserts now: that a
+// second request arriving soon after the first was served free because it landed inside the
+// window the first opened. That expectation was deliberately inverted. Unlike AcquireDownload's
+// window, this one was bound to an identity - one recipient's own grant row - so it was not the
+// production hole the anonymous window was, and was deliberately left standing at first for that
+// reason. It goes now because the download session token supersedes it and is stronger: both are
+// scoped to one resource, but this window could not be revoked mid-window and could not tell a
+// resume from a fresh request, where the token is re-checked against the grant on every use and
+// can be revoked between one request and the next. Resuming a genuine interrupted transfer
+// without paying twice is now the token's job, checked in the webserver layer, which never
+// reaches this call.
+func TestAcquireShareGrantDownloadNeverGrantsFree(t *testing.T) {
 	const leeway = 3600
 	runShareTypes(t, func() {
 		const file = models.ShareResourceFile
@@ -794,24 +802,24 @@ func TestAcquireShareGrantDownloadWindow(t *testing.T) {
 		test.IsEqualBool(t, granted, true)
 		test.IsEqualBool(t, opened, true)
 
+		// Immediately afterwards, well inside what used to be the leeway: refused, because the
+		// single allowance has already been spent. Previously this was granted for free, and
+		// opened reported it.
 		granted, opened = AcquireShareGrantDownload(file, "res-window", mona, timeNow+60, leeway)
-		test.IsEqualBool(t, granted, true)
+		test.IsEqualBool(t, granted, false)
 		test.IsEqualBool(t, opened, false)
 		for _, grant := range GetShareGrants(file, "res-window") {
 			test.IsEqualInt(t, grant.DownloadsUsed, 1)
 		}
-
-		granted, _ = AcquireShareGrantDownload(file, "res-window", mona, timeNow+leeway+1, leeway)
-		test.IsEqualBool(t, granted, false)
 
 		DeleteShareGrants(file, "res-window")
 		DeleteShareRecipient(mona)
 	})
 }
 
-// acquireGrantDownload records one download against a recipient's allowance with a leeway of 0,
-// so every call opens its own window and therefore spends one - the behaviour that applied before
-// download windows existed.
+// acquireGrantDownload records one download against a recipient's allowance. leeway is passed as
+// 0 for parity with the signature only - AcquireShareGrantDownload no longer grants a free ride
+// inside any window regardless of what leeway is (D24), so every call here genuinely spends.
 func acquireGrantDownload(resourceType int, resourceId string, recipientId int) bool {
 	granted, _ := AcquireShareGrantDownload(resourceType, resourceId, recipientId, time.Now().Unix(), 0)
 	return granted

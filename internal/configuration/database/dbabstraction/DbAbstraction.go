@@ -160,13 +160,15 @@ type Database interface {
 	// what it refers to.
 	DeleteShareGrants(resourceType int, resourceId string)
 
-	// AcquireShareGrantDownload atomically records one download by this recipient: the
-	// recipient's own allowance is spent only when this call opens a window, and a request
-	// inside an open window is granted for free. granted is false when the allowance is
-	// exhausted and no window is open, in which case the caller must not serve the resource. The
-	// grant's lastdownloadat is the window start. Unlike AcquireDownload, this window is safe to
-	// grant on, because it lives on one recipient's own grant row and is therefore already bound
-	// to an identity.
+	// AcquireShareGrantDownload atomically records one download by this recipient. granted is
+	// false when the allowance is already spent, in which case the caller must not serve the
+	// resource - there is no free ride any more for a request that merely arrives inside the
+	// window a previous spend opened (see the leeway-session-token plan, D24): that window used
+	// to make this call succeed for free, but the download session token supersedes it, stronger,
+	// so opened == granted in every provider now. leeway is still accepted, and lastdownloadat is
+	// still written on every successful spend - it feeds models.DownloadAccess.WithShareGrants'
+	// WindowOpenedAt, which is what keeps storage.CleanUp from disposing a resource while a live
+	// token could still retry against it.
 	AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (granted, opened bool)
 
 	// SaveShareLoginToken stores a magic link.

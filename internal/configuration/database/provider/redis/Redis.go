@@ -442,9 +442,10 @@ func (p DatabaseProvider) increaseHashmapIntField(id string, field string) {
 //
 // It never grants for free. The stamped window is written because the disposal delay reads it,
 // not because anything grants on it: the resource id alone identifies nobody, so a free ride
-// inside an open window would make a capped resource unlimited for anyone holding its link. A
-// recipient's own grant row is a different matter - see AcquireShareGrantDownload in
-// sharerecipients.go, which keeps its window because that window is already bound to an identity.
+// inside an open window would make a capped resource unlimited for anyone holding its link.
+// AcquireShareGrantDownload in sharerecipients.go now follows the same rule for a recipient's own
+// grant row: it used to grant inside the window on the argument that the window was already bound
+// to an identity, until the download session token replaced that with something revocable (D24).
 //
 // The whole sequence runs as a single Lua script, which Redis executes atomically - this is what
 // keeps the operation safe even with multiple Gokapi instances sharing this Redis server.
