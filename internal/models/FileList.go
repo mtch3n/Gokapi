@@ -167,7 +167,12 @@ func (a DownloadAccess) IsSpent() bool {
 //
 // WindowOpenedAt is the most recent window any recipient opened, so a resource is never disposed
 // of while somebody's broken transfer could still be retried - the same rule a resource without
-// recipients follows, with only the counter it reads differing.
+// recipients follows, with only the counter it reads differing. This is the window's only
+// remaining job here (D24): ShareGrant.IsExhausted, the per-recipient serving predicate, no
+// longer reads it at all - a recipient is refused the instant their own allowance is spent, not
+// when this window next closes - but storage.CleanUp still reads WindowOpenedAt through
+// DownloadAccess.IsExhausted, so disposal still waits out the window a live download session
+// token could still be retried against.
 func (a DownloadAccess) WithShareGrants(grants []ShareGrant) DownloadAccess {
 	downloadsRemaining := 0
 	unlimitedDownloads := false

@@ -459,7 +459,9 @@ func SetShareGrants(resourceType int, resourceId string, recipientIds []int, gra
 }
 
 // AcquireShareGrantDownload atomically records one download by this recipient, returning
-// granted=false when their allowance is exhausted and no download window is open.
+// granted=false when their allowance is already spent - there is no free ride any more for a
+// request that merely arrives inside the window a previous spend opened (D24); see the provider
+// implementation for why.
 func AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
 	return db.AcquireShareGrantDownload(resourceType, resourceId, recipientId, timeNow, leeway)
 }

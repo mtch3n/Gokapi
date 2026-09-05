@@ -785,3 +785,153 @@ func TestFolderTokenRefusesMemberRemovedMidWindow(t *testing.T) {
 	defer resp2.Body.Close()
 	test.IsEqualInt(t, resp2.StatusCode, http.StatusOK)
 }
+
+// TestFolderTokenRetryOnRecipientRestrictedMemberSpendsNothing pins D24 and D28 together, and is
+// the "with a token" half of the pair this whole commit exists to prove: once the free ride is
+// gone from AcquireShareGrantDownload, a bundle member that ALSO carries its own separate
+// recipient restriction - independent of the bundle's - must still be retryable through a valid
+// folder token, spending nothing on the retry. Without D24's skip on the tokened leg, the second
+// GET below would try to re-spend an allowance that is already gone and be refused; without D28's
+// exemption in accessibleBundleMembers, the member would already have vanished from the very
+// first GET, the instant its own grant's exhaustion stopped waiting out a window.
+func TestFolderTokenRetryOnRecipientRestrictedMemberSpendsNothing(t *testing.T) {
+	setDownloadSessionLeeway(t, "5m")
+	bundle := filebundle.Create("sessionD28Bundle_"+helper.GenerateRandomString(8), 999)
+	t.Cleanup(func() { filebundle.Delete(bundle) })
+
+	member := models.File{
+		Id:            "sessionD28Member_" + helper.GenerateRandomString(12),
+		Name:          "member_d28.txt",
+		Size:          "3 B",
+		SizeBytes:     3,
+		SHA1:          "e017693e4a04a59d0b0f400fe98177fe7ee13cf7",
+		ExpireAt:      2147483646,
+		UnlimitedTime: true,
+		ContentType:   "text/plain",
+		UserId:        999,
+		BundleId:      bundle.Id,
+	}
+	database.SaveMetaData(member)
+	t.Cleanup(func() { database.DeleteMetaData(member.Id) })
+
+	recipientId := database.SaveShareRecipient(models.ShareRecipient{
+		Email: "d28-retry@example.com", CreatedAt: time.Now().Unix(),
+	})
+	// The bundle itself is restricted to this recipient for one visit, and - independently - so
+	// is this one member: two separate grants naming the same person, exactly the shape D28's own
+	// justification describes.
+	database.SetShareGrants(models.ShareResourceBundle, bundle.Id, []int{recipientId}, 999, 1)
+	database.SetShareGrants(models.ShareResourceFile, member.Id, []int{recipientId}, 999, 1)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceBundle, bundle.Id)
+		database.DeleteShareGrants(models.ShareResourceFile, member.Id)
+		database.DeleteShareRecipient(recipientId)
+	})
+
+	cookie := testShareAccessCookie(models.ShareResourceBundle, bundle.Id, recipientId)
+	_, parsed := postFolderSession(t, bundle.Id, cookie)
+	if parsed.Session == "" {
+		t.Fatalf("expected a session token")
+	}
+
+	// The mint spent the bundle-level grant - the only one it knows how to spend, since a folder
+	// token binds the bundle, not any member id (D21). The member's own separate grant is
+	// necessarily untouched by it.
+	bundleGrants := database.GetShareGrants(models.ShareResourceBundle, bundle.Id)
+	test.IsEqualInt(t, len(bundleGrants), 1)
+	test.IsEqualInt(t, bundleGrants[0].DownloadsUsed, 1)
+	memberGrants := database.GetShareGrants(models.ShareResourceFile, member.Id)
+	test.IsEqualInt(t, len(memberGrants), 1)
+	test.IsEqualInt(t, memberGrants[0].DownloadsUsed, 0)
+
+	client := noRedirectClient()
+	url := urlIp + "/pubapi/folderzip?id=" + bundle.Id + "&ids=" + member.Id + "&session=" + parsed.Session
+	for i := 0; i < 2; i++ {
+		resp, err := client.Get(url)
+		if err != nil {
+			t.Fatalf("attempt %d: request failed: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		test.IsEqualInt(t, resp.StatusCode, http.StatusOK)
+		test.IsEqualString(t, string(body), "789")
+	}
+
+	// Neither grant moved: the tokened leg skips both consumeShareDownload calls (D24), so two
+	// full retries after the mint still leave both at exactly what the mint itself left them at.
+	bundleGrants = database.GetShareGrants(models.ShareResourceBundle, bundle.Id)
+	test.IsEqualInt(t, bundleGrants[0].DownloadsUsed, 1)
+	memberGrants = database.GetShareGrants(models.ShareResourceFile, member.Id)
+	test.IsEqualInt(t, memberGrants[0].DownloadsUsed, 0)
+}
+
+// TestRecipientRetryWithoutTokenNowRefused is the "without a token" half of the pair: a recipient
+// who has spent their own allowance and returns with no session token at all, well inside what
+// used to be their free-ride window, is now refused instead of served for free (D24). The file is
+// shared with a second recipient too, specifically so the file's own AGGREGATE counter cannot be
+// what refuses this - it still has budget, through the second recipient - and the refusal can only
+// be the first recipient's own grant, exhausted immediately rather than after a window closes.
+func TestRecipientRetryWithoutTokenNowRefused(t *testing.T) {
+	setDownloadSessionLeeway(t, "5m")
+	file := newSessionTestFile(t, 1, false)
+
+	spent := database.SaveShareRecipient(models.ShareRecipient{
+		Email: "retry-no-token-spent@example.com", CreatedAt: time.Now().Unix(),
+	})
+	waiting := database.SaveShareRecipient(models.ShareRecipient{
+		Email: "retry-no-token-waiting@example.com", CreatedAt: time.Now().Unix(),
+	})
+	database.SetShareGrants(models.ShareResourceFile, file.Id, []int{spent, waiting}, 999, 1)
+	t.Cleanup(func() {
+		database.DeleteShareGrants(models.ShareResourceFile, file.Id)
+		database.DeleteShareRecipient(spent)
+		database.DeleteShareRecipient(waiting)
+	})
+	cookie := testShareAccessCookie(models.ShareResourceFile, file.Id, spent)
+
+	client := noRedirectClient()
+	url := urlIp + "/downloadFile?id=" + file.Id
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	test.IsNil(t, err)
+	req.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
+
+	first, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("first request failed: %v", err)
+	}
+	firstBody, _ := io.ReadAll(first.Body)
+	first.Body.Close()
+	test.IsEqualInt(t, first.StatusCode, http.StatusOK)
+	test.IsEqualString(t, string(firstBody), "789")
+
+	grants := database.GetShareGrants(models.ShareResourceFile, file.Id)
+	for _, grant := range grants {
+		if grant.RecipientId == spent {
+			test.IsEqualInt(t, grant.DownloadsUsed, 1)
+		}
+	}
+
+	// Immediately afterwards, well inside the 5-minute leeway, with no session parameter at all:
+	// previously served free because the grant's own window was still open. Now refused, the same
+	// redirect-to-/error the tokenless leg has always answered a spent file with.
+	req2, err := http.NewRequest(http.MethodGet, url, nil)
+	test.IsNil(t, err)
+	req2.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
+	second, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("second request failed: %v", err)
+	}
+	second.Body.Close()
+	test.IsEqualInt(t, second.StatusCode, http.StatusTemporaryRedirect)
+
+	// The refusal spent nothing further, and the second (waiting) recipient is untouched.
+	grants = database.GetShareGrants(models.ShareResourceFile, file.Id)
+	for _, grant := range grants {
+		if grant.RecipientId == spent {
+			test.IsEqualInt(t, grant.DownloadsUsed, 1)
+		}
+		if grant.RecipientId == waiting {
+			test.IsEqualInt(t, grant.DownloadsUsed, 0)
+		}
+	}
+}

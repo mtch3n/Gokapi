@@ -137,11 +137,15 @@ func shareAccessMode(file models.File) string {
 // makes the explicit re-check this function used to do redundant now that every caller is
 // required to have gone through it first.
 //
-// Returns false when the allowance is exhausted and no download window is open, in which case the
-// caller must not serve the file, or when the resource is restricted but no recipientId was
-// resolved. For an unrestricted resource there is no per-recipient allowance and this is a no-op,
-// leaving the existing per-file counter as the only limit. leeway is the window length the caller
-// resolved for the resource being served (see storage.LeewayFor), in seconds.
+// Returns false when the allowance is already exhausted, in which case the caller must not serve
+// the file, or when the resource is restricted but no recipientId was resolved. A request
+// arriving inside the window a previous spend opened used to be let through here for free; that
+// free ride is gone (see the leeway-session-token plan, D24), superseded by the download session
+// token, which is stronger. For an unrestricted resource there is no per-recipient allowance and
+// this is a no-op, leaving the existing per-file counter as the only limit. leeway is still the
+// window length the caller resolves for the resource being served (see storage.LeewayFor), in
+// seconds, passed through to shareaccess.ConsumeDownload for its disposal-side bookkeeping, but it
+// no longer decides whether this call succeeds.
 func consumeShareDownload(resourceType int, resourceId string, recipientId int, leeway int64) bool {
 	if !database.IsShareRestricted(resourceType, resourceId) {
 		return true
@@ -173,9 +177,26 @@ func recipientGrantStillValid(resourceType int, resourceId string, recipientId i
 // bundle it happens to sit in. Such a member must stay invisible to a bundle recipient who
 // is not also on the file's own list - the bundle grant is not a substitute for the file's.
 // For a member with no restriction of its own this is a no-op, matching mayAccessShare.
-func accessibleBundleMembers(w http.ResponseWriter, r *http.Request, members []models.File) []models.File {
+//
+// exemptRecipientId is the folder token holder's own recipient id on the tokened leg (0
+// otherwise - see pubApiFolderZip's call site, D28). D24 made a recipient's own exhaustion
+// refuse immediately rather than after a window closes, which is correct everywhere except
+// here: a folder token proves this identity already spent (or was exempted from spending) for
+// the life of the window, so re-deriving a fresh cookie-based identity for THIS member and
+// then refusing it for being exhausted would silently drop a member the mint already paid for.
+// Checked directly against HasShareGrant instead of going through mayAccessShare/RecipientFor,
+// since the token - not a cookie this request may not even carry for this specific file - is
+// the identity here. Every OTHER recipient's own grant on a member is unaffected and still
+// filtered by mayAccessShare's real exhaustion check, exactly as before.
+func accessibleBundleMembers(w http.ResponseWriter, r *http.Request, members []models.File, exemptRecipientId int) []models.File {
 	result := make([]models.File, 0, len(members))
 	for _, file := range members {
+		if exemptRecipientId != 0 && database.IsShareRestricted(models.ShareResourceFile, file.Id) {
+			if database.HasShareGrant(models.ShareResourceFile, file.Id, exemptRecipientId) {
+				result = append(result, file)
+			}
+			continue
+		}
 		if mayAccessShare(w, r, models.ShareResourceFile, file.Id) {
 			result = append(result, file)
 		}

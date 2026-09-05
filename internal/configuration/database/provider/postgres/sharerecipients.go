@@ -295,58 +295,30 @@ func (p DatabaseProvider) DeleteShareGrants(resourceType int, resourceId string)
 // Login tokens and sessions
 // ---------------------------------------------------------------------------
 
-// AcquireShareGrantDownload atomically records one download by this recipient, in three steps:
-// serve free inside an open window, otherwise open a window and spend an allowance, otherwise
-// re-check the window because a concurrent caller may have opened one in between. The third step
-// is what makes two simultaneous first requests both succeed: exactly one opens the window, the
-// other loses the conditional UPDATE and finds the winner's window on the re-check.
+// AcquireShareGrantDownload atomically records one download by this recipient: the allowance is
+// spent, or it is not, with no free ride for a request that merely arrives inside the window its
+// own previous spend opened - that free ride used to be this function's whole point (see the
+// leeway-session-token plan, D24) but is gone now, superseded by the download session token,
+// which is stronger: it is re-checked against the grant on every use and can be revoked
+// mid-window, where this window could do neither.
 //
-// The grant's lastdownloadat, which this already wrote before windows existed, is the window
-// start. A downloadsallowed of 0 means unlimited.
-//
-// This is the one window still granted on. metadata.go's AcquireDownload dropped its own, because
-// a file id identifies nobody and a free ride keyed on it uncaps the file for anyone with the
-// link. This window is keyed on one recipient's grant row, so it is already bound to an identity
-// and no one else can ride it.
+// leeway is accepted but no longer consulted here - the caller still resolves and passes it
+// (see shareaccess.ConsumeDownload), and grants opened == granted in every provider now that
+// there is nothing left to distinguish them. lastdownloadat is still written on every successful
+// spend: it feeds models.DownloadAccess.WithShareGrants' WindowOpenedAt, which is what keeps
+// storage.CleanUp from disposing a resource while a live token could still retry against it - the
+// window's disposal role, unlike its old serving role, is unchanged. A downloadsallowed of 0
+// means unlimited.
 func (p DatabaseProvider) AcquireShareGrantDownload(resourceType int, resourceId string, recipientId int, timeNow, leeway int64) (bool, bool) {
-	windowOpenSince := timeNow - leeway
-	if p.isShareGrantWindowOpen(resourceType, resourceId, recipientId, windowOpenSince) {
-		return true, false
-	}
 	result, err := p.exec(`UPDATE ShareGrants
 		SET downloadsused = downloadsused + 1, lastdownloadat = $1
 		WHERE resourcetype = $2 AND resourceid = $3 AND recipientid = $4
-		  AND (downloadsallowed = 0 OR downloadsused < downloadsallowed)
-		  AND lastdownloadat <= $5`,
-		timeNow, resourceType, resourceId, recipientId, windowOpenSince)
+		  AND (downloadsallowed = 0 OR downloadsused < downloadsallowed)`,
+		timeNow, resourceType, resourceId, recipientId)
 	helper.Check(err)
 	affected, err := result.RowsAffected()
 	helper.Check(err)
-	if affected > 0 {
-		return true, true
-	}
-	return p.isShareGrantWindowOpen(resourceType, resourceId, recipientId, windowOpenSince), false
-}
-
-// isShareGrantWindowOpen reports whether the grant's most recent download window is still open.
-// Read with a SELECT rather than the row count of a no-op UPDATE, because this runs on the free
-// path of every request inside a window and must not write: an UPDATE would leave a dead tuple
-// behind per request, for a check that changes nothing. Reading it separately from the UPDATE
-// that follows is safe because lastdownloadat only ever moves forward, so a window seen open
-// cannot have closed again by the time the caller acts on it.
-func (p DatabaseProvider) isShareGrantWindowOpen(resourceType int, resourceId string, recipientId int, windowOpenSince int64) bool {
-	var lastDownloadAt int64
-	row := p.queryRow(`SELECT lastdownloadat FROM ShareGrants
-		WHERE resourcetype = $1 AND resourceid = $2 AND recipientid = $3`, resourceType, resourceId, recipientId)
-	err := row.Scan(&lastDownloadAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false
-		}
-		helper.Check(err)
-		return false
-	}
-	return lastDownloadAt > windowOpenSince
+	return affected > 0, affected > 0
 }
 
 // SaveShareLoginToken stores a magic link.

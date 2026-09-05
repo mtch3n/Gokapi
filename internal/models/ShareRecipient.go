@@ -72,31 +72,30 @@ type ShareGrant struct {
 	LastDownloadAt int64 `json:"lastDownloadAt" redis:"LastDownloadAt"`
 }
 
-// IsExhausted reports whether this recipient is finished with the resource:
-// their own allowance is spent and the download window that spending it opened
-// has closed. leeway is how long that window stays open, in seconds, resolved
-// by the caller for the resource in question (see storage.LeewayFor) exactly as
-// shareaccess.ConsumeDownload takes it, so there is one rule and only the
-// window's length varies.
+// IsExhausted reports whether this recipient is finished with the resource: their own allowance
+// is spent. Refuses the instant it is - this used to also wait out the leeway window that
+// spending it opened, so a recipient who had spent their allowance kept being served free inside
+// their own window (see the leeway-session-token plan, D24). That window is gone: the download
+// session token supersedes it, and is stronger - it is re-checked against the grant on every use
+// and can be revoked mid-window, where a bare window bound to nothing but a timestamp could do
+// neither. timeNow and leeway are still accepted, matching shareaccess.ConsumeDownload's own
+// signature, but neither is consulted any more.
 //
-// It is the recipient-level twin of DownloadAccess.IsExhausted and defers to it
-// rather than restating the test, so that "may this recipient still see it" and
-// "may this resource still be served" can never drift apart.
+// It is the recipient-level twin of DownloadAccess.IsSpent now, not IsExhausted - the disposal
+// predicate keeps its window (see WithShareGrants and storage.CleanUp), but the serving one no
+// longer does, here exactly as it already did not for a resource with no recipients.
 //
-// Exhaustion is strictly per recipient and revokes only that recipient: they
-// stop seeing the resource at all - in their inbox and in the public metadata
-// alike - while every other recipient's budget, and the resource's own
-// lifetime, are untouched. Enforcing a download still goes through the
-// database, which applies the same test atomically; deciding here and acting
+// Exhaustion is strictly per recipient and revokes only that recipient: they stop seeing the
+// resource at all - in their inbox and in the public metadata alike - while every other
+// recipient's budget, and the resource's own lifetime, are untouched. Enforcing a download still
+// goes through the database, which applies the same test atomically; deciding here and acting
 // later would let two concurrent requests both pass.
 func (g ShareGrant) IsExhausted(timeNow, leeway int64) bool {
 	access := DownloadAccess{
 		DownloadsRemaining: g.DownloadsAllowed - g.DownloadsUsed,
 		UnlimitedDownloads: g.DownloadsAllowed == 0,
-		WindowOpenedAt:     g.LastDownloadAt,
-		Leeway:             leeway,
 	}
-	return access.IsExhausted(timeNow)
+	return access.IsSpent()
 }
 
 // ShareLoginToken is the magic link mailed to one recipient for one resource.
